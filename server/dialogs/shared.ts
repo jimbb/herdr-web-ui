@@ -105,6 +105,7 @@ type Responder =
   | "omp-model"
   | "hermes-question"
   | "hermes-input"
+  | "kiro-approval"
   | "hermes-help"
   | "hermes-status"
   | "hermes-version"

@@ -6,6 +6,7 @@ import { OMO_FOOTER_LINES, OMO_HINT_LINES, OMO_NOT_FOOTER_RE, OMO_OPTIONS_HINT_R
 import { CLAUDE_ASK_HINT_RE, CLAUDE_CONFIRM_HINT_RE, CLAUDE_EFFORT_HINT_RE, claudeModelListWaits, withoutClaudeSidePanel, withoutClaudeTasks } from "./claude.ts";
 import { OMP_CLIPPED_SINGLE_HINT_RE, OMP_MULTI_CLIPPED_HINT_RE, OMP_MULTI_HINT_RE, OMP_REVIEW_HINT_RE, OMP_SINGLE_CLIPPED_HINT_RE, OMP_SINGLE_HINT_RE, ompApprovalPanelShown } from "./omp.ts";
 import { HERMES_HINT_RE } from "./hermes.ts";
+import { KIRO_APPROVAL_HINT_RE } from "./kiro.ts";
 import { PI_INPUT_HINT_RE, PI_MENU_HINT_RE, PI_THINKING_HINT_LINES } from "./pi.ts";
 import { openCodeV1QuestionActive } from "./opencode.ts";
 import { isPiQuestionnaireScreen } from "./pi-questionnaire.ts";
@@ -117,6 +118,7 @@ export function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolea
   if (prompt.responder === "codex-approval") return ends(/press enter to confirm|esc to cancel|enter continue\s*·\s*esc (?:back|quit)$|^(?:[›>❯]\s*)?\d+\.\s+(?:No|Reject|Cancel|Deny)\b/i);
   // the panel (with 18.13's composer under it), or the older Approve/Deny menu's rows
   if (prompt.responder === "omp-approval") return ompApprovalPanelShown(screen) || ends(/^(?:[›>❯•]\s*)?(?:Approve|Deny)$|esc.*cancel/i);
+  if (prompt.responder === "kiro-approval") return ends(KIRO_APPROVAL_HINT_RE);
   // Claude Code 2.1.29x ends with "Esc to cancel", optionally followed by its stop-agents
   // chord. Anchor that suffix so arbitrary trailing text cannot keep an old approval live.
   if (prompt.responder === "claude-approval") return ends(/esc to cancel.*(?:tab|ctrl\+e)|ctrl\+e to explain|^esc to cancel(?:\s*·\s*ctrl\+x ctrl\+k twice to stop background agents)?$/i);
