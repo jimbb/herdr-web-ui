@@ -19,7 +19,7 @@ export interface ReaderContext {
 }
 
 /** The agents whose screens the prompt read parses (readKnownPrompt); any other agent's card is the fallback card alone. */
-export const SCREEN_READ_AGENTS: ReadonlySet<string> = new Set(["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "cmd", "opencode", "letta", ""]);
+export const SCREEN_READ_AGENTS: ReadonlySet<string> = new Set(["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", "letta", ""]);
 
 /**
  * A picker of its own that has an agent's input while herdr may report it at rest (agentPickerOwnsScreen), for agents

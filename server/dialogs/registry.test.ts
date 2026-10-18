@@ -45,6 +45,7 @@ const snapshot: Record<string, readonly [DialogReader["reread"], DialogReader["l
   "hermes-input": ["none", "none"],
   "hermes-approval": ["none", "none"],
   "agy-question": ["none", "none"],
+  "kiro-approval": ["none", "none"],
   "cmd-question": ["before-commit", "none"],
   "opencode-question": ["before-commit", "none"],
   "opencode-v1-question": ["none", "none"],

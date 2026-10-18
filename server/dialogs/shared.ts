@@ -109,6 +109,7 @@ type Responder =
   | "hermes-input"
   | "agy-question"
   | "hermes-approval"
+  | "kiro-approval"
   | "hermes-help"
   | "hermes-status"
   | "hermes-version"
