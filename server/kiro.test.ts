@@ -109,6 +109,52 @@ describe("parseKiroTranscript", () => {
     expect(turns[2]!.parts).toEqual([{ kind: "text", text: "second" }]);
   });
 
+  it("keeps one user prompt's tool steps and its closing reply as a single turn", () => {
+    // kiro records several AssistantMessage steps per reply: tool steps, then a tool-less close.
+    // They all belong to ONE turn (the model working on one request), not several.
+    const transcript = jsonl(
+      prompt("do the thing"),
+      assistant(text("step one"), toolUse("t1", "read", { path: "/a" })),
+      toolResults([{ id: "t1", text: "contents" }]),
+      assistant(text("step two"), toolUse("t2", "executeBash", { command: "make" })),
+      toolResults([{ id: "t2", text: "built" }]),
+      assistant(text("All done — it works.")), // tool-less: closes the turn
+    );
+    const turns = parseKiroTranscript(transcript);
+    expect(turns.map((t) => t.role)).toEqual(["user", "assistant"]);
+    const asst = turns[1]!;
+    // two tools folded into the one turn, and the closing text tagged final_answer
+    expect(asst.parts.filter((p) => p.kind === "tool").length).toBe(2);
+    const finalText = asst.parts.filter((p) => p.kind === "text").at(-1);
+    expect(finalText).toMatchObject({ kind: "text", text: "All done — it works.", phase: "final_answer" });
+  });
+
+  it("splits a multi-prompt exchange into alternating turns, each with its own answer", () => {
+    // the regression: without splitting, this collapsed into one giant assistant turn whose
+    // single folded work block swallowed every earlier answer, so it did not read as a chat
+    const reply = (answer: string) => [
+      assistant(text("let me look"), toolUse("t", "read", { path: "/x" })),
+      toolResults([{ id: "t", text: "data" }]),
+      assistant(text(answer)),
+    ];
+    const transcript = jsonl(
+      prompt("question A", 1),
+      ...reply("Answer A."),
+      prompt("question B", 2),
+      ...reply("Answer B."),
+    );
+    const turns = parseKiroTranscript(transcript);
+    expect(turns.map((t) => t.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    const answers = turns
+      .filter((t) => t.role === "assistant")
+      .map((t) => (t.parts.filter((p) => p.kind === "text").at(-1) as { text: string }).text);
+    expect(answers).toEqual(["Answer A.", "Answer B."]);
+    // each assistant turn carries its own tool (not all folded into one)
+    for (const t of turns.filter((t) => t.role === "assistant")) {
+      expect(t.parts.filter((p) => p.kind === "tool").length).toBe(1);
+    }
+  });
+
   it("honors maxTurns by keeping the last N", () => {
     const transcript = jsonl(
       prompt("one"), assistant(text("a")),

@@ -248,19 +248,43 @@ function resultOutcome(rich: RecordValue): string | undefined {
  * Fold a kiro session jsonl into conversation turns. Append-only and
  * self-contained, so one forward pass pairs each ToolResults record to the
  * toolUse it answers by `toolUseId`. `maxTurns` keeps only the last N.
+ *
+ * Turn boundaries mirror the other agents: kiro-cli records one `AssistantMessage`
+ * per model reply step. A step that calls tools is followed by a `ToolResults`
+ * record and more steps; a step with NO tool call is the model's final reply and
+ * ends the turn — every such step is immediately followed by the next user
+ * `Prompt` (or the end of the session). So a tool-less `AssistantMessage` closes
+ * the current assistant turn (its trailing text tagged `final_answer`), and the
+ * next `AssistantMessage` opens a fresh one. Without this split a whole exchange
+ * of several replies would collapse into one turn, folding every earlier answer
+ * into a single work block instead of reading as a conversation.
  */
 export function parseKiroTranscript(text: string, maxTurns = Infinity): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   let current: ConversationTurn | undefined;
+  // once a tool-less reply closes the assistant turn, the next AssistantMessage starts a new one
+  let turnComplete = false;
   // tool parts awaiting their ToolResults, keyed by toolUseId
   const pending = new Map<string, Tool>();
 
-  const ensureAssistant = (ts: string | null): ConversationTurn => {
-    if (!current || current.role !== "assistant") {
-      current = { role: "assistant", ts, parts: [] };
+  const openAssistant = (): ConversationTurn => {
+    if (!current || current.role !== "assistant" || turnComplete) {
+      current = { role: "assistant", ts: null, parts: [] };
       turns.push(current);
+      turnComplete = false;
     }
     return current;
+  };
+
+  /** The last non-empty text part of a turn: the model's answer for this reply. */
+  const markFinalAnswer = (turn: ConversationTurn): void => {
+    for (let i = turn.parts.length - 1; i >= 0; i -= 1) {
+      const part = turn.parts[i]!;
+      if (part.kind === "text" && part.text.trim()) {
+        part.phase = "final_answer";
+        return;
+      }
+    }
   };
 
   for (const line of text.split("\n")) {
@@ -278,21 +302,25 @@ export function parseKiroTranscript(text: string, maxTurns = Infinity): Conversa
     if (kind === "Prompt") {
       const textValue = blocksToText(data.content);
       const ts = isoFromEpochSeconds(record(data.meta).timestamp);
-      // a prompt opens a turn; tool results for the previous turn have already landed
+      // a prompt opens a user turn; tool results for the previous turn have already landed
       current = { role: "user", ts, parts: textValue ? [{ kind: "text", text: textValue }] : [] };
       turns.push(current);
+      turnComplete = false;
       pending.clear();
       continue;
     }
 
     if (kind === "AssistantMessage") {
-      const turn = ensureAssistant(null);
+      const turn = openAssistant();
       const content = Array.isArray(data.content) ? data.content : [];
+      let hasToolUse = false;
       for (const block of content) {
         const b = record(block);
         if (b.kind === "text" && typeof b.data === "string" && b.data.trim()) {
+          // narration before a tool call is commentary (folded into the work block); the
+          // reply's closing text is tagged final_answer below, once we know it calls no tool
           const last = turn.parts.at(-1);
-          if (last?.kind === "text") last.text += b.data;
+          if (last?.kind === "text" && last.phase !== "final_answer") last.text += b.data;
           else turn.parts.push({ kind: "text", text: b.data });
         } else if (b.kind === "thinking") {
           const d = record(b.data);
@@ -302,6 +330,7 @@ export function parseKiroTranscript(text: string, maxTurns = Infinity): Conversa
           else if (Array.isArray(d.redactedContent) && d.redactedContent.length > 0)
             turn.parts.push({ kind: "thinking", text: "[reasoning]" });
         } else if (b.kind === "toolUse") {
+          hasToolUse = true;
           const d = record(b.data);
           const id = str(d.toolUseId) || str(d.id);
           const name = str(d.name) || str(d.tool) || "tool";
@@ -321,11 +350,17 @@ export function parseKiroTranscript(text: string, maxTurns = Infinity): Conversa
           if (id) pending.set(id, part);
         }
       }
+      // a reply that called no tool is the model's final answer: tag it and close the turn,
+      // so the next AssistantMessage begins the next reply as its own turn
+      if (!hasToolUse) {
+        markFinalAnswer(turn);
+        turnComplete = true;
+      }
       continue;
     }
 
     if (kind === "ToolResults") {
-      const turn = ensureAssistant(null);
+      const turn = openAssistant();
       const content = Array.isArray(data.content) ? data.content : [];
       const results = record(data.results);
       for (const block of content) {
