@@ -48,6 +48,7 @@ import { processStartedAt } from "./process-start.ts";
 import { ompHeldTranscript } from "./omp.ts";
 import { forgetOpencodeRead, forgetOpencodeState, OPENCODE_IMAGE_REF, opencodeConversation, opencodeDatabasePath, opencodeImage, opencodeReadKey, opencodeSessionId, opencodeToolOutput } from "./opencode.ts";
 import { piTranscriptInStore, piTranscriptPath, unwrittenSession } from "./pi.ts";
+import { parseKiroTranscript, resolveKiroTranscript } from "./kiro.ts";
 import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
 import { forgetGrokState, grokProjection, grokToolOutput, parseGrokTranscript, GrokUnavailable } from "./grok.ts";
 import { resolveGrokStore } from "./grok-store.ts";
@@ -494,7 +495,7 @@ export class HistoryChanged extends Error {
 /** What paneConversation resolved: which store the turns came from, and where they start. */
 export type RecognizedConversation = {
   activity?: "thinking" | "working" | "idle";
-  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript";
+  source: "grok-transcript" | "agy-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "codex-transcript" | "kiro-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript";
   turns: ConversationTurn[];
   metadata: ConversationMetadata;
   /** the first turn's position, for the page before it; null at the conversation's beginning */
@@ -684,6 +685,7 @@ const TURN_MARK: Record<StreamSource, Buffer> = {
   "omo-transcript": Buffer.from('"user"'),
   "gjc-transcript": Buffer.from('"user"'),
   "pi-transcript": Buffer.from('"user"'),
+  "kiro-transcript": Buffer.from('"Prompt"'),
 };
 
 /**
@@ -697,6 +699,13 @@ function opensTurn(source: StreamSource, line: string): boolean {
   try { entry = JSON.parse(line); } catch { return false; }
   if (entry === null || typeof entry !== "object") return false;
   if (source === "codex-transcript") return entry.type === "event_msg" && entry.payload?.type === "task_started";
+  if (source === "kiro-transcript") {
+    const kiro = entry as { kind?: unknown; data?: { content?: unknown } };
+    if (kiro.kind !== "Prompt") return false;
+    const content = kiro.data?.content;
+    return Array.isArray(content) && content.some((block: { kind?: unknown; data?: unknown } | null) =>
+      block?.kind === "text" && typeof block.data === "string" && block.data.length > 0);
+  }
   if (source !== "claude-transcript") {
     const message = piMessage(entry);
     return message?.role === "user" && (message.content as Record<string, unknown>[]).some((part) => part.type === "text" && typeof part.text === "string" && part.text.length > 0);
@@ -928,6 +937,7 @@ function parseTurns(source: RecognizedConversation["source"], path: string, text
     }
   }
   if (source === "agy-transcript") return parseAgyTranscript(text, path);
+  if (source === "kiro-transcript") return parseKiroTranscript(text, Infinity);
   return source === "codex-transcript" ? parseCodexTranscript(text, Infinity)
     // only pi keeps a tool's images in the entry as base64; omp, omo and gjc are read the same
     // way but would carry image refs nothing can answer, so the option stays with pi alone
@@ -1391,6 +1401,12 @@ async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: strin
       if (found === null) throw new ConversationUnavailable("no_session_path");
       if ("unwritten" in found) throw new ConversationNotStarted(found.unwritten.id, "pi-transcript", found.unwritten.path);
       return { source: "pi-transcript", path: found.path };
+    }
+    if (agent === "kiro") {
+      const found = await resolveKiroTranscript(paneId, sessionCwd);
+      if (found === null) throw new ConversationUnavailable("no_session_path");
+      if ("unwritten" in found) throw new ConversationNotStarted(found.unwritten.id, "kiro-transcript", found.unwritten.path);
+      return { source: "kiro-transcript", path: found.path };
     }
     if (agent === "opencode") {
       // herdr's integration names the session the TUI shows; at its home screen there is none
