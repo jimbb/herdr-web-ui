@@ -17,7 +17,7 @@ export interface ReaderContext {
   readonly working: boolean;
 }
 
-export const SCREEN_READ_AGENTS: ReadonlySet<string> = new Set(["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "cmd", "opencode", "letta", ""]);
+export const SCREEN_READ_AGENTS: ReadonlySet<string> = new Set(["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", "letta", ""]);
 
 /**
  * A picker of its own that has an agent's input while herdr may report it at rest (agentPickerOwnsScreen), for agents

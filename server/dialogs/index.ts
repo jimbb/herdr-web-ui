@@ -16,6 +16,7 @@ import { readers as devin } from "./devin.ts";
 import { readers as cmd } from "./cmd.ts";
 import { readers as letta } from "./letta.ts";
 import { readers as dsh } from "./dsh.ts";
+import { readers as kiro } from "./kiro.ts";
 import { readers as fallback } from "./fallback.ts";
 
-export const readers: readonly DialogReader[] = [...claude, ...codex, ...omp, ...omo, ...pi, ...piQuestionnaire, ...piAsk, ...piAskUser, ...hermes, ...gjc, ...opencode, ...grok, ...agy, ...devin, ...cmd, ...letta, ...dsh, ...fallback];
+export const readers: readonly DialogReader[] = [...claude, ...codex, ...omp, ...omo, ...pi, ...piQuestionnaire, ...piAsk, ...piAskUser, ...hermes, ...gjc, ...opencode, ...grok, ...agy, ...devin, ...cmd, ...letta, ...dsh, ...kiro, ...fallback];

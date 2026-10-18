@@ -1015,6 +1015,107 @@ Press enter to confirm or esc to cancel
   });
 });
 
+describe("kiro-cli's tool-approval menu", () => {
+  // the real screen kiro-cli 2.32 draws for a shell tool awaiting approval (captured live)
+  const kiroApproval = (cursor = "Allow") => `
+ Print a test string requires approval
+ shell → echo hello-permission-test
+
+ ${cursor === "Allow" ? "❯" : " "} Allow
+ ${cursor === "Always allow" ? "❯" : " "} Always allow
+ ${cursor === "Deny" ? "❯" : " "} Deny
+ ${cursor === "Always deny" ? "❯" : " "} Always deny
+────────────────────────────────────────────────────────────
+ esc to close · ↑↓ to navigate · ↵ to select · Tab to edit
+`;
+
+  test("parses the approval into a 4-option card with the command as the body", () => {
+    const prompt = parseInteractivePrompt("kiro", kiroApproval());
+    expect(prompt?.kind).toBe("approval");
+    expect(prompt?.title).toBe("Print a test string requires approval");
+    expect(prompt?.body).toContain("echo hello-permission-test");
+    expect(labels(prompt)).toEqual(["Allow", "Always allow", "Deny", "Always deny"]);
+    expect(prompt?.multi_select).toBe(false);
+    expect(prompt?.custom_option_index).toBeNull();
+  });
+
+  test("answers by navigating from the cursor row and pressing Enter, never a guessed key", () => {
+    const prompt = parseInteractivePrompt("kiro", kiroApproval("Allow"))!;
+    // Allow is already selected: just Enter
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+    // Deny is two rows down from Allow
+    expect(answerKeys(prompt, { option_index: 2 })).toEqual([
+      { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] },
+    ]);
+    // Always deny is three rows down
+    expect(answerKeys(prompt, { option_index: 3 })).toEqual([
+      { keys: ["down"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] },
+    ]);
+  });
+
+  test("navigates up when the cursor starts lower", () => {
+    const prompt = parseInteractivePrompt("kiro", kiroApproval("Deny"))!;
+    // from Deny (index 2) to Allow (index 0): two ups
+    expect(answerKeys(prompt, { option_index: 0 })).toEqual([
+      { keys: ["up"] }, { keys: ["up"] }, { keys: ["enter"] },
+    ]);
+  });
+
+  test("is not matched when the approval menu is no longer at the screen's end", () => {
+    const answered = kiroApproval() + "\n• Shell echo hello-permission-test\n  ╰ done\n› Kiro is working · 1s · Type to steer\n";
+    expect(parseInteractivePrompt("kiro", answered)).toBeNull();
+  });
+
+  test("keeps every line of a long wrapped command in the body", () => {
+    const screen = kiroApproval().replace(" shell → echo hello-permission-test\n",
+      " shell → curl -fsSL https://example.invalid/install.sh -o /tmp/i.sh && sh /tmp/i.sh\n   && rm -rf ~/.cache/something-long-enough-to-wrap\n");
+    const prompt = parseInteractivePrompt("kiro", screen)!;
+    expect(prompt.body).toContain("curl -fsSL https://example.invalid/install.sh");
+    expect(prompt.body).toContain("&& rm -rf ~/.cache/something-long-enough-to-wrap");
+    expect(labels(prompt)).toEqual(["Allow", "Always allow", "Deny", "Always deny"]);
+  });
+
+  test("never offers a command's own line as a choice", () => {
+    // a line of the command that reads like a row, right above the real rows: no card rather than a wrong one
+    const spoofed = kiroApproval().replace("\n\n ❯ Allow", "\n   Always allow\n ❯ Allow");
+    expect(parseInteractivePrompt("kiro", spoofed)).toBeNull();
+    // one under the header with a blank line before the rows stays in the body
+    const quoted = kiroApproval().replace(" shell → echo hello-permission-test\n", " shell → printf '%s\\n'\n   Deny\n");
+    const prompt = parseInteractivePrompt("kiro", quoted)!;
+    expect(prompt.body).toContain("Deny");
+    expect(labels(prompt)).toEqual(["Allow", "Always allow", "Deny", "Always deny"]);
+  });
+
+  test("gives no card when a command draws a second header over its own detail", () => {
+    const forged = kiroApproval().replace(" shell → echo hello-permission-test\n",
+      " shell → cat notes.txt\n Read notes requires approval\n shell → echo harmless\n");
+    expect(parseInteractivePrompt("kiro", forged)).toBeNull();
+  });
+
+  test("looks for a forged header however far above the rows the real one is", () => {
+    const filler = Array.from({ length: 60 }, (_, at) => `   line ${at} of a long heredoc`).join("\n");
+    const forged = kiroApproval().replace(" shell → echo hello-permission-test\n",
+      ` shell → cat <<'EOF'\n${filler}\n Read notes requires approval\n shell → echo harmless\n`);
+    expect(parseInteractivePrompt("kiro", forged)).toBeNull();
+  });
+
+  test("gives no card while an earlier approval is still on the screen", () => {
+    // which of the two headers is Kiro's own cannot be told from the screen alone
+    const earlier = kiroApproval() + "\n• Shell echo hello-permission-test\n  ╰ done\n";
+    expect(parseInteractivePrompt("kiro", earlier + kiroApproval().replace("echo hello-permission-test", "echo second"))).toBeNull();
+  });
+
+  test("takes only Kiro's own footer as the menu's end", () => {
+    const loose = kiroApproval().replace(" esc to close · ↑↓ to navigate · ↵ to select · Tab to edit", " use ↑↓ to navigate and ↵ to select");
+    expect(parseInteractivePrompt("kiro", loose)).toBeNull();
+  });
+
+  test("ignores a non-kiro agent and a screen with no approval", () => {
+    expect(parseInteractivePrompt("kiro", "› Kiro is working · 2s · Type to steer · Ctrl+S to queue\n")).toBeNull();
+    expect(parseInteractivePrompt("claude", kiroApproval())).toBeNull();
+  });
+});
+
 describe("Codex's queue of questions (request_user_input_async)", () => {
   const status = "  GPT-6-Sol xhigh · ~/lab · Context 97% left · weekly 56% left";
 
