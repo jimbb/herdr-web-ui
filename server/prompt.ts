@@ -141,6 +141,7 @@ type Responder =
   | "omo-model"
   | "hermes-question"
   | "hermes-input"
+  | "kiro-approval"
   | "omp-submit"
   | "fallback-menu"
   | "fallback-gjc-menu"
@@ -1419,6 +1420,49 @@ function parseOmpApproval(screen: string): ParsedPrompt | null {
   });
 }
 
+/**
+ * kiro-cli's tool-approval menu. kiro (2.32) draws, under a header "<description> requires
+ * approval" and a "shell → <command>" detail line, a vertical menu of unnumbered rows the
+ * cursor (❯) marks — "Allow / Always allow / Deny / Always deny" for a shell call, fewer or
+ * other labels for another tool — and a hint line: "esc to close · ↑↓ to navigate · ↵ to
+ * select · Tab to edit". Answered by moving the cursor and Enter, the same as the other
+ * approval menus (answerKeys' navigate+enter), never guessed digit keys.
+ */
+const KIRO_APPROVAL_HINT_RE = /↑↓\s*to navigate\b.*↵\s*to select|to navigate.*to select/i;
+const KIRO_APPROVAL_HEADER_RE = /\brequires approval\s*$/i;
+function parseKiroApproval(screen: string): ParsedPrompt | null {
+  const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
+  const hintIndex = findLastIndex(lines, (_, index) => KIRO_APPROVAL_HINT_RE.test(wrapped(lines, index)));
+  if (hintIndex < 0) return null;
+  const headerIndex = findLastIndex(lines.slice(0, hintIndex), (line) => KIRO_APPROVAL_HEADER_RE.test(cleanLine(line)));
+  if (headerIndex < 0) return null;
+  // rows are the cursor-markable lines between the header and the hint's divider; the detail
+  // line ("shell → …") and blank/divider lines are not rows
+  const rows: MenuRow[] = [];
+  for (let index = headerIndex + 1; index < hintIndex; index += 1) {
+    const text = cleanLine(lines[index]!);
+    if (!text || isDivider(lines[index]!)) continue;
+    // a row is a short choice label, optionally cursor-marked; the "shell → cmd" detail is not
+    if (/→|\u2192/.test(text)) continue;
+    const selected = SELECTED_RE.test(text);
+    const label = normalizeText(text.replace(SELECTED_RE, ""));
+    if (!label || label.length > 40) continue;
+    rows.push({ label, selected, checked: false, lineIndex: index });
+  }
+  if (rows.length < 2 || rows.filter((row) => row.selected).length !== 1) return null;
+  const header = cleanLine(lines[headerIndex]!);
+  const detail = lines.slice(headerIndex + 1, rows[0]!.lineIndex).map(cleanLine).filter((line) => line && !isDivider(line)).join("\n");
+  return finishPrompt("kiro", {
+    kind: "approval", title: header, question: header,
+    body: detail || null,
+    options: rows.map((row) => ({ label: row.label, description: null })), multi_select: false, custom_option_index: null,
+  }, {
+    responder: "kiro-approval", menuLabels: rows.map((row) => row.label),
+    selectedIndex: rows.findIndex((row) => row.selected), checkedOptionIndices: [], customMenuIndex: null,
+    rejectWithEscapeIndex: null,
+  });
+}
+
 function parseClaudeApproval(screen: string): ParsedPrompt | null {
   const lines = screen.replace(ANSI_RE, "").split(/\r?\n/);
   const planIndex = findLastIndex(lines, (_, index) => /Claude has written up a plan and is ready to execute\. Would you like to proceed\?/i.test(wrapped(lines, index)));
@@ -2167,6 +2211,8 @@ function promptTailIsActive(prompt: ParsedPrompt, screen: string): boolean {
   // Hermes keeps its status line (and maybe the hint's wrapped tail) under the hint; an answered
   // question leaves the screen, so a hint among the last few lines is the live one
   if (prompt.responder === "hermes-question" || prompt.responder === "hermes-input") return shown.slice(-4).some((line) => HERMES_HINT_RE.test(line));
+  // kiro's approval menu ends with its own hint: "esc to close · ↑↓ to navigate · ↵ to select · Tab to edit"
+  if (prompt.responder === "kiro-approval") return ends(KIRO_APPROVAL_HINT_RE);
   if (prompt.responder === "codex-menu") return ends(CODEX_CONTINUE_HINT_RE);
   if (prompt.responder === "codex-question") return ends(CODEX_ASK_HINT_RE);
   if (prompt.responder === "codex-async-question") return cleanLines.slice(-4).some((line) => CODEX_ASYNC_ASK_HINT_RE.test(line)) || ends(CODEX_ASYNC_ASK_HINT_RE);
@@ -2676,6 +2722,8 @@ function parsePrompt(agent: string, screen: string, omoAsk: OmoAsk | null = null
           ? [parsePiModel(screen), parseOmoModel(screen), parsePiDialog(screen), ...omo()]
         : agent === "hermes"
           ? [parseHermesClarify(screen)]
+        : agent === "kiro"
+          ? [parseKiroApproval(screen)]
         : agent === "omo" || agent === ""
           ? [parseOmoModel(screen), ...omo()]
           : [];
@@ -3624,7 +3672,7 @@ async function readKnownPrompt(
   codexHome?: string,
   panes: HerdrPane[] = [],
 ): Promise<{ prompt: InteractivePrompt | null; screen?: string }> {
-  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", ""].includes(agent)) return { prompt: null };
+  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", ""].includes(agent)) return { prompt: null };
   const screen = await liveScreen(paneId);
   // omo's form reads its text from the session's call, the screen showing where the form stands
   const omoAsks = ["omo", "pi", "claude", ""].includes(agent) && pane.cwd && OMO_FORM_RE.test(screen)
