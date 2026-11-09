@@ -72,7 +72,7 @@ describe("AgentTaskStatus", () => {
     const told: TaskCount[] = [];
     const resets: string[] = [];
     let now = T0 + 60_000;
-    const status = new AgentTaskStatus({ resolve: async () => ({ path, started: null }), onChange: (_, c) => told.push(c), onReset: (id) => resets.push(id), now: () => now });
+    const status = new AgentTaskStatus({ resolve: async () => ({ path, started: null, owner: null }), onChange: (_, c) => told.push(c), onReset: (id) => resets.push(id), now: () => now });
     await status.track(pane("agy"));
     expect(told).toEqual([count(0, 0, T0)]);
     // half a line is read once it is whole
@@ -99,5 +99,79 @@ describe("AgentTaskStatus", () => {
     await status.refresh([pane("claude")]);
     expect(told.at(-1)).toEqual(count(0, 0, null));
     expect(status.countOf("p1")).toBe(0);
+  });
+
+  it("keeps the wait of the same process whose start reads a little differently, and resets for another process", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-tasks-"));
+    roots.push(root);
+    const path = join(root, "a.jsonl");
+    writeFileSync(path, `${JSON.stringify(agy.prompt(0))}\n${JSON.stringify(agy.start(3, 1))}\n`);
+    let owner = "1:boot:100", started = T0 - 5;
+    const resets: string[] = [];
+    let now = T0 + 60_000;
+    const status = new AgentTaskStatus({ resolve: async () => ({ path, started, owner }), onChange: () => undefined, onReset: (id) => resets.push(id), now: () => now });
+    await status.track(pane("agy"));
+    // the process start is an upper bound read off the clock: a later read of the same process differs
+    started = T0 - 2;
+    now += 30_000;
+    await status.track(pane("agy"));
+    expect(resets).toEqual([]);
+    expect(status.countOf("p1")).toBe(1);
+    owner = "2:boot:200";
+    now += 30_000;
+    await status.track(pane("agy"));
+    expect(resets).toEqual(["p1"]);
+  });
+
+  it("drops a lookup that finishes after the pane was let go", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-tasks-"));
+    roots.push(root);
+    const path = join(root, "a.jsonl");
+    writeFileSync(path, `${JSON.stringify(agy.prompt(0))}\n${JSON.stringify(agy.start(3, 1))}\n`);
+    const lookup = Promise.withResolvers<{ path: string; started: null; owner: null }>();
+    const told: TaskCount[] = [];
+    const status = new AgentTaskStatus({ resolve: () => lookup.promise, onChange: (_, c) => told.push(c), onReset: () => undefined, now: () => T0 + 60_000 });
+    const tracking = status.track(pane("agy"));
+    status.forget("p1");
+    lookup.resolve({ path, started: null, owner: null });
+    await tracking;
+    expect(told).toEqual([]);
+    expect(status.countOf("p1")).toBe(0);
+    expect(status.stale("p1")).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a FIFO in place of the session file without waiting for a writer", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-tasks-"));
+    roots.push(root);
+    const path = join(root, "fifo.jsonl");
+    expect(Bun.spawnSync(["mkfifo", path]).exitCode).toBe(0);
+    const told: TaskCount[] = [];
+    const status = new AgentTaskStatus({ resolve: async () => ({ path, started: null, owner: null }), onChange: (_, c) => told.push(c), onReset: () => undefined, now: () => T0 });
+    await status.track(pane("agy"));
+    expect(told).toEqual([count(0, 0, null)]);
+  });
+
+  it("drops a gone process's tasks once the pane's process start can be read", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-tasks-"));
+    roots.push(root);
+    const path = join(root, "a.jsonl");
+    writeFileSync(path, `${JSON.stringify(agy.prompt(0))}\n${JSON.stringify(agy.start(3, 1))}\n`);
+    let started: number | null = null;
+    let now = T0 + 20 * 60_000;
+    const status = new AgentTaskStatus({ resolve: async () => ({ path, started, owner: "1:boot:100" }), onChange: () => undefined, onReset: () => undefined, now: () => now });
+    await status.track(pane("agy"));
+    expect(status.countOf("p1")).toBe(1);
+    started = T0 + 10 * 60_000;
+    now += 30_000;
+    await status.track(pane("agy"));
+    status.poll();
+    expect(status.countOf("p1")).toBe(0);
+  });
+});
+
+describe("agy timers", () => {
+  it("takes a timer too long to be told as a command, held to the hold's limit", () => {
+    const state = read("agy", [agy.prompt(0), agy.start(3, 1, `Timer: ${"9".repeat(400)}h, Prompt: x`)]);
+    expect(taskCount(state, null, T0 + 2 * 60_000)).toEqual(count(1, 1, T0, true));
   });
 });

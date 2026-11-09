@@ -252,10 +252,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     resolve: async (pane) => {
       if (pane.agent === "grok") {
         const path = await resolveGrokStore(pane);
-        return path === null ? null : { path, started: null };
+        return path === null ? null : { path, started: null, owner: null };
       }
       const store = await resolveAgyStore(pane);
-      return store === null ? null : { path: store.path, started: await processStartUpperBoundAsync(store.pid) };
+      return store === null ? null : { path: store.path, started: await processStartUpperBoundAsync(store.pid), owner: `${store.pid}:${store.started}` };
     },
     onReset: (paneId) => { if (isTaskAgent(agentNow.get(paneId))) newLifetime(paneId, null); },
     onChange: (paneId, count) => {

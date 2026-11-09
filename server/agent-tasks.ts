@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import type { HerdrPane } from "../shared/protocol.ts";
 
@@ -31,6 +31,8 @@ const START_SLACK_MS = 60_000;
 /** a timer past due by this much fired in a process that is gone */
 const DUE_GRACE_MS = 120_000;
 const READ_CHUNK = 1024 * 1024;
+/** O_NONBLOCK: a FIFO put there is opened without waiting for a writer, and refused as no plain file */
+const READ_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
 
 export type TaskAgent = "agy" | "grok";
 export const isTaskAgent = (agent: string | null | undefined): agent is TaskAgent => agent === "agy" || agent === "grok";
@@ -51,7 +53,9 @@ const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1000 };
 function timerDue(content: string, at: number): number | null {
   const timer = content.match(AGY_TIMER)?.[1];
   if (timer === undefined) return null;
-  return at + [...timer.matchAll(/(\d+)([hms])/g)].reduce((sum, [, n, unit]) => sum + Number(n) * UNIT_MS[unit!]!, 0);
+  const due = at + [...timer.matchAll(/(\d+)([hms])/g)].reduce((sum, [, n, unit]) => sum + Number(n) * UNIT_MS[unit!]!, 0);
+  // a time that cannot be told is held as a command is, to the hold's limit
+  return Number.isFinite(due) ? due : null;
 }
 
 /** One line of a session file, read into what it says runs. Lines that cannot matter are not parsed. */
@@ -94,15 +98,17 @@ export function taskCount(state: SessionTasks, started: number | null, now: numb
 }
 
 interface Tracked extends SessionTasks {
-  agent: TaskAgent; path: string; started: number | null; resolvedAt: number;
+  agent: TaskAgent; path: string; started: number | null; owner: string | null; resolvedAt: number;
   ino: number; offset: number; decoder: StringDecoder; partial: string; told: string | null; running: number;
 }
 
 function readOn(tracked: Tracked): void {
   let fd: number;
-  try { fd = openSync(tracked.path, "r"); } catch { return; }
+  try { fd = openSync(tracked.path, READ_FLAGS); } catch { return; }
   try {
-    const { ino, size } = fstatSync(fd);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return;
+    const { ino, size } = stat;
     // replaced or cut short: read afresh
     if (ino !== tracked.ino || size < tracked.offset) Object.assign(tracked, { ino, offset: 0, decoder: new StringDecoder("utf8"), partial: "", promptAt: null, tasks: new Map() });
     const buffer = Buffer.alloc(Math.min(READ_CHUNK, Math.max(0, size - tracked.offset)));
@@ -118,8 +124,11 @@ function readOn(tracked: Tracked): void {
 }
 
 export interface AgentTaskDeps {
-  /** the pane's session file and when its process started, or null when it cannot be told */
-  resolve: (pane: HerdrPane & { agent: TaskAgent }) => Promise<{ path: string; started: number | null } | null>;
+  /**
+   * the pane's session file, when its process started (an upper bound, which differs a little
+   * between reads of one process) and which process that is, or null when it cannot be told
+   */
+  resolve: (pane: HerdrPane & { agent: TaskAgent }) => Promise<{ path: string; started: number | null; owner: string | null } | null>;
   onChange: (paneId: string, count: TaskCount) => void;
   /** the pane runs another session or process than before: its waits are not this one's */
   onReset: (paneId: string) => void;
@@ -129,6 +138,8 @@ export interface AgentTaskDeps {
 export class AgentTaskStatus {
   private readonly panes = new Map<string, Tracked>();
   private readonly resolving = new Set<string>();
+  /** bumped each time a pane is let go, so a lookup that was under way then is dropped */
+  private readonly lifetimes = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
 
@@ -155,6 +166,7 @@ export class AgentTaskStatus {
   }
 
   forget(paneId: string): void {
+    this.endLifetime(paneId);
     this.panes.delete(paneId);
   }
 
@@ -172,15 +184,19 @@ export class AgentTaskStatus {
     const known = this.panes.get(pane.pane_id);
     if ((known?.agent === agent && this.now() - known.resolvedAt < RESOLVE_MS) || this.resolving.has(pane.pane_id)) return;
     this.resolving.add(pane.pane_id);
-    let found: { path: string; started: number | null } | null;
+    const lifetime = this.lifetimes.get(pane.pane_id);
+    let found: { path: string; started: number | null; owner: string | null } | null;
     try { found = await this.deps.resolve({ ...pane, agent }); } catch { found = null; } finally { this.resolving.delete(pane.pane_id); }
+    if (this.lifetimes.get(pane.pane_id) !== lifetime) return;
     const current = this.panes.get(pane.pane_id);
     if (found === null) {
       if (current !== undefined && current.agent !== agent) this.letGo(pane.pane_id);
       return;
     }
-    if (current !== undefined && current.agent === agent && current.path === found.path && current.started === found.started) {
+    if (current !== undefined && current.agent === agent && current.path === found.path && current.owner === found.owner) {
       current.resolvedAt = this.now();
+      // a start that could not be read before may be now: the gone process's tasks are dropped then
+      current.started ??= found.started;
       return;
     }
     if (current !== undefined) this.deps.onReset(pane.pane_id);
@@ -202,7 +218,14 @@ export class AgentTaskStatus {
     }
   }
 
+  private endLifetime(paneId: string): void {
+    // only a lookup under way needs to see the change; with none, the pane leaves no entry behind
+    if (this.resolving.has(paneId)) this.lifetimes.set(paneId, (this.lifetimes.get(paneId) ?? 0) + 1);
+    else this.lifetimes.delete(paneId);
+  }
+
   private letGo(paneId: string): void {
+    this.endLifetime(paneId);
     const tracked = this.panes.get(paneId);
     this.panes.delete(paneId);
     if (tracked !== undefined && tracked.told !== null) this.deps.onChange(paneId, { running: 0, turnRunning: 0, promptAt: null, capped: true });
