@@ -1,0 +1,5 @@
+### Fixed
+- An agy or grok pane whose turn ended on a background task (a deploy, a CI watch, a test run) or
+  an agy `schedule` timer reads BG, not DONE, and alerts its finish once the turn that task's end
+  starts is over; a timer is held until it is due.
+- A Claude Code pane that set a `/loop` wakeup reads BG until it fires.

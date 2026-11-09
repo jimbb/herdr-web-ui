@@ -1517,6 +1517,22 @@ describe("claudeSubagents, background commands", () => {
     expect(ids(s.path)).toEqual(["w1:completed", "m1:completed"]);
   });
 
+  it("counts a /loop wakeup until it fires, a newer one replaces it or the loop stops", () => {
+    const s = session();
+    const wakeup = (id: string, minute: number, scheduledFor: number) => {
+      s.parent({ type: "assistant", timestamp: at(minute), message: { role: "assistant", content: [{ type: "tool_use", id, name: "ScheduleWakeup", input: scheduledFor === 0 ? { stop: true } : { delaySeconds: 1200, prompt: "check CI", reason: "Watch the CI run" } }] } });
+      s.parent({ type: "user", timestamp: at(minute), message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "Next wakeup scheduled" }] }, toolUseResult: { scheduledFor, clampedDelaySeconds: 1200, wasClamped: false } });
+    };
+    wakeup("toolu_w1", 2, Date.parse(at(22)));
+    expect(claudeSubagents(s.path, true, NOW).map((task) => `${task.id}:${task.title}:${task.status}`)).toEqual(["toolu_w1:Watch the CI run:running"]);
+    s.parent({ type: "system", subtype: "scheduled_task_fire", timestamp: at(22), taskKind: "loop", taskId: "591b6f5a" });
+    wakeup("toolu_w2", 23, Date.parse(at(43)));
+    wakeup("toolu_w3", 24, Date.parse(at(44)));
+    expect(ids(s.path)).toEqual(["toolu_w3:running", "toolu_w2:completed", "toolu_w1:completed"]);
+    wakeup("toolu_stop", 25, 0);
+    expect(ids(s.path)).toEqual(["toolu_w3:completed", "toolu_w2:completed", "toolu_w1:completed"]);
+  });
+
   it("ends a command by its notice, whatever the status, and by TaskStop or KillShell", () => {
     const s = session();
     for (const id of ["ok", "bad", "killed", "stopped", "shell"]) s.bash(id, 2);

@@ -185,6 +185,8 @@ interface Commands {
   seq: number;
   /** the last few ends of each id, oldest first: an id used again ends once in each lifetime (claudeSubagentState) */
   ends: Map<string, CommandTold[]>;
+  /** the `/loop` wakeup set and not fired yet, by its `ScheduleWakeup` call: a session has one at a time */
+  wakeup?: string;
 }
 /** An end a transcript told of: `call`, the `Bash` call its notice names (none for a stop) */
 type CommandTold = { at: number; status: OmoTask["status"]; call: string | null; seq?: number; source?: Commands };
@@ -192,9 +194,9 @@ const ENDS_PER_ID = 4;
 const noCommands = (): Commands => ({ calls: new Map(), launches: new Map(), ends: new Map(), seq: 0 });
 const TITLE_LENGTH = 120;
 
-const BACKGROUND_TOOLS = ["Bash", "Monitor", "Workflow"];
+const BACKGROUND_TOOLS = ["Bash", "Monitor", "Workflow", "ScheduleWakeup"];
 /** Whether a line may say something of a background command, before it is parsed: the answers of every other call are passed over. */
-const commandLine = (line: string): boolean => BACKGROUND_TOOLS.some((name) => line.includes(`"name":"${name}"`)) || line.includes('"backgroundTaskId"') || line.includes('"taskId"') || line.includes('"task_id"') || line.includes('"shell_id"');
+const commandLine = (line: string): boolean => BACKGROUND_TOOLS.some((name) => line.includes(`"name":"${name}"`)) || line.includes('"backgroundTaskId"') || line.includes('"taskId"') || line.includes('"scheduledFor"') || line.includes('"scheduled_task_fire"') || line.includes('"task_id"') || line.includes('"shell_id"');
 
 function commandEnds(result: Row | null, at: number, notices: readonly TaskNotification[]): CommandEnd[] {
   const ends: CommandEnd[] = [];
@@ -214,7 +216,7 @@ function scanCommands(commands: Commands, entry: Row, at: number | null, notices
   for (const block of blocks) {
     if (block["type"] !== "tool_use" || !BACKGROUND_TOOLS.includes(block["name"] as string) || typeof block["id"] !== "string") continue;
     const input = row(block["input"]);
-    const title = text(input?.["description"]) ?? text(input?.["command"]) ?? text(input?.["name"]);
+    const title = text(input?.["description"]) ?? text(input?.["command"]) ?? text(input?.["name"]) ?? text(input?.["reason"]);
     if (title !== null) remember(commands.calls, block["id"], title.slice(0, TITLE_LENGTH), 512);
   }
   const failed = blocks.some((block) => block["type"] === "tool_result" && block["is_error"] === true);
@@ -226,7 +228,21 @@ function scanCommands(commands: Commands, entry: Row, at: number | null, notices
     remember(commands.launches, launched, { at, title: (call === undefined ? undefined : commands.calls.get(call)) ?? text(result?.["workflowName"]) ?? "Background command", call: call ?? null, seq }, MAX_NAMES);
     if (call !== undefined) commands.calls.delete(call);
   }
-  for (const end of commandEnds(result, at, notices)) {
+  // a /loop wakeup starts the next turn by itself when due: its fire, a newer one and a stop end the one set before
+  const scheduled = result?.["scheduledFor"];
+  const fired = entry["type"] === "system" && entry["subtype"] === "scheduled_task_fire" && entry["taskKind"] === "loop";
+  const ends = commandEnds(result, at, notices);
+  if ((fired || typeof scheduled === "number") && commands.wakeup !== undefined) {
+    ends.push({ id: commands.wakeup, at, status: "completed", call: null });
+    commands.wakeup = undefined;
+  }
+  const wakeupCall = blocks.find((block) => block["type"] === "tool_result")?.["tool_use_id"];
+  if (typeof scheduled === "number" && scheduled > 0 && typeof wakeupCall === "string" && AGENT_ID.test(wakeupCall)) {
+    remember(commands.launches, wakeupCall, { at, title: commands.calls.get(wakeupCall) ?? "Wakeup", call: wakeupCall, seq }, MAX_NAMES);
+    commands.calls.delete(wakeupCall);
+    commands.wakeup = wakeupCall;
+  }
+  for (const end of ends) {
     const told = commands.ends.get(end.id) ?? [];
     // the same notice comes in more than one carrier: once is enough
     if (told.some((known) => known.at === end.at && known.status === end.status && known.call === end.call)) continue;
