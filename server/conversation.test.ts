@@ -25,7 +25,7 @@ import * as gjcRuntime from "./gjc-runtime.ts";
 import * as runtime from "./herdr-core/runtime.ts";
 import { claudeProjectDir } from "./claude-store.ts";
 import { launchedAgents } from "./launched-agents.ts";
-import { agyTranscriptPage, claudePanePid, claudePaneSession, ConversationUnavailable, devinSessionForPane, forgetPaneTranscriptState, forgetTranscriptState, gjcTranscriptPath, HistoryChanged, isDevinProcess, isOmoProcess, ompSessionStore, paneConversation, paneProcessRoots, paneTranscript, parseClaudeTranscript, unwrapPastes, transcriptImage, transcriptPage, transcriptToolOutput, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
+import { agyTranscriptPage, claudePanePid, claudePaneSession, ConversationReadPending, ConversationUnavailable, devinSessionForPane, forgetPaneTranscriptState, forgetTranscriptState, gjcTranscriptPath, HistoryChanged, isDevinProcess, isOmoProcess, ompSessionStore, paneConversation, paneProcessRoots, paneTranscript, parseClaudeTranscript, unwrapPastes, transcriptImage, transcriptPage, transcriptToolOutput, TRANSCRIPT_WINDOW_BYTES } from "./conversation.ts";
 
 it("labels only Claude's explicit end_turn text as final-answer evidence", () => {
   const entry = (stop_reason: string | null) => JSON.stringify({ type: "assistant", message: { role: "assistant", stop_reason, content: [{ type: "text", text: "Answer" }] } });
@@ -3061,6 +3061,100 @@ describe("Agy native ledger through shared paging", () => {
         name: "ConversationUnavailable", message: "transcript_missing",
       });
     } finally { store.mockRestore(); rpc.mockRestore(); }
+  });
+  it("keeps the unwritten greeting while Agy works on its first turn before flushing the JSONL ledger", async () => {
+    const session = "00000000-0000-4000-8000-000000000001";
+    rmSync(path);
+    const pane = { pane_id: "agy-first-turn", cwd: root, agent: "agy", agent_status: "working" } as HerdrPane;
+    const snapshot = spyOn(herdr, "sessionSnapshot").mockImplementation(async () => ({ panes: [pane], agents: [] }) as unknown as SessionSnapshot);
+    const store = spyOn(agyStore, "resolveAgyStore").mockResolvedValue({ root, session, path, pid: 2, started: "test" });
+    const rpc = spyOn(herdr, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [] } } as never);
+    try {
+      // 0 steps in DB, JSONL not created yet while working
+      expect(await paneConversation(pane.pane_id)).toMatchObject({ source: "agy-transcript", turns: [], history_id: `unwritten:${session}` });
+      // step 0 inserted into DB milliseconds before JSONL is created while working
+      db.query("INSERT INTO steps VALUES (0)").run();
+      expect(await paneConversation(pane.pane_id)).toMatchObject({ source: "agy-transcript", turns: [], history_id: `unwritten:${session}` });
+      // once JSONL is flushed and read, a later disappearance of the file fails closed instead of returning unwritten
+      writeFileSync(path, row(0, "USER_INPUT", "first prompt"));
+      const written = await paneConversation(pane.pane_id);
+      expect(written.turns).toHaveLength(1);
+      rmSync(path);
+      expect(await paneConversation(pane.pane_id).catch((error: unknown) => error)).toMatchObject({ name: "ConversationUnavailable", message: "transcript_missing" });
+      // a cold read with more than 1 step in the DB and no JSONL file also fails closed
+      forgetTranscriptState();
+      db.query("INSERT INTO steps VALUES (1)").run();
+      expect(await paneConversation(pane.pane_id).catch((error: unknown) => error)).toMatchObject({ name: "ConversationUnavailable", message: "transcript_missing" });
+    } finally { snapshot.mockRestore(); store.mockRestore(); rpc.mockRestore(); }
+  });
+  it("retries a transient mid-turn catalog race and answers 503 ConversationReadPending instead of dropping chat", async () => {
+    const session = "00000000-0000-4000-8000-000000000001";
+    add(0, "USER_INPUT", "one");
+    add(1, "PLANNER_RESPONSE", "answer");
+    const pane = { pane_id: "agy-race", cwd: root, agent: "agy", agent_status: "working" } as HerdrPane;
+    const snapshot = spyOn(herdr, "sessionSnapshot").mockImplementation(async () => ({ panes: [pane], agents: [] }) as unknown as SessionSnapshot);
+    const store = spyOn(agyStore, "resolveAgyStore").mockResolvedValue({ root, session, path, pid: 2, started: "test" });
+    const rpc = spyOn(herdr, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [] } } as never);
+    let spy: ReturnType<typeof spyOn> | undefined;
+    try {
+      const initial = await paneConversation(pane.pane_id);
+      expect(initial.turns).toHaveLength(2);
+      // A single transient catalog failure recovers immediately via the retry in paneConversation.
+      let calls = 0;
+      spy = spyOn(filePool, "fileTask").mockImplementation(async (task) => {
+        if (task.op !== "agy-catalog") throw new Error(`unexpected ${task.op}`);
+        if (++calls === 1) throw new Error("transient WAL copy race");
+        return [...agyCatalog(task.path)] as never;
+      });
+      const recovered = await paneConversation(pane.pane_id, undefined, { history_id: initial.history_id });
+      expect(recovered.turns).toHaveLength(2);
+      spy.mockRestore();
+      // A persistent mid-turn write race returns ConversationReadPending (503) when history_id matches,
+      // and HistoryChanged (409) when history_id belongs to another conversation.
+      spy = spyOn(filePool, "fileTask").mockRejectedValue(new Error("ongoing WAL write"));
+      await expect(paneConversation(pane.pane_id, undefined, { history_id: initial.history_id })).rejects.toBeInstanceOf(ConversationReadPending);
+      await expect(paneConversation(pane.pane_id, undefined, { history_id: "other-dev-ino-agy-0" })).rejects.toBeInstanceOf(HistoryChanged);
+      await expect(paneConversation(pane.pane_id, undefined, { from: "other-dev-ino-agy-0:0" })).rejects.toBeInstanceOf(HistoryChanged);
+    } finally { spy?.mockRestore(); snapshot.mockRestore(); store.mockRestore(); rpc.mockRestore(); }
+  });
+  it.skipIf(process.platform === "win32")("greets an Agy started in the terminal on its unused start screen", async () => {
+    const screen = [
+      "❯ agy",
+      "",
+      "       ▄▀▀▄         Antigravity CLI 1.4.4",
+      "      ▀▀▀▀▀▀        user@example.test (Demo plan    )",
+      "     ▀▀▀▀▀▀▀▀       Gemini 3.8 Flash (High)",
+      "    ▄▀▀     ▀▀▄      /tmp/project",
+      "   ▄▀▀       ▀▀▄",
+      "",
+      " ────────────────────────────────────────",
+      " >",
+      " ────────────────────────────────────────",
+      " ? for shortcuts   Gemini 3.8 Flash · high",
+    ].join("\n");
+    const pane = { pane_id: "agy-greet", cwd: root, foreground_cwd: root, agent: "agy", agent_status: "idle" } as HerdrPane;
+    let currentScreen = screen;
+    let argv = ["agy"];
+    let scrolledUp = 0;
+    const snapshot = spyOn(herdr, "sessionSnapshot").mockImplementation(async () => ({ panes: [pane], agents: [] }) as unknown as SessionSnapshot);
+    const rpc = spyOn(herdr, "herdrRpc").mockImplementation(async (method: string) => (method === "pane.get"
+      ? { pane: { ...pane, scroll: { offset_from_bottom: scrolledUp, max_offset_from_bottom: 10, viewport_rows: 40 } } }
+      : { process_info: { foreground_processes: [{ pid: process.pid, name: "agy", argv }] } }) as never);
+    const read = spyOn(herdr, "paneRead").mockImplementation(async () => ({ text: currentScreen }) as never);
+    try {
+      const greeting = await paneConversation(pane.pane_id);
+      expect(greeting).toMatchObject({ source: "agy-transcript", turns: [], cursor: null });
+      expect(greeting.history_id).toStartWith(`unwritten:agy:${pane.pane_id}:${process.pid}:`);
+      // Resumed or prompt-flag invocations, scrolled viewports, or screens with a turn fall back to scrollback.
+      argv = ["agy", "--continue"];
+      await expect(paneConversation(pane.pane_id)).rejects.toBeInstanceOf(ConversationUnavailable);
+      argv = ["agy"];
+      scrolledUp = 2;
+      await expect(paneConversation(pane.pane_id)).rejects.toBeInstanceOf(ConversationUnavailable);
+      scrolledUp = 0;
+      currentScreen = screen.replace(" >", " > hello\n\n ✦ Hi there\n\n ────────────────────────────────────────\n >");
+      await expect(paneConversation(pane.pane_id)).rejects.toBeInstanceOf(ConversationUnavailable);
+    } finally { snapshot.mockRestore(); rpc.mockRestore(); read.mockRestore(); }
   });
 });
 

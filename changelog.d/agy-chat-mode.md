@@ -1,0 +1,1 @@
+- Fixed Agy Chat mode dropping to terminal scrollback on fresh start screens, first-turn startup before the JSONL ledger is flushed, and mid-turn SQLite WAL/ledger writes.
