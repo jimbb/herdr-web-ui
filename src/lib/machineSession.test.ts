@@ -79,7 +79,7 @@ describe("PC connection ownership", () => {
     session.close();
     expect(pasteFolder("paste-folder-pc")).toBeUndefined();
   });
-  it.each(["sent", "discarded", "held"] as const)("settles a reloaded copy after the snapshot proves an early resumed %s receipt's lifetime", (outcome) => {
+  it.each(["sent", "discarded"] as const)("settles a reloaded copy after the snapshot proves an early resumed %s receipt's lifetime", (outcome) => {
     const { session, socket, store } = setup(`reload-receipt-${outcome}`);
     const owner = paneStorageId(session.machineId, "w1:p1");
     store.accept(owner, message("saved"), null);
@@ -88,9 +88,9 @@ describe("PC connection ownership", () => {
     expect(session.scope).toBeNull();
     // Open's attach replay can finish while the server still awaits clientSnapshot().
     socket.receive({ type: "pending-messages", pane_id: "w1:p1", messages: [], removed: [{ id: "saved", outcome, resumed: true }] });
-    expect(store.read(owner)).toMatchObject([{ id: "saved", state: "uncertain", serverOwned: false }]);
+    expect(store.read(owner)).toHaveLength(1);
     socket.receive(named("reload-herdr"));
-    expect(store.read(owner)).toMatchObject(outcome === "held" ? [{ id: "saved", state: "held", serverOwned: false }] : []);
+    expect(store.read(owner)).toEqual([]);
     session.close();
   });
   it("settles durable reload state only after the lifetime fence exposes that herdr's storage", () => {

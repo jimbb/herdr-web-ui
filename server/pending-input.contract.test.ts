@@ -331,13 +331,11 @@ describe("resumable follow-up receipts (#2421)", () => {
 
       const resender = await connect(resumeId);
       await f.state("idle", resender);
-      const heldReplay = await f.removed(row.id, "held", resender);
-      expect(heldReplay.removed).toContainEqual({ id: row.id, outcome: "held", resumed: true });
       resender.send({ type: "ping", id: 987 });
       await resender.wait((frame) => frame.type === "pong" && frame.id === 987);
       expect(retained.store.list(retained.owner, f.pane)).toContainEqual(expect.objectContaining({ id: row.id, state: "held" }));
       expect(retained.store.outcome(retained.owner, f.pane, row.id)).toBeUndefined();
-      expect(resender.seen.some((frame) => frame.type === "pending-messages" && frame.removed?.some((item: { id: string; outcome: string }) => item.id === row.id && item.outcome !== "held"))).toBe(false);
+      expect(resender.seen.some((frame) => frame.type === "pending-messages" && frame.removed?.some((item: { id: string }) => item.id === row.id))).toBe(false);
       expect(f.bytes()).toBe("");
       expect(herdrWrites).toEqual(writes);
 
@@ -369,18 +367,18 @@ describe("resumable follow-up receipts (#2421)", () => {
     }
   }, 25_000);
 
-  it.each(["sent", "discarded", "held"] as const)("replays a Codex follow-up's exact %s receipt to its returning browser without typing again", async (outcome) => {
+  it.each(["sent", "discarded"] as const)("replays a Codex follow-up's exact %s receipt to its returning browser without typing again", async (outcome) => {
     const f = await setup(`codex-resume-${outcome}`, "codex");
     const token = crypto.randomUUID(), from = f.socket.seen.length;
     f.socket.send({ type: "attach", pane_id: f.pane, cols: 100, rows: 30, receipt_resume_id: token });
     await f.socket.wait((frame) => frame.type === "input-ready" && frame.pane_id === f.pane, from);
     const row = await f.queue(980, "follow-up");
     if (outcome === "sent") { await f.state("idle"); await f.waitBytes(`${paste(row.text)}\r`); }
-    else if (outcome === "discarded") {
+    else {
       f.socket.send({ type: "pending-action", id: 981, pane_id: f.pane, pending_id: row.id, action: "discard" });
       expect((await f.socket.action(981)).ok).toBe(true);
     }
-    if (outcome !== "held") await f.removed(row.id, outcome);
+    await f.removed(row.id, outcome);
     const bytes = f.bytes();
     await f.socket.disconnect();
     const resumed = await f.another(false);

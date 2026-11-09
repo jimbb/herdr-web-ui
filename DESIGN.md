@@ -3158,13 +3158,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   and rebinds it to the returning browser connection on an authorized reattach with the same
   resume ID and device. Unconfirmed browser-only saved copies never resume automatic input. Previously
   held browser messages retain their explicit Send now/Discard recovery.
-  Any other follow-up's exact `sent`, `discarded` or `held` receipt is kept the same way (ten minutes, 1024,
+  Any other follow-up's exact `sent` or `discarded` receipt is kept the same way (ten minutes, 1024,
   same browser resume ID and device, local machine only) and replayed with `resumed: true` on its
-  browser's reattach, or to that browser's already attached successor when the Enter's reply or the
-  hold comes after the reload. `sent` and `discarded` settle only that exact ID's saved copy, while
-  `held` recovers an untyped queued copy as **Held message — review and send** (**Send now** /
-  **Discard**): an uncertain copy, which ages out as `dismissed`, stays unconfirmed, and nothing is
-  typed again (#2421).
+  browser's reattach, or to that browser's already attached successor when the Enter's reply comes
+  after the reload. It settles only that exact ID's saved copy: an uncertain copy, which ages out as
+  `dismissed`, stays unconfirmed, and nothing is typed again (#2421).
 - Not connected, the one word `Reconnecting…` (`Connecting…` before this page's first connection to
   the PC's socket) is the placeholder while the box is empty and moves into the status content once
   there is a draft (`composerStatusHint`), on a phone too; it says no more (nothing is queued, and

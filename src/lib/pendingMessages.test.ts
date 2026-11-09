@@ -38,40 +38,6 @@ describe("pending message ownership", () => {
     store.refresh("p");
     expect(store.read("p").map((row) => row.id)).toEqual(["other"]);
   });
-  it("recovers a disconnected queued message as held when its resumed held receipt arrives, without rearming an in-flight resend", () => {
-    const port = storage(), before = new PendingMessageStore(() => port);
-    before.accept("p", message("queued"), "old");
-    before.accept("p", message("unproved"), "old");
-    before.suspendScope("old");
-    expect(before.read("p").map(({ id, state, serverOwned }) => [id, state, serverOwned])).toEqual([
-      ["queued", "uncertain", false], ["unproved", "uncertain", false],
-    ]);
-    // A non-resumed held outcome does not alter a saved copy.
-    before.publish("p", [], [{ id: "unproved", outcome: "held" }], "new");
-    before.publish("p", [], [{ id: "queued", outcome: "held", resumed: true }, { id: "early", outcome: "held", resumed: true }], "new");
-    expect(before.read("p").map(({ id, state, serverOwned }) => [id, state, serverOwned])).toEqual([
-      ["queued", "held", false], ["unproved", "uncertain", false],
-    ]);
-    // Persisted as held in storage, and an early resumed held receipt recovers a copy saved later by another tab.
-    const reloaded = new PendingMessageStore(() => port);
-    expect(reloaded.read("p").map(({ id, state, serverOwned }) => [id, state, serverOwned])).toEqual([
-      ["queued", "held", false], ["unproved", "uncertain", false],
-    ]);
-    port.setItem("ovis:pending:p", JSON.stringify({ messages: [message("queued", "held"), message("early", "queued")] }));
-    before.refresh("p");
-    expect(before.read("p").map(({ id, state, serverOwned }) => [id, state, serverOwned])).toEqual([
-      ["queued", "held", false], ["early", "held", false],
-    ]);
-    // Once a held copy's explicit resend starts, a duplicate resumed held receipt never clears its unconfirmed mark.
-    expect(before.begin("p", "queued")).toBe(true);
-    expect(before.unconfirm("p", "queued")).toBe(true);
-    before.publish("p", [], [{ id: "queued", outcome: "held", resumed: true }], "new");
-    expect(new PendingMessageStore(() => port).read("p").find((row) => row.id === "queued")?.state).toBe("uncertain");
-    before.end("p", "queued");
-    // A terminal resumed receipt settles the held copy.
-    before.publish("p", [], [{ id: "early", outcome: "sent", resumed: true }], "new");
-    expect(before.read("p").map((row) => row.id)).toEqual(["queued"]);
-  });
   it("settles only the exact resumed Pi ID after reload, never same-text or unrelated rows", () => {
     const port = storage(), first = new PendingMessageStore(() => port);
     const receipt = { ...message("pi:one", "uncertain", "same"), error: { code: "pi_transcript_pending", message: "waiting" } };

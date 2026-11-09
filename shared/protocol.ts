@@ -1072,8 +1072,8 @@ export interface PromptAnswer {
 export type ClientRole = "interact" | "observe";
 
 /** A pending message's outcome. `resumed`: replayed after a reconnect, only to the device and browser
- * (`receipt_resume_id`) that sent it, for its exact id; it settles a saved copy (or keeps a held one held) and never sends input. */
-export interface PendingRemoval { id: string; outcome: "sent" | "discarded" | "consumed" | "dismissed" | "held"; resumed?: true }
+ * (`receipt_resume_id`) that sent it, for its exact id; it settles a saved copy and never sends input. */
+export interface PendingRemoval { id: string; outcome: "sent" | "discarded" | "consumed" | "dismissed"; resumed?: true }
 
 /** A follow-up accepted by this bridge, scoped to the connection that submitted it. */
 export interface PendingMessage {

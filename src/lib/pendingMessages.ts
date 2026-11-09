@@ -18,8 +18,6 @@ export class PendingMessageStore {
   private removed = new Map<string, Map<string, Set<string>>>();
   /** ids an exact resumed receipt settled (a consumed Pi id, or a resumed sent/discarded one): no saved copy brings them back */
   private settledResumed = new Map<string, Set<string>>();
-  /** ids an exact resumed receipt confirmed held without typing: a saved copy from before the drop stays held */
-  private heldResumed = new Map<string, Set<string>>();
   private receiptOrder: Array<{ owner: string; id: string; scope: string }> = [];
   private saved = new Map<string, string | null>();
   private unsaved = new Set<string>();
@@ -68,22 +66,12 @@ export class PendingMessageStore {
       });
     } catch { return []; }
   }
-  private canHoldResumed(owner: string, message: PendingMessageView): boolean {
-    return !message.serverOwned && this.scopes.get(owner)?.get(message.id) === undefined
-      && !piReceipt(message) && !message.resendInFlight && !this.unconfirmed.has(`${owner}\0${message.id}`);
-  }
-  private applyHeldResumed(owner: string, message: PendingMessageView): PendingMessageView {
-    if (message.resendInFlight) { this.heldResumed.get(owner)?.delete(message.id); return message; }
-    if (!this.heldResumed.get(owner)?.has(message.id) || !this.canHoldResumed(owner, message) || message.state === "held") return message;
-    const { sending_at: _, ...rest } = message;
-    return { ...rest, state: "held" };
-  }
   read(owner: string): PendingMessageView[] {
     const cached = this.rows.get(owner);
     if (cached) return cached;
     let raw: string | null = null;
     try { raw = this.storage().getItem(PREFIX + owner); } catch { /* keep a memory-only copy */ }
-    const messages = this.restored(raw).map((message) => this.applyHeldResumed(owner, message));
+    const messages = this.restored(raw);
     this.saved.set(owner, raw);
     this.rows.set(owner, messages);
     return messages;
@@ -92,8 +80,7 @@ export class PendingMessageStore {
     try {
       const raw = this.storage().getItem(PREFIX + owner);
       if (this.saved.get(owner) === raw) return;
-      const next = this.restored(raw).filter((message) => !this.settledResumed.get(owner)?.has(message.id))
-        .map((message) => this.applyHeldResumed(owner, message));
+      const next = this.restored(raw).filter((message) => !this.settledResumed.get(owner)?.has(message.id));
       // Another tab cannot alter or discard a live connection's authoritative rows.
       for (const own of this.read(owner).filter((message) => this.unsaved.has(owner) || message.serverOwned || this.isBusy(owner, message.id))) {
         const at = next.findIndex((message) => message.id === own.id);
@@ -144,7 +131,6 @@ export class PendingMessageStore {
     if (this.movedAway.get(owner)?.has(message.id)) return;
     const seen = this.removed.get(owner)?.get(message.id);
     if (this.settledResumed.get(owner)?.has(message.id) || (scope === null ? (seen?.size ?? 0) > 0 : seen?.has(scope))) return;
-    if (scope !== null || message.state === "uncertain") this.heldResumed.get(owner)?.delete(message.id);
     this.refresh(owner);
     const proofs = this.scopes.get(owner) ?? new Map<string, string>();
     this.scopes.set(owner, proofs);
@@ -152,14 +138,10 @@ export class PendingMessageStore {
     const previous = this.read(owner);
     const resendInFlight = previous.find((item) => item.id === message.id)?.resendInFlight;
     const resendGeneration = previous.find((item) => item.id === message.id)?.resendGeneration;
-    const heldByReceipt = scope === null && !resendInFlight && !this.unconfirmed.has(`${owner}\0${message.id}`)
-      && !piReceipt(message) && this.heldResumed.get(owner)?.has(message.id) === true;
     const view: PendingMessageView = { ...message, serverOwned: scope !== null,
       ...(resendInFlight ? { resendInFlight } : {}),
       ...(resendGeneration !== undefined ? { resendGeneration } : {}),
-      state: resendInFlight ? "uncertain" : heldByReceipt ? "held"
-        : scope === null && (message.state === "queued" || message.state === "sending") ? "uncertain" : message.state };
-    if (heldByReceipt) delete view.sending_at;
+      state: resendInFlight || scope === null && (message.state === "queued" || message.state === "sending") ? "uncertain" : message.state };
     const at = previous.findIndex((item) => item.id === message.id);
     const next = [...previous];
     if (at < 0) next.push(view); else next[at] = view;
@@ -180,32 +162,20 @@ export class PendingMessageStore {
     const saved = (message: PendingMessage & { serverOwned: boolean }): boolean => !message.serverOwned && proofs?.get(message.id) === undefined;
     const resumed = new Set(this.read(owner).filter((message) => piReceipt(message) && saved(message)).map((message) => message.id));
     const copies = new Set(this.read(owner).filter(saved).map((message) => message.id));
-    const terminal = removed.filter((item) => item.outcome !== "held");
-    const deleted = new Set(terminal.filter((item) => proofs?.get(item.id) === scope || unproved.has(item.id)
+    const deleted = new Set(removed.filter((item) => proofs?.get(item.id) === scope || unproved.has(item.id)
       || item.outcome === "consumed" && resumed.has(item.id) || item.resumed === true && copies.has(item.id)).map((item) => item.id));
     // A resumed receipt is remembered even before its copy is saved (another tab may save it later), but
     // never for a row a live connection here proves under another scope.
-    for (const item of terminal) {
-      this.heldResumed.get(owner)?.delete(item.id);
-      if (item.outcome === "consumed" && deleted.has(item.id) && item.id.startsWith("pi:")
-        || item.resumed === true && (proofs?.get(item.id) === undefined || proofs.get(item.id) === scope)) {
-        const settled = this.settledResumed.get(owner) ?? new Set<string>();
-        settled.add(item.id);
-        if (settled.size > 1024) settled.delete(settled.values().next().value!);
-        this.settledResumed.set(owner, settled);
-      }
-    }
-    for (const item of removed) if (item.outcome === "held" && item.resumed === true
-      && !this.settledResumed.get(owner)?.has(item.id)
-      && (proofs?.get(item.id) === undefined || proofs.get(item.id) === scope)) {
-      const held = this.heldResumed.get(owner) ?? new Set<string>();
-      held.add(item.id);
-      if (held.size > 1024) held.delete(held.values().next().value!);
-      this.heldResumed.set(owner, held);
+    for (const item of removed) if (item.outcome === "consumed" && deleted.has(item.id) && item.id.startsWith("pi:")
+      || item.resumed === true && (proofs?.get(item.id) === undefined || proofs.get(item.id) === scope)) {
+      const settled = this.settledResumed.get(owner) ?? new Set<string>();
+      settled.add(item.id);
+      if (settled.size > 1024) settled.delete(settled.values().next().value!);
+      this.settledResumed.set(owner, settled);
     }
     const receipts = this.removed.get(owner) ?? new Map<string, Set<string>>();
     this.removed.set(owner, receipts);
-    for (const item of terminal) {
+    for (const item of removed) {
       const seen = receipts.get(item.id) ?? new Set<string>();
       if (!seen.has(scope)) {
         seen.add(scope); receipts.set(item.id, seen);
@@ -220,16 +190,12 @@ export class PendingMessageStore {
       if (ownerReceipts?.size === 0) this.removed.delete(oldest.owner);
     }
     // An empty new-connection snapshot is not evidence that saved text was delivered.
-    const heldIds = this.heldResumed.get(owner);
-    const heldChanged = heldIds !== undefined && this.read(owner).some((message) =>
-      !deleted.has(message.id) && heldIds.has(message.id) && this.canHoldResumed(owner, message) && message.state !== "held");
-    if (deleted.size || heldChanged) {
+    if (deleted.size) {
       // another tab may have saved a message since this one last read the list: the write below keeps it
       this.refresh(owner);
       for (const id of deleted) proofs?.delete(id);
       if (proofs?.size === 0) this.scopes.delete(owner);
-      this.write(owner, this.read(owner).filter((message) => !deleted.has(message.id))
-        .map((message) => this.applyHeldResumed(owner, message)));
+      this.write(owner, this.read(owner).filter((message) => !deleted.has(message.id)));
     }
   }
   suspend(owner: string, scope: string): void {
@@ -342,7 +308,6 @@ export class PendingMessageStore {
     } catch { this.unsaved.add(owner); this.notify(); return false; }
     // another tab may have saved a message since this one last read the list
     this.refresh(owner);
-    this.heldResumed.get(owner)?.delete(id);
     // every write until the answer keeps the mark, also one made for another row
     this.unconfirmed.add(`${owner}\0${id}`);
     this.write(owner, this.read(owner));
@@ -363,7 +328,6 @@ export class PendingMessageStore {
   }
   fail(owner: string, id: string, error: { code: string; message: string }, uncertain: boolean, attemptedGeneration?: number): void {
     this.unconfirmed.delete(`${owner}\0${id}`);
-    if (uncertain) this.heldResumed.get(owner)?.delete(id);
     // another tab's rows and marks as they are saved now: this write is the whole list
     this.refresh(owner);
     this.write(owner, this.read(owner).map((message) => {
@@ -398,7 +362,6 @@ export class PendingMessageStore {
   removeCopy(owner: string, id: string): void {
     if (this.read(owner).some((message) => message.id === id && message.serverOwned)) return;
     this.scopes.get(owner)?.delete(id);
-    this.heldResumed.get(owner)?.delete(id);
     this.unconfirmed.delete(`${owner}\0${id}`);
     this.refresh(owner);
     this.write(owner, this.read(owner).filter((message) => message.id !== id));
