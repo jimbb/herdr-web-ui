@@ -271,3 +271,31 @@ it("summarizes ask_question and Path-based file tool calls", () => {
     summary: "/tmp/example.ts",
   });
 });
+
+it("starts a new assistant turn when a SYSTEM_MESSAGE wakes the planner after a completed reply, while keeping mid-turn wakeups in the active turn", () => {
+  const step = (step_index: number, type: string, created_at: string, content = "", extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ step_index, type, status: "DONE", created_at, content, ...extra });
+  const turns = parseAgyTranscript([
+    step(0, "USER_INPUT", "2026-11-09T11:36:17Z", "Run background job"),
+    step(1, "PLANNER_RESPONSE", "2026-11-09T11:36:25Z", "Starting job.", { tool_calls: [{ name: "run_command", args: { CommandLine: "run-job" } }] }),
+    step(2, "GENERIC", "2026-11-09T11:36:30Z", "Tool is running as a background task"),
+    // A SYSTEM_MESSAGE arriving while tools are still active stays in the same assistant turn.
+    step(3, "SYSTEM_MESSAGE", "2026-11-09T11:36:35Z", "<SYSTEM_MESSAGE>early notice</SYSTEM_MESSAGE>"),
+    step(4, "PLANNER_RESPONSE", "2026-11-09T11:36:40Z", "Waiting for it to finish."),
+    // Once a tool-free answer ends the sub-turn, a later SYSTEM_MESSAGE wakeup opens a new assistant turn with its own timestamps.
+    step(5, "SYSTEM_MESSAGE", "2026-11-09T13:09:40Z", "<SYSTEM_MESSAGE>task finished</SYSTEM_MESSAGE>"),
+    step(6, "PLANNER_RESPONSE", "2026-11-09T13:09:41Z", "Checking results.", { tool_calls: [{ name: "read_file", args: { AbsolutePath: "/out.log" } }] }),
+    step(7, "GENERIC", "2026-11-09T13:09:50Z", "ok"),
+    step(8, "PLANNER_RESPONSE", "2026-11-09T13:10:05Z", "All done."),
+  ].join("\n"));
+  expect(turns.map(({ role, ts, end_ts, parts }) => ({
+    role,
+    ts,
+    end_ts,
+    texts: parts.filter((part): part is Extract<typeof part, { kind: "text" }> => part.kind === "text").map((part) => part.text),
+  }))).toEqual([
+    { role: "user", ts: "2026-11-09T11:36:17Z", end_ts: undefined, texts: ["Run background job"] },
+    { role: "assistant", ts: "2026-11-09T11:36:25Z", end_ts: "2026-11-09T11:36:40Z", texts: ["Starting job.", "Waiting for it to finish."] },
+    { role: "assistant", ts: "2026-11-09T13:09:41Z", end_ts: "2026-11-09T13:10:05Z", texts: ["Checking results.", "All done."] },
+  ]);
+});

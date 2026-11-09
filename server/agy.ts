@@ -202,7 +202,7 @@ function agyScan(path: string, fd: number): Index {
       // a planner response with tools continues work; its tool-free answer ends it.
       // Reasoning is exported after the planner finishes, so it cannot prove Thinking.
       const activity = value.status !== "DONE" ? undefined
-        : value.type === "USER_INPUT" ? "working"
+        : value.type === "USER_INPUT" || value.type === "SYSTEM_MESSAGE" ? "working"
         : value.type === "PLANNER_RESPONSE"
           ? (Array.isArray(value.tool_calls) && value.tool_calls.length > 0) || typeof value.content !== "string" || !value.content.trim() ? "working" : "idle"
           : undefined;
@@ -310,6 +310,8 @@ function outputRef(path: string, step: Step): string {
 export function parseAgyTranscript(text: string, path?: string): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
   const steps = path ? new Map(indexes.get(path)?.visible.map((step) => [step.index, step])) : undefined;
+  let idle = false;
+  let woken = false;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const value = entry(line);
@@ -320,6 +322,13 @@ export function parseAgyTranscript(text: string, path?: string): ConversationTur
       const envelope = agyEnvelope(content);
       const skills = envelope === null ? [] : agyInvokedSkills(envelope.request, envelope.metadata).map((skill) => ({ kind: "skill" as const, skill }));
       turns.push({ role: "user", ts, parts: [{ kind: "text", text: envelope?.request ?? content }, ...skills] });
+      idle = false;
+      woken = false;
+      continue;
+    }
+    if (value.type === "SYSTEM_MESSAGE") {
+      // A background task, timer or subagent notification after a tool-free answer resumes the planner in a new turn.
+      if (idle) woken = true;
       continue;
     }
     if (value.type !== "PLANNER_RESPONSE" && value.type !== "GENERIC") continue;
@@ -346,8 +355,10 @@ export function parseAgyTranscript(text: string, path?: string): ConversationTur
     }
     if (!parts.length) continue;
     const previous = turns.at(-1);
-    if (previous?.role === "assistant") { previous.parts.push(...parts); previous.end_ts = ts ?? undefined; }
+    if (previous?.role === "assistant" && !woken) { previous.parts.push(...parts); previous.end_ts = ts ?? undefined; }
     else turns.push({ role: "assistant", ts, end_ts: ts ?? undefined, parts });
+    woken = false;
+    idle = value.type === "PLANNER_RESPONSE" && (!Array.isArray(value.tool_calls) || value.tool_calls.length === 0) && content.trim().length > 0;
   }
   return turns;
 }

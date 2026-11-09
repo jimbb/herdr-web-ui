@@ -71,6 +71,7 @@ describe("an agent turn's work blocks", () => {
     const html = render([tool("ls"), tool("cat a"), text("Done.")], { live: false });
     expect(titles(html)).toEqual(["Worked for 1m"]);
     expect(html.indexOf("Worked for 1m")).toBeLessThan(html.indexOf("Done."));
+    expect(html).toContain('dateTime="2026-01-01T12:01:00Z"');
   });
 });
 

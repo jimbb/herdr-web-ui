@@ -1154,6 +1154,8 @@ export const Turn = memo(function Turn({ paneId, turn, rowKey, live, waiting, sh
   const copyError = copyFailed && <p className="chat-copy-error" role="alert">{t("Couldn't copy. Select the text and copy it manually.")}</p>;
   const copied = (ok: boolean): void => setCopyFailed(!ok);
   const time = turn.ts === null ? null : <TurnTime ts={turn.ts} />;
+  const agentTs = turn.end_ts ?? turn.ts;
+  const agentTime = agentTs === null ? null : <TurnTime ts={agentTs} />;
   const wait = turn.parts.find((part): part is GoalWait => part.kind === "goal_wait");
   if (wait !== undefined) return <GoalWaitRow wait={wait} />;
   const compact = turn.parts.find((part): part is Extract<ConversationPart, { kind: "compact" }> => part.kind === "compact");
@@ -1260,7 +1262,7 @@ export const Turn = memo(function Turn({ paneId, turn, rowKey, live, waiting, sh
       {/* a mouse reads one copy glyph and the words "Plain text"; touch reads the two formats */}
       <CopyButton className="chat-meta-btn" text={answerText} label={t("Copy as markdown")} onResult={copied}><span className="chat-meta-fmt">MD</span></CopyButton>
       <CopyButton className="chat-meta-btn chat-meta-plain" text={plainText(answerText)} label={t("Copy as plain text")} onResult={copied}><span className="chat-meta-fmt">TXT</span><span className="chat-meta-word">{t("Plain text")}</span></CopyButton>
-      {time}
+      {agentTime}
     </div>}
     {copyError}
   </article>;
