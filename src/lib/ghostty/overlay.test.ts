@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { hasXtermPicture, newLines, xtermPictureScanner } from "./overlay.ts";
+import type { Terminal } from "@xterm/xterm";
+import { hasXtermPicture, newLines, overlayCell, xtermPictureScanner } from "./overlay.ts";
 
 test("announces only the lines a scroll brought in, not the rows that moved up", () => {
   const before = Array.from({ length: 5 }, (_, i) => `OLD-${i}`);
@@ -31,4 +32,13 @@ test("tells an iTerm2 or sixel picture whose start is split between two writes",
   const text = xtermPictureScanner();
   expect(text("\x1b]0;title\x07")).toBe(false);
   expect(text("plain text")).toBe(false);
+});
+
+test("takes xterm's cell, not a screen that still has the width of the grid before a resize while hidden", () => {
+  const term = (cell: { width: number; height: number } | undefined) => ({ cols: 66, rows: 40, _core: { _renderService: { dimensions: { css: { cell } } } } }) as unknown as Terminal;
+  // back from Chat: 66 columns, the screen still 120 columns of 5.5px wide
+  expect(overlayCell(term({ width: 5.5, height: 13 }), { width: 660, height: 520 })).toEqual({ width: 5.5, height: 13 });
+  // xterm has measured no cell yet: its screen over its grid
+  expect(overlayCell(term({ width: 0, height: 0 }), { width: 363, height: 520 })).toEqual({ width: 5.5, height: 13 });
+  expect(overlayCell(term(undefined), { width: 363, height: 520 })).toEqual({ width: 5.5, height: 13 });
 });

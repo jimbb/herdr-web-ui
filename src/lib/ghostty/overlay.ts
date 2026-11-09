@@ -81,6 +81,19 @@ function xtermRowRenderer(term: Terminal): XtermRowRenderer | null {
   return renderer && typeof renderer.renderRows === "function" ? renderer : null;
 }
 
+/**
+ * xterm's cell in CSS pixels, which its font alone sets, else its screen's size over its grid. The screen takes a new
+ * grid's size only once xterm draws again: resized while hidden (under the chat lens, which xterm takes for off
+ * screen), the grid changed at once and the screen kept the old width. Back from Chat, 66 columns over a 120-column
+ * screen made every cell 1.8 times wide, and WebKit told the screen's ResizeObserver nothing when the screen ended
+ * at the width it last told: on an iPhone each row stayed spread apart, its runs drawn over each other.
+ */
+export function overlayCell(term: Terminal, box: { width: number; height: number }): { width: number; height: number } {
+  const cell = (term as unknown as { _core?: { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } } })
+    ._core?._renderService?.dimensions?.css?.cell;
+  return cell && cell.width > 0 && cell.height > 0 ? { width: cell.width, height: cell.height } : { width: box.width / term.cols, height: box.height / term.rows };
+}
+
 /** xterm.js 6's own ANSI colours, which it draws with wherever the theme names none (the dark palettes name none) */
 const XTERM_ANSI = ["#2e3436", "#cc0000", "#4e9a06", "#c4a000", "#3465a4", "#75507b", "#06989a", "#d3d7cf",
   "#555753", "#ef2929", "#8ae234", "#fce94f", "#729fcf", "#ad7fa8", "#34e2e2", "#eeeeec"];
@@ -153,12 +166,10 @@ export async function attachGhosttyOverlay(term: Terminal, host: HTMLElement, ta
   const decoded = new Map<string, HTMLCanvasElement>();
 
   const metrics = (): void => {
-    const box = screen.getBoundingClientRect();
-    cellW = box.width / term.cols;
-    cellH = box.height / term.rows;
+    ({ width: cellW, height: cellH } = overlayCell(term, screen.getBoundingClientRect()));
     const font = term.options.fontFamily ?? "monospace";
     const size = term.options.fontSize ?? 13;
-    Object.assign(layer.style, { fontFamily: font, fontSize: `${size}px`, width: `${box.width}px`, height: `${box.height}px` });
+    Object.assign(layer.style, { fontFamily: font, fontSize: `${size}px`, width: `${cellW * term.cols}px`, height: `${cellH * term.rows}px` });
     layer.style.setProperty("--ghostty-cw", `${cellW}px`);
     layer.style.setProperty("--ghostty-ch", `${cellH}px`);
     // each cell is xterm's width: a font whose advance differs is spaced to it. The probe measures the font's own
