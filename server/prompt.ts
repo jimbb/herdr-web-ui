@@ -1038,7 +1038,7 @@ async function readKnownPrompt(
     return { prompt: publicPrompt(parsed) };
   }
 
-  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", ""].includes(agent)) return { prompt: null };
+  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", "agy", ""].includes(agent)) return { prompt: null };
   const piTranscript = agent === "pi" ? await piTranscriptPath(paneId).catch(() => null) : null;
   // pi-ask's ask_user form, as the web UI's pi extension reports it: answered through pi-ask, never keys
   if (piTranscript && "path" in piTranscript) {
@@ -1119,6 +1119,9 @@ async function readKnownPrompt(
     return parseInteractivePrompt(agent, drawn, omoAsks[0] ?? null, omoTrusted, omoAsks, held, pane.agent_status === "working");
   };
   let prompt = piNative ? publicPrompt(piNative) : parseDrawn(screen);
+  // agy's own dialogs only (dialogs/agy.ts): any other screen keeps the
+  // card it had, the generic one while herdr reports it blocked
+  if (agent === "agy" && prompt && !parsedByPublicPrompt.get(prompt)?.responder.startsWith("agy-")) prompt = null;
   let rebind = (card: InteractivePrompt): InteractivePrompt => card;
   if (prompt && agent === "omp") {
     const read = await withOmpMarkdown(paneId, pane.cwd ?? "", prompt, markdown, ompBindings);
@@ -1938,9 +1941,9 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             && shown.nativeSteps?.index === parsed.nativeSteps?.index
             && (!onCursor || (shown.selectedIndex === cursor && ticked(shown) && (settled === null || (settled.selectedIndex === cursor && ticked(settled)))));
         };
-        // Hermes's multi-select: every key, the ticks after the first and the Enter that locks them, is on the same
+        // Hermes's and agy's multi-select: every key, the ticks after the first and the Enter that locks them, is on the same
         // question, so each is checked against it as the first was, with the rows ticked as this answer's own Spaces left them
-        const togglesInPlace = responder === "hermes-question" && body.option_indices !== undefined;
+        const togglesInPlace = (responder === "hermes-question" || responder === "agy-question") && body.option_indices !== undefined;
         const ticks = new Set(parsed.checkedOptionIndices);
         function ticked(shown: ParsedPrompt): boolean {
           return !togglesInPlace || (shown.checkedOptionIndices.length === ticks.size && shown.checkedOptionIndices.every((index) => ticks.has(index)));
