@@ -20,9 +20,11 @@ import type { HerdrPane } from "../shared/protocol.ts";
  *   person's prompt.
  *
  * What the turn started is what started since the prompt. A task started before the pane's process
- * is a gone process's (START_SLACK_MS as in claude-subagents.ts). A timer is held until it is due,
- * past the hold's limit: it surely resumes the turn, and a command may be a server. Each file is
- * read on from where the last read stopped.
+ * is a gone process's (START_SLACK_MS as in claude-subagents.ts). A timer due within TIMER_LIMIT_MS
+ * is held until it is due, past the hold's limit: it surely resumes the turn, and a command may be a
+ * server. Only its process fires it, so while one is held its pane is looked up again each RESOLVE_MS,
+ * and a pane whose session can no longer be looked up holds nothing. Each file is read on from where
+ * the last read stopped.
  */
 const POLL_MS = 2000;
 /** how long a pane's session is trusted before it is looked up again: the agent may have restarted there */
@@ -30,6 +32,8 @@ const RESOLVE_MS = 30_000;
 const START_SLACK_MS = 60_000;
 /** a timer past due by this much fired in a process that is gone */
 const DUE_GRACE_MS = 120_000;
+/** a timer due further out than this is held as a command is, to the hold's limit */
+const TIMER_LIMIT_MS = 24 * 3_600_000;
 const READ_CHUNK = 1024 * 1024;
 /** O_NONBLOCK: a FIFO put there is opened without waiting for a writer, and refused as no plain file */
 const READ_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
@@ -54,8 +58,8 @@ function timerDue(content: string, at: number): number | null {
   const timer = content.match(AGY_TIMER)?.[1];
   if (timer === undefined) return null;
   const due = at + [...timer.matchAll(/(\d+)([hms])/g)].reduce((sum, [, n, unit]) => sum + Number(n) * UNIT_MS[unit!]!, 0);
-  // a time that cannot be told is held as a command is, to the hold's limit
-  return Number.isFinite(due) ? due : null;
+  // a time that cannot be told, or is too far out, is held as a command is, to the hold's limit
+  return Number.isFinite(due) && due - at <= TIMER_LIMIT_MS ? due : null;
 }
 
 /** One line of a session file, read into what it says runs. Lines that cannot matter are not parsed. */
@@ -98,7 +102,7 @@ export function taskCount(state: SessionTasks, started: number | null, now: numb
 }
 
 interface Tracked extends SessionTasks {
-  agent: TaskAgent; path: string; started: number | null; owner: string | null; resolvedAt: number;
+  pane: HerdrPane & { agent: TaskAgent }; agent: TaskAgent; path: string; started: number | null; owner: string | null; resolvedAt: number;
   ino: number; offset: number; decoder: StringDecoder; partial: string; told: string | null; running: number;
 }
 
@@ -189,18 +193,20 @@ export class AgentTaskStatus {
     try { found = await this.deps.resolve({ ...pane, agent }); } catch { found = null; } finally { this.resolving.delete(pane.pane_id); }
     if (this.lifetimes.get(pane.pane_id) !== lifetime) return;
     const current = this.panes.get(pane.pane_id);
+    // the process is gone or its session cannot be read: what it ran, a timer too, holds nothing
     if (found === null) {
-      if (current !== undefined && current.agent !== agent) this.letGo(pane.pane_id);
+      if (current !== undefined) this.letGo(pane.pane_id);
       return;
     }
     if (current !== undefined && current.agent === agent && current.path === found.path && current.owner === found.owner) {
       current.resolvedAt = this.now();
+      current.pane = { ...pane, agent };
       // a start that could not be read before may be now: the gone process's tasks are dropped then
       current.started ??= found.started;
       return;
     }
     if (current !== undefined) this.deps.onReset(pane.pane_id);
-    this.panes.set(pane.pane_id, { agent, ...found, resolvedAt: this.now(), ino: -1, offset: 0, decoder: new StringDecoder("utf8"), partial: "", tasks: new Map(), promptAt: null, told: null, running: 0 });
+    this.panes.set(pane.pane_id, { pane: { ...pane, agent }, agent, ...found, resolvedAt: this.now(), ino: -1, offset: 0, decoder: new StringDecoder("utf8"), partial: "", tasks: new Map(), promptAt: null, told: null, running: 0 });
     this.poll(pane.pane_id);
   }
 
@@ -210,6 +216,8 @@ export class AgentTaskStatus {
       if (only !== undefined && paneId !== only) continue;
       readOn(tracked);
       const count = taskCount(tracked, tracked.started, this.now());
+      // a timer is held past the hold's limit only while its process lasts: no event tells that of a pane at rest
+      if (!count.capped && this.now() - tracked.resolvedAt >= RESOLVE_MS) void this.track(tracked.pane).catch(() => undefined);
       const told = `${count.running}:${count.turnRunning}:${count.promptAt}:${count.capped}`;
       if (told === tracked.told) continue;
       tracked.told = told;

@@ -167,11 +167,60 @@ describe("AgentTaskStatus", () => {
     status.poll();
     expect(status.countOf("p1")).toBe(0);
   });
+
+  it("drops a pane's tasks and timers once its session cannot be looked up, and looks a timer's pane up again by itself", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-tasks-"));
+    roots.push(root);
+    const path = join(root, "a.jsonl");
+    writeFileSync(path, `${JSON.stringify(agy.prompt(0))}\n${JSON.stringify(agy.start(3, 1, "Timer: 2h, Prompt: x"))}\n`);
+    let found: { path: string; started: null; owner: string } | null = { path, started: null, owner: "1:boot:100" };
+    let lookups = 0;
+    const told: TaskCount[] = [];
+    let dropped = Promise.withResolvers<void>();
+    let now = T0 + 2 * 60_000;
+    const status = new AgentTaskStatus({
+      resolve: async () => { lookups += 1; return found; },
+      onChange: (_, c) => { told.push(c); if (c.running === 0) dropped.resolve(); },
+      onReset: () => undefined,
+      now: () => now,
+    });
+    await status.track(pane("agy"));
+    expect(told).toEqual([count(1, 1, T0, false)]);
+    // the agy process is gone (or its session unreadable): its timer will not fire, so nothing of it is held
+    found = null;
+    now += 30_000;
+    await status.track(pane("agy"));
+    expect(told.at(-1)).toEqual(count(0, 0, null));
+    expect(status.countOf("p1")).toBe(0);
+    // a pane at rest on a timer gets no event that would look it up: the poll does, once its lookup is old
+    found = { path, started: null, owner: "1:boot:100" };
+    await status.track(pane("agy"));
+    expect(status.countOf("p1")).toBe(1);
+    dropped = Promise.withResolvers<void>();
+    found = null;
+    status.poll();
+    expect(lookups).toBe(3);
+    now += 30_000;
+    status.poll();
+    await dropped.promise;
+    expect(lookups).toBe(4);
+    expect(told.at(-1)).toEqual(count(0, 0, null));
+    expect(status.countOf("p1")).toBe(0);
+  });
 });
 
 describe("agy timers", () => {
   it("takes a timer too long to be told as a command, held to the hold's limit", () => {
     const state = read("agy", [agy.prompt(0), agy.start(3, 1, `Timer: ${"9".repeat(400)}h, Prompt: x`)]);
     expect(taskCount(state, null, T0 + 2 * 60_000)).toEqual(count(1, 1, T0, true));
+  });
+
+  it("holds a timer due more than a day out as a command, to the hold's limit", () => {
+    const state = read("agy", [agy.prompt(0), agy.start(3, 1, "Timer: 9999h, Prompt: x")]);
+    expect(taskCount(state, null, T0 + 2 * 60_000)).toEqual(count(1, 1, T0, true));
+    readTaskLine("agy", state, JSON.stringify(agy.start(4, 1, "Timer: 24h, Prompt: x")));
+    expect(taskCount(state, null, T0 + 2 * 60_000)).toEqual(count(2, 2, T0, true));
+    readTaskLine("agy", state, JSON.stringify(agy.notice(3, 2)));
+    expect(taskCount(state, null, T0 + 3 * 60_000)).toEqual(count(1, 1, T0, false));
   });
 });
