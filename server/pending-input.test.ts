@@ -560,4 +560,31 @@ describe("a pane moved to a new ID (#1503)", () => {
         expect(f.queue.discard(item, true)).toBe(false);
       }
     });
+
+  it("keeps queued items across close(owner, false), does not expire them while queued, and rebinds them on reconnect", () => {
+    const f = fixture();
+    const queued = f.enqueue(1, "a", "p1", "stay queued");
+    const inFlight = f.enqueue(2, "a", "p2", "in flight");
+    expect(f.queue.claim(inFlight, false)).toBe(true);
+    f.queue.close("a", false);
+    expect(f.queue.list("a", "p1")).toMatchObject([{ id: queued.message.id, state: "queued" }]);
+    expect(f.queue.list("a", "p2")).toMatchObject([{ id: inFlight.message.id, state: "uncertain" }]);
+    // in-flight item stays retained until settled after close, and expires after CLOSED_RETENTION_MS
+    f.queue.settle(inFlight, { code: "submit_changed", message: "ambiguous" }, true);
+    expect(f.queue.list("a", "p2")).toMatchObject([{ id: inFlight.message.id, state: "uncertain" }]);
+    f.advance(60_001);
+    f.queue.expire();
+    expect(f.queue.list("a", "p2")).toEqual([]);
+    // queued item is NOT expired while waiting for its turn
+    expect(f.queue.list("a", "p1")).toMatchObject([{ id: queued.message.id, state: "queued" }]);
+    expect(f.queue.closedIn("p1")).toEqual([queued]);
+    // rebinding transfers ownership and request_id deduplication to the returning connection
+    const nextLease = "lease-b";
+    expect(f.queue.rebind(queued, "b", nextLease)).toBe(true);
+    expect(f.queue.list("a", "p1")).toEqual([]);
+    expect(f.queue.list("b", "p1")).toMatchObject([{ id: queued.message.id, state: "queued" }]);
+    expect(queued.lease).toBe(nextLease);
+    f.queue.status("p1", "idle");
+    expect(f.queue.next("p1")?.message.id).toBe(queued.message.id);
+  });
 });

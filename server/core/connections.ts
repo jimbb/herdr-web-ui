@@ -258,7 +258,9 @@ export function createConnections({ clients, present, pending, devices, detachCl
 
   function authorizeSocket(client: Client): void {
     const state = stateOf(client);
-    if (state.revoked) throw new HerdrError("device_revoked", "this device's access was revoked");
+    if (state.revoked || (client.data.deviceId !== undefined && !client.data.readOnly && !devices.canDrive(client.data.deviceId))) {
+      throw new HerdrError("device_revoked", "this device's access was revoked");
+    }
     if (client.data.readOnly || state.mode === "observe") throw new HerdrError("read_only", "this connection can only watch");
   }
 

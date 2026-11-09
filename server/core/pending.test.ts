@@ -647,3 +647,49 @@ it.skipIf(Boolean(process.env["CLAUDE_CONFIG_DIR"]))("holds a message queued for
     expect(delivery.pending.list(owner, "p")).toMatchObject([{ id: item.message.id, state: "held" }]);
   } finally { session.mockRestore(); }
 });
+
+it.each(["reattach before turn end", "overlapping reload", "revoked"] as const)(
+  "keeps a queued follow-up across connection close and rebinds it to the returning browser (%s)", async (scenario) => {
+    const token = crypto.randomUUID(), frames = new Map<Client, ServerMessage[]>(), clients = new Set<Client>(), revoked = new Set<Client>();
+    const client = (receiptResumeId = token): Client => {
+      const output: ServerMessage[] = [];
+      const owner = { data: connectionData({ deviceId: "device", readOnly: false }), getBufferedAmount: () => 0,
+        send: (value: string) => { output.push(JSON.parse(value)); return 1; } } as Client;
+      owner.data.attached.set("p", { keepSize: false, receiptResumeId });
+      clients.add(owner); frames.set(owner, output); return owner;
+    };
+    const first = client();
+    const delivery = createPendingDelivery({
+      options: {}, clients, attachments: new Map(), serialize: async (_pane, task) => task(), lastTyped: new Map(),
+      sight: (): TerminalSighting => ({ origin: null, pty: null, claim: null, facts: () => READY, write: () => {} }),
+      submitText: async () => {},
+      authorizeSocket: (owner) => { if (revoked.has(owner)) throw new Error("revoked"); },
+      clientSnapshot: async () => ({ panes: [{ pane_id: "p", terminal_id: "p", agent: "codex", agent_status: "working" }] }) as SessionSnapshot,
+      omo: { sessionOf: () => null }, SUBMIT_DEADLINE_MS: 45_000, SUBMIT_DELAY_MS: 0, TYPED_SETTLE_MS: 0,
+    });
+    const queued = delivery.pending.enqueue(first, "p", 1, "queued across close", null, { agent: "codex", terminalId: "p", session: null });
+    const held = delivery.pending.enqueue(first, "p", 2, "already held", null, { agent: "codex", terminalId: "p", session: null }, true);
+    if (scenario === "revoked") revoked.add(first);
+    const overlap = scenario === "overlapping reload" ? client() : undefined;
+    if (overlap) delivery.attached(overlap, "p");
+    delivery.closeConnection(first);
+    // detachClaimed runs after closeConnection while closing is true
+    delivery.holdPending(first, "p");
+    clients.delete(first);
+    first.data.attached.clear();
+    const next = overlap ?? client();
+    if (scenario === "revoked") {
+      expect(delivery.pending.list(first, "p")).toMatchObject([
+        { id: queued.message.id, state: "held" },
+        { id: held.message.id, state: "held" },
+      ]);
+      delivery.attached(next, "p");
+      expect(delivery.pending.list(next, "p")).toEqual([]);
+      return;
+    }
+    if (!overlap) delivery.attached(next, "p");
+    expect(delivery.pending.list(next, "p")).toMatchObject([{ id: queued.message.id, state: "queued" }]);
+    expect(delivery.pending.list(first, "p")).toMatchObject([{ id: held.message.id, state: "held" }]);
+    const listed = frames.get(next)!.flatMap((frame) => frame.type === "pending-messages" ? frame.messages : []);
+    expect(listed).toMatchObject([{ id: queued.message.id, state: "queued" }]);
+  });

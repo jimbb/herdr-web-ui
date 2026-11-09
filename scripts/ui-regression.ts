@@ -1004,17 +1004,26 @@ try {
   assert.equal(inputs.length, sentBeforeSnapshot, "the message waits for the frame that says what the bridge supports");
   // that frame needs no herdr: once it is in, the message goes, with the snapshot (which waits on herdr) still held
   releaseFeatures!();
-  await until(async () => await page.locator('.pending-message[data-state="queued"]').count() === 1, "the message sent before the snapshot is a live pending row");
+  await until(async () => await page.locator('.pending-message[data-state="queued"]').count() === 3, "the message sent before the snapshot and the rebound rows are live pending rows");
   assert.notEqual(releaseSnapshot, null, "the snapshot was still held back when the message went");
   releaseSnapshot!();
   assert.equal(inputs.at(-1)?.delivery, "queue");
   assert.equal(await page.locator(".composer-note").count(), 0);
-  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  await page.getByRole("button", { name: "Discard", exact: true }).last().click();
   await until(async () => await pendingRows.count() === 2, "the live row was discarded on the bridge");
   assert.equal(pendingBytes(), `\u001b[200~${queuedTexts[0]}\u001b[201~\r\u001b`);
   await page.reload(); await page.locator(".conn-live").waitFor();
-  await until(async () => await pendingRows.count() === 2, "saved pending copies restored");
+  await until(async () => await page.locator('.pending-message[data-state="queued"]').count() === 2, "reloaded page rebinds its server-queued rows");
   assert.deepEqual(await pendingRows.locator(".pending-message-bubble").allTextContents(), queuedTexts.slice(1));
+  for (let left = 2; left > 0; left--) { await page.getByRole("button", { name: "Discard", exact: true }).first().click(); await until(async () => await pendingRows.count() === left - 1, "discard rebound queued row"); }
+  await page.evaluate((pane) => {
+    localStorage.setItem(`ovis:pending:${pane}`, JSON.stringify({
+      version: 1,
+      messages: [1, 2].map((index) => ({ id: `saved-uncertain-${index}`, request_id: 900 + index, text: `saved uncertain ${index}`, created_at: new Date().toISOString(), state: "uncertain" })),
+    }));
+  }, pendingPane);
+  await page.reload(); await page.locator(".conn-live").waitFor();
+  await until(async () => await pendingRows.count() === 2, "saved pending copies restored");
   assert.equal(await page.locator('.pending-message[data-state="uncertain"]').count(), 2, "reload removes connection proof");
   assert.equal(await page.locator(".pending-message-send").count(), 0, "unknown delivery cannot be resent");
   await reportPending("idle"); await page.locator('.composer-status:not([data-status="working"])').waitFor();

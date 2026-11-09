@@ -243,6 +243,7 @@ export class PendingInputs<Owner, Lease> {
     if (uncertain || gate?.by === item.message.id || gate?.completed) this.gates.delete(item.paneId);
     // the pane's other messages wait behind it, each for its own reason: a paste left in the input line is that message's alone (#511)
     if (uncertain) this.holdPane(item.paneId, fault.code === "pasted_not_sent" ? BEHIND_PASTE : fault);
+    if (this.closed.has(item.owner)) this.closed.set(item.owner, this.now());
     this.publish(item.owner, item.paneId);
   }
 
@@ -311,6 +312,7 @@ export class PendingInputs<Owner, Lease> {
         panes.add(item.paneId);
       }
     }
+    if (panes.size && this.closed.has(owner)) this.closed.set(owner, this.now());
     for (const pane of panes) this.publish(owner, pane);
   }
 
@@ -318,6 +320,7 @@ export class PendingInputs<Owner, Lease> {
   holdItem(item: PendingRecord<Owner, Lease>, fault: Fault): void {
     if (this.records.get(item.message.id) !== item || item.inFlight || item.message.state !== "queued") return;
     item.message.state = "held"; item.message.error = fault;
+    if (this.closed.has(item.owner)) this.closed.set(item.owner, this.now());
     this.publish(item.owner, item.paneId);
   }
 
@@ -358,7 +361,37 @@ export class PendingInputs<Owner, Lease> {
     for (const owner of owners) { this.publish(owner, from); this.publish(owner, to); }
   }
 
-  close(owner: Owner): void { this.hold(owner); this.closed.set(owner, this.now()); }
+  ownedBy(owner: Owner): PendingRecord<Owner, Lease>[] {
+    return [...this.records.values()].filter((item) => item.owner === owner);
+  }
+
+  closedIn(paneId?: string): PendingRecord<Owner, Lease>[] {
+    return [...this.records.values()].filter((item) => (paneId === undefined || item.paneId === paneId) && this.closed.has(item.owner));
+  }
+
+  rebind(item: PendingRecord<Owner, Lease>, to: Owner, lease: Lease): boolean {
+    if (this.records.get(item.message.id) !== item || item.owner === to) return false;
+    const from = item.owner;
+    item.owner = to;
+    item.lease = lease;
+    if (this.closed.has(from) && ![...this.records.values()].some((other) => other.owner === from)) {
+      this.closed.delete(from);
+    }
+    for (const receipt of this.removed.values()) {
+      if (receipt.owner === from && receipt.paneId === item.paneId) receipt.owner = to;
+    }
+    return true;
+  }
+
+  close(owner: Owner, holdQueued = true): void {
+    if (holdQueued) this.hold(owner);
+    else {
+      for (const pane of new Set([...this.records.values()].filter((item) => item.owner === owner && item.inFlight).map((item) => item.paneId))) {
+        this.hold(owner, pane);
+      }
+    }
+    this.closed.set(owner, this.now());
+  }
 
   expire(): void {
     this.expireResends();
@@ -369,7 +402,7 @@ export class PendingInputs<Owner, Lease> {
       }
     }
     for (const [owner, closedAt] of this.closed) if (this.now() - closedAt >= CLOSED_RETENTION_MS) {
-      for (const [id, item] of this.records) if (item.owner === owner && !item.inFlight) {
+      for (const [id, item] of this.records) if (item.owner === owner && !item.inFlight && item.message.state !== "queued") {
         if (item.message.state === "uncertain") this.finish(item, "dismissed");
         else this.records.delete(id);
       }

@@ -30,7 +30,7 @@ export type SocketHandler = Omit<WebSocketHandler<SocketData>, "open" | "message
 /** The frames of the connection itself: its liveness, its watches and its role. */
 type ConnectionFrame = "ping" | "watch" | "unwatch" | "role" | "machine-events";
 
-export function createSocket({ clients, present, stopped, admit, setRole, watchable, terminalHistory, watchPane, unwatchPane, end, holdPending, attachments, clientSnapshot, herdrLifetime, browserSnapshot, countVisit, drainOutput, frames }: {
+export function createSocket({ clients, present, stopped, admit, setRole, watchable, terminalHistory, watchPane, unwatchPane, end, holdPending, attachments, clientSnapshot, herdrLifetime, browserSnapshot, countVisit, drainOutput, snapshotSent, frames }: {
   clients: Set<Client>;
   present: Set<Client>;
   stopped: () => boolean;
@@ -55,6 +55,7 @@ export function createSocket({ clients, present, stopped, admit, setRole, watcha
   browserSnapshot: (snapshot: SessionSnapshot) => SessionSnapshot;
   countVisit: (snapshot?: Promise<SessionSnapshot>, visit?: { surface?: TelemetrySurface; ingress?: TelemetryIngress }) => void;
   drainOutput: (client: Client) => void;
+  snapshotSent?: (client: Client) => void;
   /** every other frame type's handler, from the module that owns what it changes */
   frames: Omit<FrameHandlers, ConnectionFrame>;
 }): SocketHandler {
@@ -149,6 +150,7 @@ export function createSocket({ clients, present, stopped, admit, setRole, watcha
       try {
         const read = await snapshot;
         send(client, { type: "snapshot", snapshot: client.data.bridge ? read : browserSnapshot(read), features, connection: client.data.connectionId });
+        snapshotSent?.(client);
       } catch (error) {
         const code = error instanceof HerdrError ? error.code : "snapshot_failed";
         send(client, { type: "error", code, message: error instanceof Error ? error.message : String(error) });

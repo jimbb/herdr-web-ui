@@ -308,30 +308,33 @@ try {
   await splitRow.waitFor({ state: "detached" });
   assert.equal(bytes(), delivered);
 
-  // A real lost WebSocket is different from component navigation: ownership must end.
-  const disconnected = await queue("never replay after a lost connection");
+  // A real lost WebSocket suspends proof while offline, then rebinds the server-queued row on reconnect.
+  const disconnected = await queue("deliver after a lost connection");
   admit = false; await routed!.close();
   await page.locator(".conn-live").waitFor({ state: "hidden" });
-  await until(async () => await rows().filter({ hasText: disconnected.text }).getAttribute("data-state") === "uncertain", "disconnect removes proof of the pending ID");
+  const disconnectedRow = rows().filter({ hasText: disconnected.text });
+  await until(async () => await disconnectedRow.getAttribute("data-state") === "uncertain", "disconnect removes proof of the pending ID while offline");
+  assert.equal(await disconnectedRow.locator(".pending-message-send").count(), 0, "an uncertain copy never offers Send now");
   admit = true;
   await page.locator(".conn-live").waitFor(); await inputReady(pane);
-  const uncertain = rows().filter({ hasText: disconnected.text });
-  assert.equal(await uncertain.locator(".pending-message-send").count(), 0, "an uncertain copy never offers Send now");
-  await report("idle"); await noBytes(delivered, "reconnect and readiness never replay disconnected pending input");
-  await uncertain.getByRole("button", { name: "Discard saved copy", exact: true }).click();
-  await uncertain.waitFor({ state: "detached" });
+  await until(async () => await disconnectedRow.getAttribute("data-state") === "queued", "reconnect rebinds the server-queued row");
+  await report("idle");
+  delivered += paste(disconnected.text);
+  await until(() => bytes() === delivered, "reconnect delivers server-queued input once at the next turn");
+  await disconnectedRow.waitFor({ state: "detached" });
 
   await report("working");
-  const reloaded = await queue("never replay after reload");
+  const reloaded = await queue("deliver after reload");
   await page.reload(); await page.locator(".conn-live").waitFor(); await current(pane).waitFor(); await inputReady(pane);
   const saved = rows().filter({ hasText: reloaded.text });
-  await saved.waitFor();
-  assert.equal(await saved.getAttribute("data-state"), "uncertain", "reload restores text without connection proof");
-  assert.equal(await saved.locator(".pending-message-send").count(), 0);
-  await report("idle"); await noBytes(delivered, "reload and readiness never replay saved pending input");
+  await until(async () => await saved.getAttribute("data-state") === "queued", "reload rebinds the server-queued row");
+  await report("idle");
+  delivered += paste(reloaded.text);
+  await until(() => bytes() === delivered, "reload delivers server-queued input once at the next turn");
+  await saved.waitFor({ state: "detached" });
   assert.deepEqual(errors, []);
   await context.close();
-  console.log("PASS split panes share one connection; real disconnect and reload stay uncertain without automatic or explicit replay");
+  console.log("PASS split panes share one connection; real disconnect and reload rebind server-queued input and deliver once at the next turn");
 } finally {
   await browser?.close(); server?.stop();
   for (const workspace of workspaces) await workspaceClose(workspace).catch(() => {});

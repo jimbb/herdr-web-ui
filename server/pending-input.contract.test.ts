@@ -304,21 +304,21 @@ describe("resumable follow-up receipts (#2421)", () => {
     let rowId: string;
     let closed!: (value: { store: pendingInput.PendingInputs<unknown, unknown>; owner: unknown }) => void;
     const ownerClosed = new Promise<{ store: pendingInput.PendingInputs<unknown, unknown>; owner: unknown }>((resolve) => { closed = resolve; });
-    const closing = spyOn(pendingInput.PendingInputs.prototype, "close").mockImplementation(function (this: pendingInput.PendingInputs<unknown, unknown>, owner) {
+    const closing = spyOn(pendingInput.PendingInputs.prototype, "close").mockImplementation(function (this: pendingInput.PendingInputs<unknown, unknown>, owner, ...args) {
       const retained = rowId !== undefined && this.get(owner, f.pane, rowId) !== undefined;
-      close.call(this, owner);
+      close.call(this, owner, ...args);
       if (retained) closed({ store: this, owner });
     });
     try {
       await f.socket.disconnect();
       const resumeId = crypto.randomUUID(), browser = await connect(resumeId);
       const writes = herdrWrites.slice();
-      browser.send({ type: "submit", id: 986, pane_id: f.pane, text: "remote held follow-up", payload: "unused\r", delivery: "queue" });
+      browser.send({ type: "submit", id: 986, pane_id: f.pane, text: "remote held follow-up", payload: "unused\r", delivery: "hold" });
       const answer = await browser.result(986);
       expect(answer.ok).toBe(true);
       const row = answer.pending as PendingMessage;
       expect(row.id).toBeString();
-      expect(row.state).toBe("queued");
+      expect(row.state).toBe("held");
       rowId = row.id;
       await browser.disconnect();
       // The client close can precede the remote bridge's close; wait for the original owner's store.
@@ -388,6 +388,37 @@ describe("resumable follow-up receipts (#2421)", () => {
     const replay = await f.removed(row.id, outcome, resumed);
     expect(replay.removed).toContainEqual({ id: row.id, outcome, resumed: true });
     expect(f.bytes()).toBe(bytes);
+  }, 20_000);
+
+  it.each(["while disconnected", "after reattach"] as const)("delivers a queued follow-up across browser disconnect (%s) and confirms it once", async (when) => {
+    const f = await setup(`codex-queued-${when.replace(/\s+/g, "-")}`, "codex");
+    const token = crypto.randomUUID(), from = f.socket.seen.length;
+    f.socket.send({ type: "attach", pane_id: f.pane, cols: 100, rows: 30, receipt_resume_id: token });
+    await f.socket.wait((frame) => frame.type === "input-ready" && frame.pane_id === f.pane, from);
+    const row = await f.queue(982, "queued across disconnect");
+    await f.socket.disconnect();
+    if (when === "while disconnected") {
+      const keeper = await f.another();
+      await f.state("idle", keeper);
+      await f.waitBytes(`${paste(row.text)}\r`);
+      const resumed = await f.another(false);
+      await resumed.attach(f.pane, false, token);
+      const replay = await f.removed(row.id, "sent", resumed);
+      expect(replay.removed).toContainEqual({ id: row.id, outcome: "sent", resumed: true });
+      expect(f.bytes()).toBe(`${paste(row.text)}\r`);
+      return;
+    }
+    const resumed = await f.another(false);
+    await resumed.attach(f.pane, false, token);
+    const listed = await resumed.wait((frame) => frame.type === "pending-messages"
+      && frame.pane_id === f.pane && frame.messages.some((item: PendingMessage) => item.id === row.id && item.state === "queued"));
+    expect(listed.messages).toContainEqual(expect.objectContaining({ id: row.id, state: "queued" }));
+    expect(f.bytes()).toBe("");
+    await f.state("idle", resumed);
+    await f.waitBytes(`${paste(row.text)}\r`);
+    const settled = await f.removed(row.id, "sent", resumed);
+    expect(settled.removed).toContainEqual({ id: row.id, outcome: "sent" });
+    expect(f.bytes()).toBe(`${paste(row.text)}\r`);
   }, 20_000);
 
   it("gives no receipt to a browser that attaches with another resume id", async () => {
@@ -1274,13 +1305,19 @@ describe("connection-owned pending input", () => {
     expect(await f.socket.action(11)).toMatchObject({ ok: true }); await f.waitBytes("\r"); expect(f.bytes()).toBe(`${paste("held")}\r`);
   }, 30_000);
 
-  it("does not auto-send or replay a closed connection's pending input", async () => {
-    const f = await setup("disconnect"); const keeper = await f.another(); const message = await f.queue(1, "never replay");
+  it("auto-sends a closed connection's queued input at the next turn without letting another connection claim it or auto-sending held input", async () => {
+    const f = await setup("disconnect"); const keeper = await f.another(); const message = await f.queue(1, "deliver after disconnect");
+    f.socket.send({ type: "submit", id: 2, pane_id: f.pane, text: "never auto-send held", payload: "unused", delivery: "hold" });
+    const held = (await f.socket.result(2)).pending as PendingMessage;
+    expect(held.state).toBe("held");
     await f.socket.disconnect(); await f.state("idle", keeper);
+    await f.waitBytes(`${paste("deliver after disconnect")}\r`);
     keeper.send({ type: "submit", id: 20, pane_id: f.pane, text: "barrier", payload: "barrier", typed: true });
-    expect(await keeper.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r"); expect(f.bytes()).toBe("barrier\r");
+    expect(await keeper.result(20)).toMatchObject({ ok: true }); await f.waitBytes("barrier\r"); expect(f.bytes()).toBe(`${paste("deliver after disconnect")}\rbarrier\r`);
     keeper.send({ type: "pending-action", id: 21, pane_id: f.pane, pending_id: message.id, action: "steer" });
     expect(await keeper.action(21)).toMatchObject({ ok: false, code: "pending_not_found" });
+    keeper.send({ type: "pending-action", id: 22, pane_id: f.pane, pending_id: held.id, action: "steer" });
+    expect(await keeper.action(22)).toMatchObject({ ok: false, code: "pending_not_found" });
   }, 30_000);
 
   it("cancels the committing key when a sender closes after its paste", async () => {

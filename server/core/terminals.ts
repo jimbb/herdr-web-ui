@@ -26,7 +26,14 @@ const REPAINT_MIN_INTERVAL_MS = 1000;
 type Frame<T extends ClientMessage["type"]> = Extract<ClientMessage, { type: T }>;
 
 /** What the server outside the registry reads of a pane's attachment: its grid, and whether another web bridge holds its terminal. */
-export type AttachmentView = { readonly cols: number; readonly rows: number; readonly held?: boolean };
+export type AttachmentView = {
+  readonly cols: number;
+  readonly rows: number;
+  readonly held?: boolean;
+  readonly ready?: boolean;
+  readonly kind?: "pty" | "mirror";
+  readonly clients?: ReadonlySet<Client>;
+};
 
 /**
  * What a connection saw of a pane's terminal before an await, held as references and never

@@ -3152,7 +3152,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   neither matching text nor an empty queue clears it. A changed terminal or session also makes
   confirmation unavailable. Ovis does not claim that Pi queued or consumed
   the message until the transcript proves it. Next-turn delivery and an explicit Send
-  now action claim the same server ID. Connection loss never resumes automatic input. Previously
+  now action claim the same server ID. When an authorized interactive connection closes while a
+  follow-up is still queued for the next turn, the server keeps it queued for automatic turn-end
+  delivery (checking target identity, prompt/draft guards and device authorization before typing)
+  and rebinds it to the returning browser connection on an authorized reattach with the same
+  resume ID and device. Unconfirmed browser-only saved copies never resume automatic input. Previously
   held browser messages retain their explicit Send now/Discard recovery.
   Any other follow-up's exact `sent`, `discarded` or `held` receipt is kept the same way (ten minutes, 1024,
   same browser resume ID and device, local machine only) and replayed with `resumed: true` on its
