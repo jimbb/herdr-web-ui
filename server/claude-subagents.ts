@@ -36,7 +36,8 @@ import type { HerdrPane, OmoTask, PaneBackgroundAgentDetail } from "../shared/pr
  *
  * Background commands are listed with them, as Claude Code's footer counts both: a `Bash` call
  * whose answer carries a `backgroundTaskId` (`run_in_background`, Ctrl+B, or a call moved there
- * when it ran past its timeout), by the session or by a subagent. One ends with the
+ * when it ran past its timeout), by the session or by a subagent, and a `Monitor` or a background
+ * `Workflow`, whose answer names its `taskId`: a turn waits on them as on a suite. One ends with the
  * `<task-notification>` of its task id, in any transcript of the session, or with the answer
  * of the `TaskStop` (`KillShell` in older Claude Code) that stopped it, which no notice follows.
  * It lives in the Claude process that started it, as a running agent does.
@@ -191,8 +192,9 @@ const ENDS_PER_ID = 4;
 const noCommands = (): Commands => ({ calls: new Map(), launches: new Map(), ends: new Map(), seq: 0 });
 const TITLE_LENGTH = 120;
 
+const BACKGROUND_TOOLS = ["Bash", "Monitor", "Workflow"];
 /** Whether a line may say something of a background command, before it is parsed: the answers of every other call are passed over. */
-const commandLine = (line: string): boolean => line.includes('"name":"Bash"') || line.includes('"backgroundTaskId"') || line.includes('"task_id"') || line.includes('"shell_id"');
+const commandLine = (line: string): boolean => BACKGROUND_TOOLS.some((name) => line.includes(`"name":"${name}"`)) || line.includes('"backgroundTaskId"') || line.includes('"taskId"') || line.includes('"task_id"') || line.includes('"shell_id"');
 
 function commandEnds(result: Row | null, at: number, notices: readonly TaskNotification[]): CommandEnd[] {
   const ends: CommandEnd[] = [];
@@ -210,17 +212,18 @@ function scanCommands(commands: Commands, entry: Row, at: number | null, notices
   const content = row(entry["message"])?.["content"];
   const blocks = (Array.isArray(content) ? content : []).flatMap((value): Row[] => { const block = row(value); return block === null ? [] : [block]; });
   for (const block of blocks) {
-    if (block["type"] !== "tool_use" || block["name"] !== "Bash" || typeof block["id"] !== "string") continue;
+    if (block["type"] !== "tool_use" || !BACKGROUND_TOOLS.includes(block["name"] as string) || typeof block["id"] !== "string") continue;
     const input = row(block["input"]);
-    const title = text(input?.["description"]) ?? text(input?.["command"]);
+    const title = text(input?.["description"]) ?? text(input?.["command"]) ?? text(input?.["name"]);
     if (title !== null) remember(commands.calls, block["id"], title.slice(0, TITLE_LENGTH), 512);
   }
   const failed = blocks.some((block) => block["type"] === "tool_result" && block["is_error"] === true);
   const result = failed ? null : row(entry["toolUseResult"]);
-  const launched = result?.["backgroundTaskId"];
+  // a Monitor's answer carries its `timeoutMs`, a background Workflow's its `async_launched`
+  const launched = result?.["backgroundTaskId"] ?? (typeof result?.["timeoutMs"] === "number" || result?.["status"] === "async_launched" ? result?.["taskId"] : undefined);
   if (typeof launched === "string" && AGENT_ID.test(launched)) {
     const call = blocks.find((block) => block["type"] === "tool_result" && typeof block["tool_use_id"] === "string")?.["tool_use_id"] as string | undefined;
-    remember(commands.launches, launched, { at, title: (call === undefined ? undefined : commands.calls.get(call)) ?? "Background command", call: call ?? null, seq }, MAX_NAMES);
+    remember(commands.launches, launched, { at, title: (call === undefined ? undefined : commands.calls.get(call)) ?? text(result?.["workflowName"]) ?? "Background command", call: call ?? null, seq }, MAX_NAMES);
     if (call !== undefined) commands.calls.delete(call);
   }
   for (const end of commandEnds(result, at, notices)) {
@@ -1093,7 +1096,7 @@ export function fitDetail(prompt: string | null, events: DetailEvent[], truncate
 
 /**
  * Whether the session's transcripts started `id` as a background command (a `Bash` call's
- * `backgroundTaskId`): the parent's, and those of its agents the scanner has read. A command has
+ * `backgroundTaskId`, a `Monitor`'s or a `Workflow`'s `taskId`): the parent's, and those of its agents the scanner has read. A command has
  * no transcript of its own, whatever files bear its id.
  */
 export function backgroundCommand(parentPath: string, id: string): boolean {

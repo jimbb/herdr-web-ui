@@ -1505,6 +1505,18 @@ describe("claudeSubagents, background commands", () => {
     ]);
   });
 
+  it("counts a Monitor and a background Workflow as background commands until their notices end them", () => {
+    const s = session();
+    s.parent({ type: "assistant", timestamp: at(2), message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_m1", name: "Monitor", input: { command: "gh run watch 1", description: "Watch the deploy", timeout_ms: 600_000 } }] } });
+    s.parent({ type: "user", timestamp: at(2), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_m1", content: "Monitor started (task m1)" }] }, toolUseResult: { taskId: "m1", timeoutMs: 600_000, persistent: false } });
+    s.parent({ type: "assistant", timestamp: at(3), message: { role: "assistant", content: [{ type: "tool_use", id: "toolu_w1", name: "Workflow", input: { script: "export const meta = {}" } }] } });
+    s.parent({ type: "user", timestamp: at(3), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_w1", content: "Workflow launched in background. Task ID: w1" }] }, toolUseResult: { status: "async_launched", taskId: "w1", taskType: "local_workflow", workflowName: "site-editions" } });
+    expect(claudeSubagents(s.path, true, NOW).map((task) => `${task.id}:${task.title}:${task.status}`)).toEqual(["m1:Watch the deploy:running", "w1:site-editions:running"]);
+    s.notify("m1", 4, { summary: 'Monitor "Watch the deploy" stream ended' });
+    s.notify("w1", 5, { summary: 'Dynamic workflow "site-editions" completed' });
+    expect(ids(s.path)).toEqual(["w1:completed", "m1:completed"]);
+  });
+
   it("ends a command by its notice, whatever the status, and by TaskStop or KillShell", () => {
     const s = session();
     for (const id of ["ok", "bad", "killed", "stopped", "shell"]) s.bash(id, 2);
