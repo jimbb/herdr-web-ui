@@ -91,7 +91,7 @@ beforeEach(() => {
           return;
         }
         const own = request.method === "pane.process_info" && request.params?.pane_id === root && processReads.length > 0 ? processReads.shift() : undefined;
-        const result = request.method === "pane.get" ? { pane: { pane_id: root, cwd: root } }
+        const result = request.method === "pane.get" ? { pane: { pane_id: root, cwd: root, ...(title === null ? {} : { terminal_title: title, terminal_title_stripped: title }), ...(reportedSession === null ? {} : { agent_session: reportedSession }) } }
           : request.method === "agent.get" ? { agent: { ...agentFolders, ...(title === null ? {} : { terminal_title: title, terminal_title_stripped: title }), ...(reportedSession === null ? {} : { agent_session: reportedSession }) } }
           : request.method === "pane.process_info" ? (own === null ? {} : { process_info: { ...(shellPid === undefined || request.params?.pane_id !== root ? {} : { shell_pid: shellPid }), foreground_processes: own ?? foregrounds.get(request.params?.pane_id ?? "") ?? foreground } })
           : request.method === "pane.read" ? { read: { text: peerScreen ?? screen } }
@@ -279,6 +279,34 @@ it("reads an unlabelled pane only when the Kiro foreground check proves its nest
     nested.mockResolvedValue(null);
     await expect(paneTranscript(root, home, snapshot)).rejects.toMatchObject({ message: "no_recognized_transcript" });
   } finally { nested.mockRestore(); mac.mockRestore(); }
+});
+
+it("resolves a foreground Codex launched from continues before herdr sets pane.agent", async () => {
+  unlabelled = true;
+  reportedSession = { source: "herdr:codex", agent: "codex", kind: "id", value: thread };
+  foreground = [
+    { pid: 900000, argv: ["node", "/usr/local/bin/continues"] },
+    { pid: 900001, argv: ["/usr/bin/codex"] },
+  ];
+  const bound = spyOn(processStart, "processStartLowerBound").mockReturnValue(500);
+  const upper = spyOn(processStart, "processStartUpperBound").mockReturnValue(500);
+  const snapshot = { panes: [{
+    pane_id: root, workspace_id: root, tab_id: root, terminal_id: root,
+    cwd: root, agent_status: "unknown", agent_session: reportedSession, focused: false, revision: 0,
+  }], workspaces: [], tabs: [], agents: [], layouts: [], protocol: 1, version: "test" } as unknown as SessionSnapshot;
+  try {
+    expect(await paneTranscript(root, home, snapshot)).toMatchObject({ source: "codex-transcript", path });
+    expect(await codexOpenRollout(root, root, home)).toBe(path);
+    // Also resolves when pane.agent_session has not arrived yet and the screen shows the conversation.
+    reportedSession = null;
+    screen = answer;
+    const withoutSession = { ...snapshot, panes: [{ ...snapshot.panes[0]!, agent_session: null }] } as SessionSnapshot;
+    expect(await paneTranscript(root, home, withoutSession)).toMatchObject({ source: "codex-transcript", path });
+    // Once Codex exits back to the shell while pane.agent_session remains, falls back cleanly instead of throwing agent_not_found.
+    reportedSession = { source: "herdr:codex", agent: "codex", kind: "id", value: thread };
+    foreground = [{ pid: 900000, argv: ["/bin/bash"] }];
+    await expect(paneTranscript(root, home, snapshot)).rejects.toMatchObject({ message: "no_session_path" });
+  } finally { bound.mockRestore(); upper.mockRestore(); }
 });
 
 for (const agentFound of [true, false]) {

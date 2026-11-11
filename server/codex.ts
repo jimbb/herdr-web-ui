@@ -2471,8 +2471,8 @@ const VALUELESS_OPTIONS = new Set([
 
 /** A pane's Codex executables (or interpreter scripts), and their pids as one key. */
 /** The pane's first Codex process (the one paneCodexHome decides by), or null when there is none. */
-export async function paneCodexProcess(paneId: string): Promise<{ pid: number; argv?: string[] } | null> {
-  return (await codexProcessesOf(paneId)).list[0] ?? null;
+export async function paneCodexProcess(paneId: string, known?: ProcessInfo | null): Promise<{ pid: number; argv?: string[] } | null> {
+  return (await codexProcessesOf(paneId, known)).list[0] ?? null;
 }
 
 /** `known`: herdr's `pane.process_info` answer the caller's poll already read for this pane (null: no processes). */
@@ -2534,12 +2534,17 @@ async function codexAgentInfo(paneId: string): Promise<Pick<AgentInfo, "agent_se
     return { ...agent, ...kiroNested(info, agent.agent === "codex") ? { nestedTerminal: true as const } : {}, ...processRead ? { processRead } : {} };
   }
   catch (error) {
+    if (!(error instanceof HerdrError) || error.code !== "agent_not_found") throw error;
+    let processRead: { info: ProcessInfo | undefined } | undefined;
+    const info = await paneProcessInfo(paneId).then((answer) => (processRead = { info: answer }).info, () => undefined);
     // herdr's wrapper fact, as above: the process lookup that follows proves the Codex or finds none
-    if (!(error instanceof HerdrError) || error.code !== "agent_not_found"
-      || !kiroWrapper(await paneProcessInfo(paneId).catch(() => undefined))) throw error;
+    if (kiroWrapper(info)) {
+      const pane = await paneGet(paneId);
+      // Never revive an earlier occupant's session report through a shell wrapper.
+      return { ...pane, agent_session: undefined, nestedTerminal: true };
+    }
     const pane = await paneGet(paneId);
-    // Never revive an earlier occupant's session report through a shell wrapper.
-    return { ...pane, agent_session: undefined, nestedTerminal: true };
+    return { ...pane, ...(pane.agent_session?.agent === "codex" ? {} : { agent_session: undefined }), ...(processRead ? { processRead } : {}) };
   }
 }
 
