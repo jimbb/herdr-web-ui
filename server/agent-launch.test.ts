@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 import * as herdr from "./herdr/client.ts";
 import * as runtime from "./herdr-core/runtime.ts";
-import { agentLaunch } from "./agent-launch.ts";
+import { agentLaunch, dshEffortArgs } from "./agent-launch.ts";
 import { launchedAgents } from "./launched-agents.ts";
 
 const ULTRACODE = JSON.stringify({ ultracode: true });
@@ -56,6 +56,17 @@ describe("agentLaunch", () => {
     const codex = ["--settings", ULTRACODE];
     expect((await launch("codex", codex, { platform: "win32", settingsDir: dir })).args).toBe(codex);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  it("saves a dsh-tui launch's effort where dsh-tui's /effort does and leaves the flag off its command line", () => {
+    const home = dirname(settingsDir());
+    const effort = join(home, ".dsh-tui", "effort.json");
+    expect(dshEffortArgs([], home)).toEqual([]);
+    expect(existsSync(effort)).toBeFalse();
+    expect(dshEffortArgs(["--effort", "low"], home)).toEqual([]);
+    expect(JSON.parse(readFileSync(effort, "utf8"))).toEqual({ effort: "low" });
+    expect(dshEffortArgs(["--effort=off", "/tmp/project"], home)).toEqual(["/tmp/project"]);
+    expect(JSON.parse(readFileSync(effort, "utf8"))).toEqual({ effort: "off" });
   });
 
   it("refuses a shell-started agent on another machine of the core, typing nothing into its shell", async () => {
