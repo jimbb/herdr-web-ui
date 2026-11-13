@@ -1124,8 +1124,9 @@ async function readKnownPrompt(
   }
 
   // Antigravity's question has a reader (dialogs/agy.ts); its other screens, the folder trust at start among them, stay
-  // with the fallback card and the picker guard, so it is named here and not in SCREEN_READ_AGENTS
-  if (!SCREEN_READ_AGENTS.has(agent) && agent !== "agy") return { prompt: null };
+  // with the fallback card and the picker guard, so it is named here and not in SCREEN_READ_AGENTS; dsh-tui's
+  // ask_user_question has a reader too (dialogs/dsh.ts)
+  if (!SCREEN_READ_AGENTS.has(agent) && agent !== "agy" && agent !== "dsh-tui") return { prompt: null };
   const piTranscript = agent === "pi" ? await piTranscriptPath(paneId).catch(() => null) : null;
   // pi-ask's ask_user form, as the web UI's pi extension reports it: answered through pi-ask, never keys
   if (piTranscript && "path" in piTranscript) {
@@ -2077,7 +2078,8 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         let agyWriteInOpened = false;
         const togglesInPlace = (): boolean =>
           (responder === "hermes-question" && body.option_indices !== undefined)
-          || (responder === "agy-question" && parsed.multi_select && !agyWriteInOpened);
+          || (responder === "agy-question" && parsed.multi_select && !agyWriteInOpened)
+          || (responder === "dsh-question" && body.option_indices !== undefined);
         const ticks = new Set(parsed.checkedOptionIndices);
         function ticked(shown: ParsedPrompt): boolean {
           return !togglesInPlace() || (shown.checkedOptionIndices.length === ticks.size && shown.checkedOptionIndices.every((index) => ticks.has(index)));
