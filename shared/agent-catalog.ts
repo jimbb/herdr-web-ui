@@ -284,6 +284,8 @@ export const APPROVED_COMMANDS: ReadonlySet<string> = new Set([
   "windows|iex (irm https://hermes-agent.nousresearch.com/install.ps1)",
   "macos|npm install -g @deepseek-ai/dsh @deepseek-harness-tui/dsh-tui",
   "linux|npm install -g @deepseek-ai/dsh @deepseek-harness-tui/dsh-tui",
+  "macos|npm install -g @juliusbrussee/caveman-code",
+  "linux|npm install -g @juliusbrussee/caveman-code",
 ]);
 
 /** An allowed address: HTTPS, a host, and a path on it, so a prefix can never stand for a whole host. */
@@ -340,6 +342,9 @@ const OMP_BUN = "Stops when an older Bun (before 1.4.4) is on PATH, as Ovis's ow
 const PI_NODE = "Needs Node.js 22.19 or later: without it, it asks in the terminal whether to install it, and without a terminal it stops.";
 const PI_NODE_SUDO = "Needs Node.js 22.19 or later: without it, it asks in the terminal whether to install it (which may ask for sudo), and without a terminal it stops.";
 const DSH_PNPM = "dsh-tui sets up its dsh profile with pnpm on its first start: without pnpm it stops there. Install it first: npm install -g pnpm.";
+const CAVEMAN_WINDOWS = "Ovis cannot start Caveman Code on Windows yet, so it neither installs it nor offers it there.";
+const CAVEMAN_BUILD = "Where npm has no prebuilt better-sqlite3 for this Node (Node 24 on arm64 Linux, for one), it builds it and needs Python, make and a C++ compiler: on Debian or Ubuntu, sudo apt-get install -y python3 make g++ first.";
+const CAVEMAN_BIN = "It also installs a `caveman` command, the same name the Caveman CLI (@caveman-ai/cli) installs: Ovis starts `caveman-code` instead.";
 const DSH_WINDOWS = "Ovis cannot start DeepSeek Harness on Windows yet, so it neither installs it nor offers it there.";
 const DSH_VERSIONS = "dsh 0.2.1-rc.5 refuses dsh-tui 0.17.0 as an untested pair on its first start (\"nothing was installed\"). To accept that risk, run the command dsh prints, dsh plugin --profile dsh-tui allow-version @deepseek-harness-tui/dsh-tui@0.17.0 --dsh-version 0.2.1-rc.5 --accept-risk, then start dsh-tui again.";
 const CURL_BASH: readonly InstallRequirement[] = [{ tool: "curl" }, { tool: "bash" }];
@@ -659,6 +664,20 @@ export const COMMAND_TESTS: Readonly<Record<string, readonly CommandTest[]>> = {
       where: "docker node:24-bookworm-slim x64; Node 24, npm; no Python, build tools or pnpm",
       result: "ok",
       note: "dsh 0.2.1-rc.5, dsh-tui 0.17.0; its first start needs pnpm, and on a fresh dsh home dsh refuses that dsh-tui until allow-version --accept-risk (checked on Linux 2026-11-01)"
+    }
+  ],
+  "linux|npm install -g @juliusbrussee/caveman-code": [
+    {
+      on: "2026-11-13",
+      where: "docker node:24-bookworm-slim arm64; Node 24.22.3, npm 11.19.1; no Python or build tools",
+      result: "failed",
+      note: "no prebuilt better-sqlite3 for Node 24 on arm64, and node-gyp finds no Python to build it"
+    },
+    {
+      on: "2026-11-13",
+      where: "docker node:24-bookworm-slim arm64; Node 24.22.3, npm 11.19.1; python3, make and g++ added",
+      result: "ok",
+      note: "0.65.2"
     }
   ]
 };
@@ -984,6 +1003,33 @@ const CATALOG_ENTRIES: readonly AgentCatalogEntry[] = [
     // Sign in opens dsh-tui itself: the key goes into its own first-run prompt; Ovis has no field that asks for it
     sign_in: { provider: null, command: null, in_agent: "on its first start: a DeepSeek API key from https://platform.deepseek.com/api_keys typed into its own prompt, or an OpenAI- or Anthropic-compatible provider", api_keys: ["DEEPSEEK_API_KEY"], required: true },
     after_install: ["It needs a model before it can work: a DeepSeek API key (https://platform.deepseek.com/api_keys) or an OpenAI- or Anthropic-compatible provider, entered in dsh-tui's own first-run prompt: Ovis does not ask for the key."],
+    min_version: null,
+  },
+  {
+    // a pi fork; herdr has no kind for it, so New tab types caveman-code into the pane's shell, and the web UI's
+    // extension (integrations/caveman-code.ts) reports the pane to herdr as `caveman-code`
+    id: "caveman-code",
+    name: "Caveman Code",
+    vendor: "Julius Brussee",
+    kind: "harness",
+    description: "A terse pi-based coding agent that spends fewer tokens per answer.",
+    install: {
+      macos: only(method("posix", "npm install -g @juliusbrussee/caveman-code", [{ tool: "node" }, { tool: "npm" }], { known_issues: [CAVEMAN_BIN] })),
+      linux: only(method("posix", "npm install -g @juliusbrussee/caveman-code", [{ tool: "node" }, { tool: "npm" }], { known_issues: [CAVEMAN_BUILD, CAVEMAN_BIN] })),
+      windows: null,
+    },
+    no_install: { windows: CAVEMAN_WINDOWS },
+    url_prefixes: [],
+    packages: ["npm:@juliusbrussee/caveman-code"],
+    sources: [{ url: "https://github.com/JuliusBrussee/caveman-code/blob/3a21be115c32aa27288c8ed6d860d9aa1b65d2c5/README.md", checked: "2026-11-13" }],
+    // its `caveman` bin is the Caveman CLI's name too: caveman-code is its own. 0.65.2 prints its version on
+    // stderr, which the detector never reads, so no version shows (version_error "unreadable")
+    detect: { binaries: ["caveman-code"], version_args: ["--version"], unreliable_on: { windows: CAVEMAN_WINDOWS } },
+    sign_in: { provider: null, command: null, in_agent: "/login (Claude, ChatGPT, Copilot or Gemini subscriptions), or a provider's API key", api_keys: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"], required: true },
+    after_install: [
+      "Its first start asks four setup questions in the terminal (theme, key, default model, telemetry).",
+      "Its panes open in Chat once the web UI's extension is installed on that PC: bun scripts/install-caveman-integration.ts, then restart caveman-code.",
+    ],
     min_version: null,
   },
   {

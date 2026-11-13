@@ -65,8 +65,8 @@ describe("GET /api/agents", () => {
       ],
     });
     // dsh-tui is on the locator's PATH, but dsh, which it needs to run, is nowhere: not offered, and not looked for;
-    // cmd is looked for, and not found (twice: herdr's manifests name it here too)
-    expect([...new Set(located)].sort()).toEqual(["cmd", "gjc", "omo"]);
+    // cmd and caveman-code are looked for, and not found (cmd twice: herdr's manifests name it here too)
+    expect([...new Set(located)].sort()).toEqual(["caveman-code", "cmd", "gjc", "omo"]);
   });
 
   it("offers on herdr-core only the kinds its manifests name: none of herdr's own beside them", async () => {

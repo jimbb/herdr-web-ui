@@ -61,6 +61,7 @@ import { ompBlobStore, ompHeldOpen, ompPaneRoute, ompRouteOwns, ompRouteStore, o
 import { forgetOpencodeRead, forgetOpencodeState, OPENCODE_IMAGE_REF, opencodeConversation, opencodeDatabasePath, opencodeImage, opencodeReadKey, opencodeSessionId, opencodeToolOutput } from "./opencode.ts";
 import { piTranscriptPath, unwrittenSession } from "./pi.ts";
 import { cmdTranscriptPath } from "./cmd.ts";
+import { cavemanAgentDir, cavemanTranscriptPath } from "./caveman.ts";
 import { defaultDevinDbPath, DevinHistoryUnavailable, devinConversation, forgetDevinState } from "./devin.ts";
 import { forgetGrokState, GROK_IMAGE_REF, grokImage, grokProjection, grokToolOutput, parseGrokTranscript, GrokUnavailable } from "./grok.ts";
 import { resolveGrokStore } from "./grok-store.ts";
@@ -2325,6 +2326,13 @@ async function resolveTranscript(pane: HerdrPane, cwd: string, codexHome?: strin
       if (found === null) throw new ConversationUnavailable("no_session_path");
       if ("unwritten" in found) throw new ConversationNotStarted(found.unwritten.id, "pi-transcript", found.unwritten.path);
       return { source: "pi-transcript", path: found.path, piAgentDir: found.agentDir, piFile: found.identity };
+    }
+    // Caveman Code: a pi fork, read as pi from its own store (server/caveman.ts)
+    if (agent === "caveman-code") {
+      const found = await cavemanTranscriptPath(paneId, known?.foreground_processes);
+      if (found === null) throw new ConversationUnavailable("no_session_path");
+      if ("unwritten" in found) throw new ConversationNotStarted(found.unwritten.id, "pi-transcript", found.unwritten.path);
+      return { source: "pi-transcript", path: found.path, piAgentDir: cavemanAgentDir() };
     }
     if (agent === "cmd") {
       const found = await cmdTranscriptPath(paneId);

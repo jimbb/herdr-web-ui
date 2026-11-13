@@ -30,6 +30,7 @@ export const AGENT_LABELS: Record<string, string> = {
   cmd: "Command Code",
   letta: "Letta Code",
   "dsh-tui": "DeepSeek Harness",
+  "caveman-code": "Caveman Code",
 };
 
 /**

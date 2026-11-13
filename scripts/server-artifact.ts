@@ -100,7 +100,8 @@ async function integrations(dir: string): Promise<void> {
   mkdirSync(join(dir, "integrations"), { recursive: true });
   writeFileSync(join(dir, "integrations", "gjc.js"), await buildIntegration("gjc", "bun"));
   writeFileSync(join(dir, "integrations", "pi-ask.js"), await buildIntegration("pi-ask", "node"));
-  for (const name of ["install-gjc-integration", "install-pi-integration"]) {
+  writeFileSync(join(dir, "integrations", "caveman-code.js"), await buildIntegration("caveman-code", "node"));
+  for (const name of ["install-gjc-integration", "install-pi-integration", "install-caveman-integration"]) {
     const result = await Bun.build({ entrypoints: [join(root, "scripts", `${name}.ts`)], target: "bun", format: "esm", outdir: join(dir, "scripts"), naming: `${name}.js` });
     if (!result.success) throw new Error(`Could not build ${name}: ${result.logs.map((entry) => entry.message).join("\n")}`);
   }

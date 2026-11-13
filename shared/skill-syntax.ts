@@ -31,6 +31,8 @@ export const SKILL_SYNTAX: Readonly<Record<string, SkillSyntax>> = {
   letta: { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
   // a direct-call skill joins its command menu as a leading `/name` (dsh-tui 0.17.0 user guide, Skills)
   "dsh-tui": { skillTriggers: ["/"], inline: [], namespaced: false, chipForms: [] },
+  // a pi fork: pi's `/skill:name`
+  "caveman-code": { skillTriggers: ["/"], inline: [], namespaced: true, chipForms: [] },
 };
 
 export function skillSyntax(agent: string | null | undefined): SkillSyntax {

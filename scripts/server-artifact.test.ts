@@ -54,6 +54,7 @@ describe("the folder that runs the compiled server", () => {
     const installed = readFileSync(join(home, ".gjc", "agent", "extensions", "herdr-web-ui.js"), "utf8");
     expect(installed).toContain("built beside the binary");
     expect(existsSync(join(dir, "scripts", "install-pi-integration.js"))).toBe(true);
+    expect(existsSync(join(dir, "scripts", "install-caveman-integration.js"))).toBe(true);
   });
 });
 
