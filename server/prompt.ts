@@ -1038,7 +1038,7 @@ async function readKnownPrompt(
     return { prompt: publicPrompt(parsed) };
   }
 
-  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", "agy", ""].includes(agent)) return { prompt: null };
+  if (!["claude", "omp", "codex", "omo", "pi", "gjc", "hermes", "kiro", "cmd", "opencode", "agy", "dsh-tui", ""].includes(agent)) return { prompt: null };
   const piTranscript = agent === "pi" ? await piTranscriptPath(paneId).catch(() => null) : null;
   // pi-ask's ask_user form, as the web UI's pi extension reports it: answered through pi-ask, never keys
   if (piTranscript && "path" in piTranscript) {
@@ -1943,7 +1943,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         };
         // Hermes's and agy's multi-select: every key, the ticks after the first and the Enter that locks them, is on the same
         // question, so each is checked against it as the first was, with the rows ticked as this answer's own Spaces left them
-        const togglesInPlace = (responder === "hermes-question" || responder === "agy-question") && body.option_indices !== undefined;
+        const togglesInPlace = (responder === "hermes-question" || responder === "agy-question" || responder === "dsh-question") && body.option_indices !== undefined;
         const ticks = new Set(parsed.checkedOptionIndices);
         function ticked(shown: ParsedPrompt): boolean {
           return !togglesInPlace || (shown.checkedOptionIndices.length === ticks.size && shown.checkedOptionIndices.every((index) => ticks.has(index)));
