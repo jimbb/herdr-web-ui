@@ -9,6 +9,7 @@
     "integrations/gjc.test.ts",
     "scripts/install-gjc-integration.ts",
     "scripts/install-gjc-integration.test.ts",
+    "integrations/cmd-session.ts",
     "integrations/pi-ask.ts",
     "integrations/pi-ask.test.ts",
     "scripts/install-pi-integration.ts",
