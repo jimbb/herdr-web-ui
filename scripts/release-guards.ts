@@ -16,7 +16,7 @@ import { discard, readCappedJson, REMOTE_LIMITS, RemoteResponseInvalid, RemoteRe
 const root = resolve(import.meta.dir, "..");
 const MACHINES = "shared/machines.ts";
 
-export const BUNDLE_PATHSPECS = ["server", "shared", "integrations", "patches", "bun.lock", "scripts/build-remote-bundle.ts", "scripts/server-artifact.ts", "scripts/install-gjc-integration.ts", "scripts/install-pi-integration.ts", "scripts/pty-sidecar.ts", "crates/pty-sidecar"];
+export const BUNDLE_PATHSPECS = ["server", "shared", "integrations", "patches", "bun.lock", "scripts/build-remote-bundle.ts", "scripts/server-artifact.ts", "scripts/install-gjc-integration.ts", "scripts/install-pi-integration.ts", "scripts/install-caveman-integration.ts", "scripts/pty-sidecar.ts", "crates/pty-sidecar"];
 export const bundleInput = (path: string): boolean => BUNDLE_PATHSPECS.some((spec) => path === spec || path.startsWith(`${spec}/`))
   && !path.endsWith(".test.ts") && !path.endsWith(".md") && !path.startsWith("server/fixtures/");
 export const BUNDLE_WORKFLOW = ".github/workflows/remote-bundles.yml";

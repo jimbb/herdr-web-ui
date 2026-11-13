@@ -243,9 +243,27 @@ The chat view reads the agent's own session files wherever it knows where they a
 | **Antigravity (agy)** | **Experimental; macOS untested.** Native ledger, selected by the running process’s held conversation lock. Linux native-tested; Windows uses terminal text. See [Agy behavior and limits](agy-chat.md). | — use Terminal |
 | **Letta Code** | **Experimental; Linux and macOS.** Read-only native transcript, once herdr's Letta integration is installed (`herdr integration install letta`, experimental). A turn shows when it ends; meanwhile Chat says **Working…**. Windows uses Terminal. See [Letta Code](#letta-code) below. | ✓ the `/model` list (the rows its picker shows, its other tabs and its search) and the reasoning level it then shows; other levels — use Terminal |
 | **DeepSeek Harness** (`dsh-tui`) | **Linux.** Native session log of the pane's dsh process, bound by the session lock it holds; dsh-tui panes, and dsh-tui-pi's (`dsh --profile tui`) found by their process. Install it from **Settings → Agents** or the setup guide (`npm install -g @deepseek-ai/dsh @deepseek-harness-tui/dsh-tui`; its first start needs pnpm), and start it from **New workspace**, **New tab with agent…** or **New worktree**, which run `dsh-tui` in the pane's shell. macOS uses Terminal; Windows is not offered. See [DeepSeek Harness](dsh.md). | — use Terminal |
+| **Caveman Code** (`caveman-code`) | **Linux.** Native session file under `~/.cave/agent/sessions/`, named for the pane's caveman-code process by the web UI's Caveman Code extension (see below); after `/tree`, the branch in play. Install it from **Settings → Agents** or the setup guide (`npm install -g @juliusbrussee/caveman-code`), and start it from **New workspace**, **New tab with agent…** or **New worktree**, which run `caveman-code` in the pane's shell. macOS uses Terminal; Windows is not offered. | — use Terminal |
 | **GitHub Copilot CLI** | Linux native transcript when the foreground session is verified. See [Copilot setup and limits](copilot-chat.md). | — recorded choices are read-only; answer questions and approvals in Terminal |
 | **Kimi Code** | **Experimental; tested on Linux, expected on macOS.** Native wire log of the pane's own Kimi process, bound by the session lock the CLI writes for that process (`~/.kimi-code/locks/sessions/`) or, on Linux, by the main log it holds open; two panes in one folder each show their own session, and an idle Kimi keeps showing its last session while the same process runs in the pane. A Kimi that has not written its session yet uses Terminal, never another session of the folder. Records before a context compaction stay in the log and are shown. Windows uses Terminal. | — use Terminal |
 | **Anything else** | The terminal's text | — use Terminal |
+
+Caveman Code has no herdr integration of its own, so the web UI's Caveman Code extension does
+two things: it reports the pane to herdr as the agent `caveman-code` (its state, and
+`caveman-code --session <file>` as the command herdr runs to reopen the session after a herdr
+restart), and it names the pane's session for the chat in `~/.cave/agent/ovis/<pid>.json`, since
+herdr keeps no session for an agent that is not its own. Install it on each PC that runs Caveman
+Code, then restart caveman-code:
+
+```sh
+bun scripts/install-caveman-integration.ts
+```
+
+It writes only `~/.cave/agent/extensions/herdr-web-ui.js` and refuses to replace a file it did not
+write; `--remove` takes it out again. On a remote PC with only the runtime bundle, run its
+`scripts/install-caveman-integration.js` with the bundle's Bun as for GJC below. Without the
+extension a caveman-code pane is a terminal herdr does not know as an agent. Only Caveman Code's
+default agent directory, `~/.cave/agent`, is read.
 
 GJC chat and GJC done alerts use a native extension rather than SDK session queries. From
 this checkout on each PC that runs GJC, explicitly install the extension:

@@ -30,6 +30,7 @@ export const AGENT_LABELS: Record<string, string> = {
   cmd: "Command Code",
   letta: "Letta Code",
   "dsh-tui": "DeepSeek Harness",
+  "caveman-code": "Caveman Code",
 };
 
 export async function handleAgentsRequest(request: Request, pathname: string, shellAgents: Pick<ShellAgentLocator, "executable">, has?: (kind: string) => Promise<boolean>): Promise<Response | null> {
