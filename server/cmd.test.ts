@@ -85,6 +85,13 @@ describe("Command Code session resolution", () => {
   writeFileSync(path, "{}\n");
   writeFileSync(shellPath, "{}\n");
   const fresh = join(store, "fresh.jsonl");
+  // the web UI's Command Code mod names each process's session by pid (integrations/cmd-session.ts)
+  const bindings = join(root, ".commandcode", "ovis");
+  mkdirSync(bindings, { recursive: true });
+  writeFileSync(join(bindings, "4242.json"), JSON.stringify({ pid: 4242, sessionId: "reported" }));
+  writeFileSync(join(bindings, "4243.json"), JSON.stringify({ pid: 4242, sessionId: "reported" }));
+  writeFileSync(join(bindings, "4244.json"), JSON.stringify({ pid: 4244, sessionId: "../shell-project/shell" }));
+  const cmdProcess = (pid: number) => ({ pid, name: "command-code", argv: ["command-code"] });
   const report = { agent: "cmd", source: "herdr:cmd", kind: "path", value: path };
   const agent = {
     agent: "cmd", cwd: shellCwd, foreground_cwd: agentCwd, agent_session: report,
@@ -92,7 +99,7 @@ describe("Command Code session resolution", () => {
     tab_id: "tab", terminal_id: "terminal", workspace_id: "workspace",
   } satisfies AgentInfo;
 
-  const cases: { name: string; changes: Partial<AgentInfo>; expected: unknown }[] = [
+  const cases: { name: string; changes: Partial<AgentInfo>; processes?: unknown[]; expected: unknown }[] = [
     { name: "resolves the process project when the shell is elsewhere", changes: {}, expected: { path } },
     { name: "resolves an unwritten session in the process project", changes: { agent_session: { ...report, value: fresh } }, expected: { unwritten: { id: "fresh", path: fresh } } },
     { name: "falls back when the process cwd is absent", changes: { cwd: agentCwd, foreground_cwd: null }, expected: { path } },
@@ -108,12 +115,19 @@ describe("Command Code session resolution", () => {
     { name: "rejects an id instead of a path", changes: { agent_session: { ...report, kind: "id" } }, expected: null },
     { name: "rejects a missing session report", changes: { agent_session: null }, expected: null },
     { name: "rejects a missing cwd", changes: { cwd: null, foreground_cwd: null }, expected: null },
+    { name: "resolves the session the mod names for the pane's cmd process", changes: { agent_session: null }, processes: [cmdProcess(4242)], expected: { path } },
+    { name: "resolves a mod session in the cwd store", changes: { agent_session: null, foreground_cwd: helperCwd, cwd: agentCwd }, processes: [{ pid: 1, name: "bash" }, cmdProcess(4242)], expected: { path } },
+    { name: "rejects a mod binding another pid wrote", changes: { agent_session: null }, processes: [cmdProcess(4243)], expected: null },
+    { name: "rejects a mod binding when two cmd processes share the pane", changes: { agent_session: null }, processes: [cmdProcess(4242), cmdProcess(4245)], expected: null },
+    { name: "rejects a mod binding of a process that is not Command Code", changes: { agent_session: null }, processes: [{ pid: 4242, name: "node" }], expected: null },
+    { name: "rejects a mod session id that is a path", changes: { agent_session: null }, processes: [cmdProcess(4244)], expected: null },
+    { name: "keeps herdr's report over the mod binding", changes: { agent_session: { ...report, value: shellPath } }, processes: [cmdProcess(4242)], expected: { path: shellPath } },
   ];
 
-  it.each(cases)("$name", async ({ changes, expected }) => {
+  it.each(cases)("$name", async ({ changes, processes = [], expected }) => {
     // Given an isolated home and herdr report, without a live herdr connection.
     const script = `const { cmdTranscriptPath } = await import(${JSON.stringify(join(import.meta.dir, "cmd.ts"))});
-      console.log(JSON.stringify(await cmdTranscriptPath("cmd-pane", { agent: ${JSON.stringify({ ...agent, ...changes })} })));`;
+      console.log(JSON.stringify(await cmdTranscriptPath("cmd-pane", { agent: ${JSON.stringify({ ...agent, ...changes })}, processes: ${JSON.stringify(processes)} })));`;
     // When resolving the reported session through the real filesystem validation.
     const child = Bun.spawn([process.execPath, "-e", script], {
       env: { ...process.env, HOME: root, USERPROFILE: root },
