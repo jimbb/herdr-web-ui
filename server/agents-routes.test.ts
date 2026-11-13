@@ -62,8 +62,9 @@ describe("GET /api/agents", () => {
         { kind: "someagent", label: "someagent", installed: false },
       ],
     });
-    // dsh-tui is on the locator's PATH, but dsh, which it needs to run, is nowhere: not offered, and not looked for
-    expect(located.sort()).toEqual(["gjc", "omo"]);
+    // dsh-tui is on the locator's PATH, but dsh, which it needs to run, is nowhere: not offered, and not looked for;
+    // caveman-code is looked for, and not found
+    expect(located.sort()).toEqual(["caveman-code", "gjc", "omo"]);
   });
 
   it("offers on herdr-core only the kinds its manifests name: none of herdr's own beside them", async () => {
