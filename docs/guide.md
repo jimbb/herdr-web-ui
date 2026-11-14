@@ -323,7 +323,9 @@ mkdir -p ~/.commandcode/mods && cp integrations/cmd-session.ts ~/.commandcode/mo
 
 Restart running `cmd` sessions to load it. Inside herdr it writes `~/.commandcode/ovis/<pid>.json`
 with the session of that process at every session start (a new session, `--continue`,
-`--resume`, `--session`, `/clear`, `/resume`) and removes it when `cmd` quits; the bridge reads
+`--resume`, `--session`, `/clear`, `/resume`) and removes it when `cmd` quits. It also adds
+`command-code --session <id>` to the state reports Command Code sends herdr, the command herdr
+runs to reopen that session after a herdr restart, which Command Code does not send itself. The bridge reads
 it only for the pane's one `command-code` process, and the session must still be a file in that
 folder's store. Without the mod, or with two `cmd` processes in one pane, Command Code opens in
 Terminal. Its permission prompt cards are read off the screen, not from the session file, so they
