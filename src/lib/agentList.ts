@@ -20,7 +20,7 @@ export function addableAgents(rows: readonly AgentCatalogRow[]): AgentCatalogRow
   return rows.filter((row) => row.state.installed === false && row.install !== null && pickerStarts(row.id));
 }
 
-/** Whether New workspace's picker can start the agent once the PC lists it; the catalog has more (Command Code). */
+/** Whether New workspace's picker can start the agent once the PC lists it; the catalog has more (Muse Code). */
 export function pickerStarts(agent: string): boolean {
   return SUPPORTED_AGENT_KINDS.has(agent);
 }

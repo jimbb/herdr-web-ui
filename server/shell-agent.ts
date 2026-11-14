@@ -1,6 +1,6 @@
 /**
  * Agents herdr's agent.start cannot launch (`herdr agent start --kind` lists its
- * kinds; omo, gjc and DeepSeek Harness's dsh-tui are not among them). The pane's shell runs the command
+ * kinds; omo, gjc, DeepSeek Harness's dsh-tui and Command Code are not among them). The pane's shell runs the command
  * instead, and the pane's process tree, not the prompt, says when it is up.
  *
  * A Windows pane differs in three ways, each live-verified on a Windows PC (herdr 0.9.3):
@@ -14,6 +14,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute } from "node:path";
 import { herdrRpc } from "./herdr/client.ts";
+import { isCmdProcess } from "./cmd.ts";
 import { isDshProcess } from "./dsh.ts";
 import { isGjcProcess } from "./gjc-runtime.ts";
 import { isOmoProcess, omoProcessIdentity } from "./omo.ts";
@@ -28,6 +29,8 @@ export const SHELL_AGENTS: Record<string, (argv: readonly string[]) => boolean> 
   gjc: isGjcProcess,
   // dsh-tui's host process (node …/@deepseek-harness-tui/dsh-tui/lib/…/host-entry.js), behind its launcher shims
   "dsh-tui": isDshProcess,
+  // not on Windows (WINDOWS_SHELL_AGENTS), where `cmd` is cmd.exe
+  cmd: isCmdProcess,
 };
 /** The shell-started agents known to start on Windows; the others are not offered there. */
 const WINDOWS_SHELL_AGENTS = new Set(["omo", "gjc"]);

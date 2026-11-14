@@ -29,6 +29,8 @@ describe("addableAgents", () => {
   it("leaves out a catalog agent the pickers cannot start", () => {
     const commandCode = AGENT_CATALOG.find((entry) => entry.id === "cmd");
     if (commandCode === undefined) throw new Error("the catalog has no cmd entry");
-    expect(addableAgents([catalogRow(commandCode, "linux", missing)])).toEqual([]);
+    // Command Code is started from the pickers (typed into the pane's shell); one they cannot start is not offered
+    expect(addableAgents([catalogRow(commandCode, "linux", missing)]).map((agent) => agent.id)).toEqual(["cmd"]);
+    expect(addableAgents([catalogRow({ ...commandCode, id: "someagent" }, "linux", missing)])).toEqual([]);
   });
 });
