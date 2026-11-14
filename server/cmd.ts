@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import type { PaneProcessInfoProcess } from "../shared/herdr-api.generated.ts";
+import { programName } from "./agent-identity.ts";
 import { agentGet, paneProcessInfo } from "./herdr/client.ts";
 import { transcriptInStore as cmdTranscriptInStore, unwrittenSession } from "./transcript-store.ts";
 export { transcriptInStore as cmdTranscriptInStore, unwrittenSession } from "./transcript-store.ts";
@@ -14,6 +15,19 @@ export { transcriptInStore as cmdTranscriptInStore, unwrittenSession } from "./t
  */
 export function cmdSlug(cwd: string): string {
   return cwd.replace(/^[/\\]+/, "").replace(/[/\\]/g, "-").toLowerCase();
+}
+
+/** The names Command Code's npm package puts on the PATH. */
+const CMD_BINS = new Set(["cmd", "cmdc", "command-code", "commandcode"]);
+const CMD_ENTRY = /(^|[\\/])node_modules[\\/]command-code[\\/]dist[\\/](?:index|cli)\.mjs$/;
+
+/**
+ * A running Command Code: it titles its process `command-code` as it starts, so herdr lists that;
+ * before then, node running one of its bins or its npm entry.
+ */
+export function isCmdProcess(argv: readonly string[]): boolean {
+  const program = programName(argv[0] ?? "");
+  return program === "command-code" || (program === "node" && (CMD_BINS.has(programName(argv[1] ?? "")) || CMD_ENTRY.test(argv[1] ?? "")));
 }
 
 export function defaultCmdHome(): string {

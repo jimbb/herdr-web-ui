@@ -3,7 +3,7 @@
  *
  * Its own file: the browser imports the value, and shared/protocol.ts reads `process.env` as it loads.
  */
-export const SUPPORTED_AGENT_KINDS: ReadonlySet<string> = new Set(["claude", "codex", "copilot", "omp", "omo", "gjc", "pi", "opencode", "devin", "grok", "hermes", "agy", "letta", "dsh-tui"]);
+export const SUPPORTED_AGENT_KINDS: ReadonlySet<string> = new Set(["claude", "codex", "copilot", "omp", "omo", "gjc", "pi", "opencode", "devin", "grok", "hermes", "agy", "letta", "dsh-tui", "cmd"]);
 
 /**
  * herdr's custom agents that launch an agent Ovis reads under a name of their own: gentle-shell runs pi

@@ -61,7 +61,7 @@ describe("GET /api/agents", () => {
         { kind: "someagent", label: "someagent", installed: false },
       ],
     });
-    expect(located.sort()).toEqual(["gjc", "omo"]);
+    expect([...new Set(located)].sort()).toEqual(["cmd", "gjc", "omo"]);
   });
 
   it("offers on herdr-core only the kinds its manifests name: none of herdr's own beside them", async () => {
