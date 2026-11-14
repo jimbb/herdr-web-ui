@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AgentInfo } from "../shared/herdr-api.generated.ts";
-import { cmdContextWindow, cmdSlug, cmdTranscriptInStore, unwrittenSession } from "./cmd.ts";
+import { cmdContextWindow, cmdSlug, cmdTranscriptInStore, isCmdProcess, unwrittenSession } from "./cmd.ts";
 import { transcriptPage } from "./conversation.ts";
 import { answerKeys, parseFallbackPrompt, parseInteractivePrompt } from "./prompt.ts";
 
@@ -398,4 +398,10 @@ it.skipIf(process.platform === "win32")("reads no window from a FIFO in the cata
   const child = Bun.spawnSync([process.execPath, "-e", script], { timeout: 5_000, stdout: "pipe", stderr: "pipe" });
   expect(child.exitCode).toBe(0);
   expect(child.stdout.toString().trim()).toBe("null");
+});
+
+it("knows a starting or running Command Code by its process, as the pickers start it", () => {
+  // its title once up, and node running the bin a picker types (`#!/usr/bin/env node`) or its entry before then
+  for (const argv of [["command-code"], ["node", "/home/u/.local/bin/cmd"], ["/usr/bin/node", "/usr/lib/node_modules/command-code/dist/index.mjs"], ["node", "/opt/bin/commandcode"]]) expect(isCmdProcess(argv)).toBe(true);
+  for (const argv of [["cmd"], ["bash"], ["node", "/srv/app/server.js"], []]) expect(isCmdProcess(argv)).toBe(false);
 });

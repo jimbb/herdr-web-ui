@@ -183,7 +183,7 @@ Every agent herdr runs shows up with its live status, terminal and alerts. The c
 | **omo** | Native session file, found through the pane's process tree | ✓ the `/model` list (picked for the session); other menus — use Terminal |
 | **gjc** | Native session file reported by the web UI's GJC extension, verified against the pane's process | — use Terminal |
 | **pi** | Native session file, resolved through herdr; after `/tree`, the branch in play | ✓ its dialogs: a question, a confirmation, an answer typed in |
-| **Command Code** (`cmd`) | Native session file under `~/.commandcode/projects/`, named by the web UI's Command Code mod for the pane's own process (see below); after `/tree`, the branch in play | ✓ its permission prompts: Yes / Yes, don't ask again / No |
+| **Command Code** (`cmd`) | Native session file under `~/.commandcode/projects/`, named by the web UI's Command Code mod for the pane's own process (see below); after `/tree`, the branch in play. Start it from **New workspace**, **New tab with agent…** and **New worktree** on Linux and macOS: herdr has no kind for it, so Ovis types `cmd` into the pane's shell | ✓ its permission prompts: Yes / Yes, don't ask again / No |
 | **OpenCode** | Native session in OpenCode 2's own database, resolved through herdr: `~/.local/share/opencode/opencode.db` (`%USERPROFILE%\.local\share\opencode\opencode.db` on Windows), or where the server's `XDG_DATA_HOME` or `OPENCODE_DB` puts it | ✓ its questions on OpenCode 2.0 or later, answered through its background service (`~/.local/state/opencode/service.json`, or under the server's `XDG_STATE_HOME`) one question at a time, with Back to change an earlier one; other prompts, and OpenCode 1 — use Terminal |
 | **Devin CLI** | Native SQLite session, showing the active branch when herdr or the live process explicitly identifies the session; otherwise terminal text | — use Terminal |
 | **Grok** | Native update log on Linux and macOS. Any Grok executable named `grok` or `grok-…` that holds the `events.jsonl` for the session Herdr reported in exactly one directory, with a newer write time than every other held session. Linux reads `/proc`; macOS reads that process's held files through `lsof` and its environment through `sysctl KERN_PROCARGS2`, not the bridge's home. It verifies the kernel's microsecond process start time through `sysctl kern.proc.pid` around those reads and a fresh pane foreground lookup. Older open files do not hide it; ambiguous IDs, tied times, and a held file that may be a renamed events file use Terminal. After a `/resume` Herdr does not hear about, Chat can keep showing the previous conversation until the resumed session writes; it then uses Terminal until Herdr names that session. Windows uses Terminal. See [Grok setup and limits](grok-chat.md). | — use Terminal |
@@ -289,7 +289,9 @@ mkdir -p ~/.commandcode/mods && cp integrations/cmd-session.ts ~/.commandcode/mo
 
 Restart running `cmd` sessions to load it. Inside herdr it writes `~/.commandcode/ovis/<pid>.json`
 with the session of that process at every session start (a new session, `--continue`,
-`--resume`, `--session`, `/clear`, `/resume`) and removes it when `cmd` quits; the bridge reads
+`--resume`, `--session`, `/clear`, `/resume`) and removes it when `cmd` quits. It also adds
+`command-code --session <id>` to the state reports Command Code sends herdr, the command herdr
+runs to reopen that session after a herdr restart, which Command Code does not send itself. The bridge reads
 it only for the pane's one `command-code` process, and the session must still be a file in that
 folder's store. Without the mod, or with two `cmd` processes in one pane, Command Code opens in
 Terminal. Its permission prompt cards are read off the screen, not from the session file, so they
