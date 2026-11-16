@@ -1044,11 +1044,11 @@ async function readKnownPrompt(
     return { prompt: publicPrompt(parsed) };
   }
 
-  // Antigravity's question has a reader (dialogs/agy.ts); its other screens, the folder trust at start among them, stay
-  // with the fallback card and the picker guard, so it is named here and not in SCREEN_READ_AGENTS; dsh-tui's
-  // ask_user_question has a reader too (dialogs/dsh.ts), read only while herdr says the pane waits on the user, as
-  // its fallback card is: a panel's text on the screen of a dsh that is not asking takes no Enter
-  if (!SCREEN_READ_AGENTS.has(agent) && agent !== "agy" && !(agent === "dsh-tui" && pane.agent_status === "blocked")) return { prompt: null };
+  // Antigravity's question and Kiro V3's tool approval have readers (dialogs/agy.ts, dialogs/kiro.ts); their other
+  // screens (agy's folder trust at start, Kiro V2's approval rows) stay with the fallback card and the picker guard, so
+  // they are named here and not in SCREEN_READ_AGENTS; dsh-tui's ask_user_question has a reader too (dialogs/dsh.ts),
+  // read only while herdr says the pane waits on the user.
+  if (!SCREEN_READ_AGENTS.has(agent) && agent !== "agy" && agent !== "kiro" && !(agent === "dsh-tui" && pane.agent_status === "blocked")) return { prompt: null };
   const piTranscript = agent === "pi" ? await piTranscriptPath(paneId).catch(() => null) : null;
   // pi-ask's ask_user form, as the web UI's pi extension reports it: answered through pi-ask, never keys
   if (piTranscript && "path" in piTranscript) {
