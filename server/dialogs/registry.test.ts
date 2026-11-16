@@ -98,6 +98,7 @@ const order: Record<string, readonly string[]> = {
   cmd: ["cmd-question", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
   "dsh-tui": ["dsh-question", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
   codex: ["codex-menu", "codex-question", "codex-async-question", "codex-approval", "codex-model", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
+  kiro: ["kiro-approval", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
   letta: ["letta-model", "letta-effort", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
   hermes: ["hermes-question", "hermes-input", "hermes-approval", "hermes-status", "hermes-version", "hermes-profile", "hermes-reload-skills", "hermes-help", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
   omo: ["omo-model", "omo-question", "omo-typing", "omo-review", "omo-pending", "fallback-menu", "fallback-gjc-menu", "fallback-keys"],
