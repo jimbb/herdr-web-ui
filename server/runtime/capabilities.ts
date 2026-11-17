@@ -42,16 +42,18 @@ export interface RuntimeCapabilities {
    * socket; `core`, the core hc reports (the socket is this server's own adapter).
    */
   readonly spawner: "server" | "core";
+  /** Whether the server runs a per-project agent task queue against the local core. */
+  readonly agentQueue: boolean;
 }
 
 /** herdr's TUI server, behind its own socket. */
 export const HERDR: RuntimeCapabilities = {
-  runtime: "herdr", attach: "pty-cli", agents: "detected", foreground: "job", seen: null, pins: false, machines: false, spawner: "server",
+  runtime: "herdr", attach: "pty-cli", agents: "detected", foreground: "job", seen: null, pins: false, machines: false, spawner: "server", agentQueue: false,
 };
 
 /** herdr-core (`hc`), the core the Herdr app runs on, behind this server's adapter (server/herdr-core/adapter.ts). */
 export const HERDR_CORE: RuntimeCapabilities = {
-  runtime: "herdr-core", attach: "hc", agents: "reported", foreground: "leader", seen: "label", pins: true, machines: true, spawner: "core",
+  runtime: "herdr-core", attach: "hc", agents: "reported", foreground: "leader", seen: "label", pins: true, machines: true, spawner: "core", agentQueue: true,
 };
 
 /** what the runtime this process started says of itself; null until one does */

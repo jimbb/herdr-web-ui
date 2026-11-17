@@ -136,8 +136,16 @@ let adapterSocket: string | null = null;
 
 /** what startRuntime read for this PC's terminals (terminal-env.ts): a core `hc connect` starts, and every shell the adapter starts, run in it */
 let terminalEnvironment: Record<string, string> = {};
+let terminalEnvFn: (() => Promise<Record<string, string>>) | null = null;
 
 let connection: HcConnection | null = null;
+
+/** Environment a newly spawned shell on the local core should inherit (login shell fitted to the core). */
+export async function coreTerminalEnv(): Promise<Record<string, string>> {
+  if (hcMachine() !== null) return {};
+  if (terminalEnvFn !== null) return terminalEnvFn();
+  return { ...terminalEnvironment };
+}
 
 let marker: SeenMarker | null = null;
 
@@ -208,9 +216,10 @@ export async function startRuntime(stateDir: string, find: (onRefused?: (bin: st
   const hc = coreConnection();
   if (coreRuns) void reading.then((env) => { if (connection === hc) terminalEnvironment = env; });
   // on Windows the pipe is named after the folder itself: a junction or a short (8.3) spelling of it names the same pipe
+  terminalEnvFn = hcMachine() !== null ? null : terminalEnvFor(hc, reading, hcEnv() ?? process.env);
   const adapter = await startHerdrCoreAdapter(hc, adapterAddress(unix ? stateDir : realpathSync.native(stateDir), platform), (address, turn, labels) => coreSeenMarker().observe(address, turn, labels),
     // another machine's OpenCode keeps its sessions there: none of its panes is bound to one here
-    hcMachine() !== null ? { otherMachine: true } : { opencodeTitled: (title) => opencodeSessionsTitled(opencodeDatabasePath(), title), terminalEnv: terminalEnvFor(hc, reading, hcEnv() ?? process.env) });
+    hcMachine() !== null ? { otherMachine: true } : { opencodeTitled: (title) => opencodeSessionsTitled(opencodeDatabasePath(), title), terminalEnv: terminalEnvFn! });
   if (unix) chmodSync(adapter.socketPath, 0o600);
   if (herdrSocketBefore === null || process.env["HERDR_SOCKET"] !== adapterSocket) herdrSocketBefore = { HERDR_SOCKET: process.env["HERDR_SOCKET"] };
   adapterSocket = adapter.socketPath;
@@ -225,6 +234,7 @@ export async function startRuntime(stateDir: string, find: (onRefused?: (bin: st
       connection = null;
       marker = null;
       terminalEnvironment = {};
+      terminalEnvFn = null;
       serveRuntime(null);
       found = null;
       search = null;

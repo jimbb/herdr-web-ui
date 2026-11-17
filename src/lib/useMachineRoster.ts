@@ -289,6 +289,7 @@ export function useRosterEvents({ onPaneMoved, machineSessions, locked, onRoster
       if (payload.type === "preferences") { receivePreferencesRef.current(payload.preferences); return; }
       if (payload.type === "herdr-sidebar") { setAgentRowTokens(payload.agents); return; }
       if (payload.type === "seen") { receiveSeen(payload.finishes); return; }
+      if (payload.type === "agent-queue") return;
       // a device paired with this server: told once per enrollment, kept until read, the oldest giving way
       if (payload.type === "device-paired") { setPairedNotices((list) => withPairedNotice(list, payload)); return; }
       if (payload.type === "relay-pairings") { setRelayPairings(payload.pairings); return; }

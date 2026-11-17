@@ -1,4 +1,5 @@
 import { subscribeMachineEvents } from "./machine-events.ts";
+import type { QueueSnapshot } from "../shared/agent-queue.ts";
 import type { DevicePairedEvent, DeviceRemovedEvent, MachineRoster, PcInstallJob, PcInstallRequest, PcUpdateAll, PcUpdateStarted, RelayPairingsEvent, RemotePairingsEvent, SetupAction, SetupRequest } from "../shared/machines.ts";
 import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
@@ -150,7 +151,8 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
   pairings?: { subscribe(listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void): () => void },
   relayBudget?: EventStreamBudget,
   /** this PC's owner (access.ts ownerAccess): only they may start or stop updates of its PCs */
-  owner = false): Promise<Response> {
+  owner = false,
+  agentQueue?: { cachedSnapshot(): QueueSnapshot; subscribe(listener: (queue: QueueSnapshot) => void): () => void }): Promise<Response> {
   const url = new URL(request.url);
   // A PC's file opens as this PC's /api/fs/file does, from any navigation: reading it changes
   // nothing, and Chrome on Android shows a PDF in the viewer's frame as an "Open" button whose
@@ -272,7 +274,7 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
             if (bytes.byteLength > MACHINE_EVENTS_QUEUE_BYTES) large.push({ end: written, bytes: bytes.byteLength });
             retell();
           };
-          stop = subscribeMachineEvents({ manager, preferences, herdrSidebar, seen, pairings },
+          stop = subscribeMachineEvents({ manager, preferences, herdrSidebar, seen, pairings, agentQueue },
             (event) => send(`data: ${JSON.stringify(event)}\n\n`));
           if (closed) { cleanup(); return; }
           heartbeat = machineEventsClock.heartbeat(() => send(": heartbeat\n\n"));

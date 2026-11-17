@@ -92,6 +92,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     orderSequence?: OrderSequence;
     /** herdr moved a pane of this PC under a new ID: the finishes read there go with it, numbered as counted there (server/seen.ts moved) */
     seenMoved?: (from: string, to: string, renumber: (id: number) => number) => void;
+    onQueuePaneStatus?: (paneId: string, status: AgentStatus, agent: string | null, failedRest?: boolean) => void;
+    onQueuePaneGone?: (paneId: string, reason: string) => void;
+    onQueuePaneMoved?: (from: string, to: string) => void;
   };
   devices: DeviceStore;
   /** the preferences every browser shares (server/preferences.ts): web push reads the muted panes from it */
@@ -523,7 +526,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     waits.running(paneId, background, null, false);
     if (turn) waits.status(paneId, status);
     broadcastAll(paneStatus(paneId, status, { background_tasks: background }));
-    if (turn || waits.waiting(paneId) !== held) push.onStatus(paneId, alertStatus(status, waits.waiting(paneId))).catch(logPushError);
+    if (turn || waits.waiting(paneId) !== held) {
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, "omo", turn && rest === "failed" && status === "idle");
+      push.onStatus(paneId, effective).catch(logPushError);
+    }
     // after the status: its change calls off what was waiting, and this error is what the rest says
     if (turn && rest === "failed" && status === "idle") push.onFailed(paneId).catch(logPushError);
   }
@@ -538,7 +545,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     const status = turn ? completions.observe(paneId, derived, agent, rest) : completions.current(paneId) ?? completions.observe(paneId, derived, agent);
     if (turn) { pending.status(paneId, status); drainPending(paneId); }
     broadcastAll(paneStatus(paneId, status));
-    if (turn) push.onStatus(paneId, status).catch(logPushError);
+    if (turn) {
+      options.onQueuePaneStatus?.(paneId, status, agent, rest === "failed" && status === "idle");
+      push.onStatus(paneId, status).catch(logPushError);
+    }
     if (turn && rest === "failed" && status === "idle") push.onFailed(paneId).catch(logPushError);
   }
 
@@ -560,7 +570,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     // a pane never reported here carries its count in the next snapshot
     if (status === undefined) return;
     broadcastAll(paneStatus(paneId, status, { background_tasks: running }));
-    if (changed) push.onStatus(paneId, alertStatus(status, waits.waiting(paneId))).catch(logPushError);
+    if (changed) {
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
+      push.onStatus(paneId, effective).catch(logPushError);
+    }
   }
 
   /** A wait ran out (its work ended and no turn followed, or it was held as long as one is): the status it stood for. */
@@ -569,7 +583,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const status = completions.current(paneId);
       if (status === undefined) continue;
       broadcastAll(paneStatus(paneId, status));
-      push.onStatus(paneId, alertStatus(status, waits.waiting(paneId))).catch(logPushError);
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
+      push.onStatus(paneId, effective).catch(logPushError);
     }
   }
 
@@ -679,7 +695,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     } else waits.forget(paneId);
     const tell = (): void => {
       broadcastAll(paneStatus(paneId, status, tracker !== null ? { background_tasks: tracker.countOf(paneId) } : {}));
-      push.onStatus(paneId, alertStatus(status, waits.waiting(paneId))).catch(logPushError);
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agent, failedRest);
+      push.onStatus(paneId, effective).catch(logPushError);
     };
     // a Codex turn this server saw run is told DONE only once its rollout is read (codexRest), or CODEX_LOOK_MS on: a
     // turn that ended in an error is told at rest instead, and no browser plays a finish for it first
@@ -740,6 +758,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         pending.status(paneId, queueStatus(paneId, status)); drainPending(paneId);
         waits.status(paneId, status);
         broadcastAll(paneStatus(paneId, status));
+        options.onQueuePaneStatus?.(paneId, status, "codex", false);
         push.onStatus(paneId, status).catch(logPushError);
         return;
       }
@@ -752,6 +771,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       pending.status(paneId, queueStatus(paneId, status)); drainPending(paneId);
       waits.status(paneId, status);
       broadcastAll(paneStatus(paneId, status));
+      options.onQueuePaneStatus?.(paneId, status, "codex", true);
       push.onStatus(paneId, status).catch(logPushError);
       push.onFailed(paneId).catch(logPushError);
     }, () => undefined).finally(() => codexLooking.delete(paneId));
@@ -818,6 +838,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         // still remembers working; an unknown baseline never supplies that permission.
         const status = pane.agent_status === "idle" || pane.agent_status === "done" ? pane.agent_status : completions.current(pane.pane_id) ?? pane.agent_status;
         pending.status(pane.pane_id, queueStatus(pane.pane_id, status)); drainPending(pane.pane_id);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(status, waits.waiting(pane.pane_id)), pane.agent ?? null);
       }
     },
     // a pane created a moment ago got its agent after the roster's own read of it. After the
@@ -840,17 +861,25 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       finishes.resync(completions, projected, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
-      for (const pane of panes) { pending.status(pane.pane_id, queueStatus(pane.pane_id, settled(pane))); drainPending(pane.pane_id); }
+      for (const pane of panes) {
+        const current = settled(pane);
+        pending.status(pane.pane_id, queueStatus(pane.pane_id, current)); drainPending(pane.pane_id);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(current, waits.waiting(pane.pane_id)), pane.agent ?? null);
+      }
       for (const pane of panes) if (!newer.has(pane.pane_id) && (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent))) waits.status(pane.pane_id, settled(pane));
       push.resync(panes.map((pane) => ({ ...pane, agent_status: alertStatus(settled(pane), waits.waiting(pane.pane_id)) })), newer);
     },
     onPaneEnded: (paneId) => {
       paneGone(paneId);
+      options.onQueuePaneGone?.(paneId, "Terminal ended");
       broadcastAll({ type: "pane-exited", pane_id: paneId });
       push.onEnded(paneId).catch(logPushError);
     },
     // closed, not ended by itself: the same cleanup with no "terminal ended" alert
-    onPaneClosed: (paneId) => paneGone(paneId),
+    onPaneClosed: (paneId) => {
+      paneGone(paneId);
+      options.onQueuePaneGone?.(paneId, "Terminal closed");
+    },
     // told first, so a client remaps the pane before the pty-exit and pending lists of the old ID reach it,
     // and before the structure change's roster no longer has that ID (#1503)
     onPaneMoved: (from, to) => {
@@ -862,6 +891,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       // a read record that cannot be written costs that record, never the rest of the move
       try { options.seenMoved?.(from, to, renumber); }
       catch (error) { console.warn(`seen: could not carry the reads of ${from} to ${to}:`, error); }
+      options.onQueuePaneMoved?.(from, to);
       broadcastAll({ type: "pane-moved", from, to });
       paneMoved?.(from, to);
     },

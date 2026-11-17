@@ -14,7 +14,6 @@ import {
   type QueueGateState,
   type QueueReorderRequest,
   type QueueSettings,
-  type QueueSnapshot,
   type QueueTask,
   type QueueTaskStatus,
   type QueueUpdateSettingsRequest,
