@@ -23,6 +23,19 @@ export function isContextClear(value: unknown, source: string): boolean {
 }
 
 /**
+ * A note herdr-core (hc) typed into the agent, as the whole prompt: a child terminal's report
+ * (`<hc from="t7 review">…</hc>`, sourced `peer:t7 review`) or hc's own word on a child that cannot
+ * report (`<hc>t3 exited (signal 1). Read: hc read t3</hc>`, sourced `hc`). Nobody typed it here.
+ */
+export function hcNote(text: string): Extract<ConversationPart, { kind: "notice" }> | null {
+  const match = /^\s*<hc\b([^>]*)>((?:(?!<\/?hc\b)[\s\S])*)<\/hc>\s*$/.exec(text);
+  const body = match?.[2]?.trim();
+  if (!match || !body) return null;
+  const from = /\bfrom="([^"]*)"/.exec(match[1] ?? "")?.[1]?.trim();
+  return { kind: "notice", text: body, source: from ? `peer:${from}` : "hc" };
+}
+
+/**
  * Another Claude session's message (Claude Code cross-session messaging). It starts the agent's
  * work like a prompt, but nobody typed it here: a notice, sourced `peer:<sender>`. Claude records it
  * as a meta `user` entry when it arrives between turns, and as a queued_command attachment when it

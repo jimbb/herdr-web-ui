@@ -2012,6 +2012,24 @@ describe("transcript pages", () => {
     ]);
   });
 
+  it("shows hc's notes (a child's report, hc's word on a child that exited) as notices, not as the person's prompt", () => {
+    const path = join(temp(), "hc-notes.jsonl");
+    const say = (text: string) => ({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+    const human = { kind: "human" };
+    writeFileSync(path, `${[
+      { type: "user", timestamp: "2026-11-17T03:04:00.000Z", origin: human, permissionMode: "bypassPermissions", message: { role: "user", content: "<hc>t3m hub-repair-hc exited (signal 1). Read: hc read t3m</hc>" } },
+      say("reading t3m"),
+      { type: "attachment", timestamp: "2026-11-17T03:05:00.000Z", attachment: { type: "queued_command", commandMode: "prompt", prompt: "<hc from=\"t2q try2-cmd\">done: /tmp/x.md</hc>", origin: human } },
+      say("noted"),
+      // the person quoting a note, with words of their own, is still their prompt
+      { type: "user", timestamp: "2026-11-17T03:06:00.000Z", origin: human, permissionMode: "bypassPermissions", message: { role: "user", content: "<hc>t3m exited</hc> why this format?" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    const page = transcriptPage("claude-transcript", path);
+    expect(page.turns.map((turn) => turn.parts.map((part) => part.kind === "notice" ? `${part.source}|${part.text}` : part.kind === "text" ? part.text : part.kind).join(" "))).toEqual([
+      "hc|t3m hub-repair-hc exited (signal 1). Read: hc read t3m", "reading t3m", "peer:t2q try2-cmd|done: /tmp/x.md", "noted", "<hc>t3m exited</hc> why this format?",
+    ]);
+  });
+
   it("shows one notice for a delivery Claude recorded twice, and says 'another session' for an unnamed sender", () => {
     const path = join(temp(), "peer-echo.jsonl");
     const origin = { kind: "peer", from: "uds:x", msg_id: "m7", name: "FUSION", body: "R18 is ready" };
