@@ -73,6 +73,7 @@ import { holdCommandHistory } from "./claude-command-history.ts";
 import { holdFilePool } from "./file-pool.ts";
 import { handleRequest, type RequestServices, type ServerContext } from "./dispatch.ts";
 import { AgentQueueService } from "./agent-queue.ts";
+import type { QueueFirstMessageHooks } from "./pending-input.ts";
 import { lanHttpsCertificate, lanHttpsConfig, privateLanAddresses, privateLanPeer, type LanHttpsConfig } from "./lan-https.ts";
 
 
@@ -133,7 +134,7 @@ export interface ServerInstance {
   focusReady: Promise<void>;
   alertsSettled: () => Promise<void>;
   warmAgentCatalog: () => void;
-  queueFirstMessage: (paneId: string, text: string, kind: string, requester?: string | null, launchedPid?: number | null) => Promise<PendingMessage>;
+  queueFirstMessage: (paneId: string, text: string, kind: string, requester?: string | null, launchedPid?: number | null, headlessHooks?: QueueFirstMessageHooks) => Promise<PendingMessage>;
   stop: () => void;
 }
 
@@ -349,10 +350,17 @@ export function createServer(
   // a snapshot as a browser is told it, wherever it goes: without the token values herdr's sidebar rows hide (#2160).
   // A bridge this app starts on a PC (`bridgeOnly`, server/remote-entry.ts) serves only its connection server, with
   // the credential it registered as its token: that server applies its own rows, so it gets every snapshot whole.
+  let enqueueQueuePrompt: ((paneId: string, text: string, kind: string, hooks: QueueFirstMessageHooks, launchedPid?: number | null) => Promise<PendingMessage>) | null = null;
+  let cancelQueuePrompt: ((paneId: string) => void) | null = null;
   const agentQueue = options.agentQueue !== undefined
     ? options.agentQueue
     : capabilities().agentQueue && hcMachine() === null
-      ? new AgentQueueService({ stateDir, getPreferences: () => preferences.get() })
+      ? new AgentQueueService({
+          stateDir,
+          getPreferences: () => preferences.get(),
+          enqueuePrompt: (paneId, text, kind, hooks, launchedPid) => enqueueQueuePrompt!(paneId, text, kind, hooks, launchedPid),
+          cancelPrompt: (paneId) => cancelQueuePrompt?.(paneId),
+        })
       : null;
   const shownSnapshot = <S extends SessionSnapshot>(snapshot: S): S => options.bridgeOnly ? snapshot : snapshotWithoutHiddenTokens(herdrSidebar.get(), snapshot);
   const browserSnapshot = options.profile === "machine" ? <S extends SessionSnapshot>(snapshot: S): S => machineSnapshot(shownSnapshot(snapshot)) : shownSnapshot;
@@ -373,7 +381,9 @@ export function createServer(
     },
     devices, preferences, usage, usageLogin, browserSnapshot, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS,
   });
-  const { machines, collector, queueFirstMessage, push } = core;
+  const { machines, collector, queueFirstMessage, cancelQueueMessage, push } = core;
+  enqueueQueuePrompt = (paneId, text, kind, hooks, launchedPid) => queueFirstMessage(paneId, text, kind, null, launchedPid ?? null, hooks);
+  cancelQueuePrompt = cancelQueueMessage;
   const seen = new SeenStore(stateDir, (pc, epoch) => machines?.finishEnded(pc, epoch) ?? false);
   machines?.subscribe((event) => {
     if (event.type !== "machine-message" || event.machine_id === LOCAL_MACHINE || event.message.type !== "pane-moved") return;

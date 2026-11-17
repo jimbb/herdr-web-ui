@@ -96,9 +96,17 @@ function startQueueServer(options: { withQueue?: boolean; readMemAvailableMb?: (
             if (existing) existing.status = { state: "idle", app: kind };
             return { agent_started: true };
           },
-          deliverPrompt: async (paneId, text, deps) => {
-            deps?.beforeSend?.();
+          enqueuePrompt: async (paneId, text, _kind, hooks) => {
+            hooks.onBeforeCommit?.(paneId);
+            hooks.onSent?.(paneId);
             startedPrompts.push({ paneId, prompt: text });
+            return {
+              id: `pm-${startedPrompts.length}`,
+              request_id: -1,
+              text,
+              state: "queued",
+              created_at: "2026-11-18T00:00:00.000Z",
+            };
           },
           forgetLaunchedAgent: () => undefined,
           now: () => Date.parse("2026-11-18T00:00:00.000Z"),
@@ -404,6 +412,14 @@ describe("agent-queue HTTP API & health capability", () => {
       headers: ctx.authHeaders(),
     });
     expect([delRunning.status, ((await delRunning.json()) as { error: { code: string } }).error.code]).toEqual([409, "task_running"]);
+
+    // Verify needsInput state exposes cleanly via /api/queue and clears on onPanePromptAnswered
+    ctx.agentQueue!.store.setTaskNeedsInput(t1.id, true);
+    const blockedRes = await fetch(ctx.url("/api/queue"), { headers: ctx.authHeaders() });
+    expect(((await blockedRes.json()) as QueueSnapshot).tasks.find((t) => t.id === t1.id)?.needsInput).toBe(true);
+    ctx.agentQueue!.onPanePromptAnswered("hc:queue-1");
+    const unblockedRes = await fetch(ctx.url("/api/queue"), { headers: ctx.authHeaders() });
+    expect(((await unblockedRes.json()) as QueueSnapshot).tasks.find((t) => t.id === t1.id)?.needsInput).toBeUndefined();
 
     // Complete t1 via status hook, then requeue it cleanly
     ctx.agentQueue!.onPaneStatus("hc:queue-1", "done", "claude");

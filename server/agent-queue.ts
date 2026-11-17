@@ -10,7 +10,7 @@ import {
 } from "../shared/agent-queue.ts";
 import { launchSpecFromPreferences } from "../shared/agent-launch.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
-import type { AgentStatus } from "../shared/protocol.ts";
+import type { AgentStatus, PendingMessage } from "../shared/protocol.ts";
 import { agentLaunch } from "./agent-launch.ts";
 import {
   AgentQueueStore,
@@ -23,17 +23,19 @@ import {
   readProcMemAvailableMb,
 } from "./agent-queue-store.ts";
 import { launchedAgents } from "./launched-agents.ts";
+import type { QueueFirstMessageHooks } from "./pending-input.ts";
 import {
   countCoreWorkingTerminals,
-  deliverQueuePrompt,
   getCoreTerminals,
+  isQueuePaneAgentExited,
+  isQueuePaneDialogBlocked,
   openQueueTab,
-  type DeliverQueuePromptDeps,
   type OpenQueueTabDeps,
 } from "./herdr-core/queue-helpers.ts";
 import { shownStatusOf, type HcTerminal } from "./herdr-core/snapshot.ts";
 
 export const QUEUE_POLL_INTERVAL_MS = 30_000;
+export const QUEUE_MONITOR_INTERVAL_MS = 2_000;
 
 export interface AgentQueueServiceOptions {
   store?: AgentQueueStore;
@@ -41,45 +43,69 @@ export interface AgentQueueServiceOptions {
   getPreferences: () => SharedPreferences;
   openTab?: (folder: string, title?: string | null, deps?: OpenQueueTabDeps) => Promise<string>;
   launchAgent?: typeof agentLaunch;
-  deliverPrompt?: (paneId: string, text: string, deps?: DeliverQueuePromptDeps) => Promise<void>;
+  enqueuePrompt?: (
+    paneId: string,
+    text: string,
+    kind: string,
+    hooks: QueueFirstMessageHooks,
+    launchedPid?: number | null,
+  ) => Promise<PendingMessage>;
+  cancelPrompt?: (paneId: string) => void;
   forgetLaunchedAgent?: (paneId: string) => void;
   getTerminals?: () => Promise<HcTerminal[]>;
+  checkAgentExited?: (terminal: HcTerminal, expectedAgent: string) => Promise<boolean>;
+  checkDialogBlocked?: (terminal: HcTerminal, expectedAgent?: string | null) => Promise<boolean>;
   readMemAvailableMb?: () => number | null;
   resolveReal?: (path: string) => string;
   now?: () => number;
   pollIntervalMs?: number;
+  monitorIntervalMs?: number;
 }
 
 interface DeliveryState {
-  sent: boolean;
-  latestStatus?: AgentStatus;
+  paneId: string;
+  blocked: boolean;
 }
 
 /**
  * Per-project agent task queue dispatcher and status tracker for the local `herdr-core` runtime.
  * Serializes launches through a mutex, triggers at most one launch per tick when all gates pass,
- * and broadcasts normalized `QueueSnapshot` updates to subscribers.
+ * delivers pending first prompts through Ovis's guarded pending pipeline, monitors running panes for
+ * dialogs or agent exit, and broadcasts normalized `QueueSnapshot` updates to subscribers.
  */
 export class AgentQueueService {
   readonly store: AgentQueueStore;
   private readonly getPreferences: () => SharedPreferences;
   private readonly openTab: (folder: string, title?: string | null, deps?: OpenQueueTabDeps) => Promise<string>;
   private readonly launchAgentFn: typeof agentLaunch;
-  private readonly deliverPrompt: (paneId: string, text: string, deps?: DeliverQueuePromptDeps) => Promise<void>;
+  private readonly enqueuePrompt: (
+    paneId: string,
+    text: string,
+    kind: string,
+    hooks: QueueFirstMessageHooks,
+    launchedPid?: number | null,
+  ) => Promise<PendingMessage>;
+  private readonly cancelPrompt: (paneId: string) => void;
   private readonly forgetLaunchedAgent: (paneId: string) => void;
   private readonly getTerminals: () => Promise<HcTerminal[]>;
+  private readonly checkAgentExited: (terminal: HcTerminal, expectedAgent: string) => Promise<boolean>;
+  private readonly checkDialogBlocked: (terminal: HcTerminal, expectedAgent?: string | null) => Promise<boolean>;
   private readonly readMemAvailableMb: () => number | null;
   private readonly resolveReal: ((path: string) => string) | undefined;
   private readonly now: () => number;
   private readonly pollIntervalMs: number;
+  private readonly monitorIntervalMs: number;
 
   private readonly listeners = new Set<(queue: QueueSnapshot) => void>();
   private readonly hasWorked = new Set<string>();
-  private readonly deliveringPanes = new Map<string, DeliveryState>();
+  private readonly awaitingDelivery = new Map<string, DeliveryState>();
   private launchingTaskId: string | null = null;
   private mutex: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private monitorTimer: ReturnType<typeof setInterval> | null = null;
+  private monitorBusy = false;
   private stopStoreSub: (() => void) | null = null;
+  private started = false;
   private stopped = false;
 
   private lastMemAvailableMb: number | null;
@@ -95,12 +121,28 @@ export class AgentQueueService {
     this.getPreferences = options.getPreferences;
     this.openTab = options.openTab ?? ((folder, title, deps) => openQueueTab(folder, title, deps));
     this.launchAgentFn = options.launchAgent ?? agentLaunch;
-    this.deliverPrompt = options.deliverPrompt ?? ((paneId, text, deps) => deliverQueuePrompt(paneId, text, deps));
+    this.enqueuePrompt = options.enqueuePrompt ?? (async () => {
+      throw new Error("Queue prompt delivery is not configured");
+    });
+    this.cancelPrompt = options.cancelPrompt ?? (() => undefined);
     this.forgetLaunchedAgent = options.forgetLaunchedAgent ?? ((paneId) => launchedAgents.forget(paneId));
     this.getTerminals = options.getTerminals ?? (() => getCoreTerminals());
+    // Tests injecting getTerminals without explicit process/screen probes default to offline-safe checks
+    // rather than hitting the real herdr daemon socket.
+    this.checkAgentExited = options.checkAgentExited ?? (
+      options.getTerminals !== undefined
+        ? (async () => false)
+        : ((terminal, expectedAgent) => isQueuePaneAgentExited(terminal, expectedAgent))
+    );
+    this.checkDialogBlocked = options.checkDialogBlocked ?? (
+      options.getTerminals !== undefined
+        ? (async (terminal) => shownStatusOf(terminal.status, terminal.turn, terminal.labels) === "blocked")
+        : ((terminal, expectedAgent) => isQueuePaneDialogBlocked(terminal, expectedAgent))
+    );
     this.readMemAvailableMb = options.readMemAvailableMb ?? (() => readProcMemAvailableMb());
     this.resolveReal = options.resolveReal;
     this.pollIntervalMs = options.pollIntervalMs ?? QUEUE_POLL_INTERVAL_MS;
+    this.monitorIntervalMs = options.monitorIntervalMs ?? QUEUE_MONITOR_INTERVAL_MS;
     this.lastMemAvailableMb = this.readMemAvailableMb();
 
     this.stopStoreSub = this.store.subscribe(() => {
@@ -108,9 +150,10 @@ export class AgentQueueService {
     });
   }
 
-  /** Starts the background 30s ticker and reconciles any persisted `running` tasks from prior runs. */
+  /** Starts the background ticker, running-task monitor, and initial reconciliation of persisted tasks. */
   start(): void {
     if (this.stopped) return;
+    this.started = true;
     this.lastMemAvailableMb = this.readMemAvailableMb();
     if (this.timer === null) {
       this.timer = setInterval(() => {
@@ -120,15 +163,20 @@ export class AgentQueueService {
       }, this.pollIntervalMs);
       this.timer.unref?.();
     }
+    this.syncMonitorTimer();
     void this.reconcile().catch(() => undefined);
   }
 
-  /** Stops the background ticker and store listeners without closing or killing any terminals. */
+  /** Stops background timers and store listeners without closing terminals or erasing persisted task state. */
   stop(): void {
     this.stopped = true;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.monitorTimer !== null) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = null;
     }
     this.stopStoreSub?.();
     this.stopStoreSub = null;
@@ -168,8 +216,9 @@ export class AgentQueueService {
       const terminals = await this.safeGetTerminals();
       if (terminals !== null) {
         this.lastWorkingCount = countCoreWorkingTerminals(terminals);
-        this.reconcileWithTerminals(terminals);
+        await this.reconcileWithTerminals(terminals);
       }
+      this.syncMonitorTimer();
       const snap = this.cachedSnapshot();
       this.emitIfChanged(snap);
       return snap;
@@ -185,7 +234,7 @@ export class AgentQueueService {
       const terminals = await this.safeGetTerminals();
       if (terminals !== null) {
         this.lastWorkingCount = countCoreWorkingTerminals(terminals);
-        this.reconcileWithTerminals(terminals);
+        await this.reconcileWithTerminals(terminals);
       }
 
       const metrics = this.currentMetrics();
@@ -200,6 +249,7 @@ export class AgentQueueService {
         }
       }
 
+      this.syncMonitorTimer();
       const snap = this.cachedSnapshot();
       this.emitIfChanged(snap);
       return snap;
@@ -226,7 +276,7 @@ export class AgentQueueService {
       const terminals = await this.safeGetTerminals();
       if (terminals !== null) {
         this.lastWorkingCount = countCoreWorkingTerminals(terminals);
-        this.reconcileWithTerminals(terminals);
+        await this.reconcileWithTerminals(terminals);
       }
 
       const projectKey = canonicalProjectKey(existing.folder, this.resolveReal);
@@ -243,6 +293,7 @@ export class AgentQueueService {
       if (after !== null) {
         this.lastWorkingCount = countCoreWorkingTerminals(after);
       }
+      this.syncMonitorTimer();
       const queue = this.cachedSnapshot();
       this.emitIfChanged(queue);
       return { task, queue };
@@ -263,7 +314,13 @@ export class AgentQueueService {
     }
     this.lastMemAvailableMb = this.readMemAvailableMb();
     const task = this.store.updateTask(id, patch);
-    if (task.status !== "running") this.hasWorked.delete(task.id);
+    if (task.status !== "running") {
+      this.hasWorked.delete(task.id);
+      if (this.awaitingDelivery.delete(task.id) && task.terminal) {
+        this.cancelPrompt(task.terminal);
+      }
+      this.syncMonitorTimer();
+    }
     const queue = this.cachedSnapshot();
     this.emitIfChanged(queue);
     return { task, queue };
@@ -274,8 +331,13 @@ export class AgentQueueService {
       throw new QueueConflictError("task_running", "Cannot delete a task while it is starting");
     }
     this.lastMemAvailableMb = this.readMemAvailableMb();
+    const prev = this.getStoredTask(id);
     this.store.deleteTask(id);
     this.hasWorked.delete(id);
+    if (this.awaitingDelivery.delete(id) && prev?.terminal) {
+      this.cancelPrompt(prev.terminal);
+    }
+    this.syncMonitorTimer();
     const queue = this.cachedSnapshot();
     this.emitIfChanged(queue);
     return { ok: true, queue };
@@ -297,6 +359,17 @@ export class AgentQueueService {
     return { settings, queue };
   }
 
+  /** Receives interactive prompt-answer notifications so dialog wait badges clear immediately. */
+  onPanePromptAnswered(paneId: string): void {
+    if (this.stopped) return;
+    for (const task of this.store.getDocument().tasks) {
+      if (task.status !== "running" || task.terminal !== paneId) continue;
+      const entry = this.awaitingDelivery.get(task.id);
+      if (entry) entry.blocked = false;
+      this.store.setTaskNeedsInput(task.id, false);
+    }
+  }
+
   /** Receives live pane status updates from `server/core/status.ts`. */
   onPaneStatus(paneId: string, status: AgentStatus, _agent?: string | null, failedRest = false): void {
     if (this.stopped) return;
@@ -304,52 +377,60 @@ export class AgentQueueService {
     for (const task of tasks) {
       if (task.status !== "running" || task.terminal !== paneId) continue;
 
-      const delivery = this.deliveringPanes.get(paneId);
+      const delivery = this.awaitingDelivery.get(task.id);
       if (delivery) {
-        if (delivery.sent) {
-          if (failedRest) {
-            this.hasWorked.delete(task.id);
-            delivery.latestStatus = status;
-          } else {
-            if (status === "working") this.hasWorked.add(task.id);
-            delivery.latestStatus = status;
-          }
+        if (status === "blocked") {
+          this.store.setTaskNeedsInput(task.id, true);
+        } else if (status === "working") {
+          delivery.blocked = false;
+          this.store.setTaskNeedsInput(task.id, false);
+        } else if (!delivery.blocked && status === "idle") {
+          this.store.setTaskNeedsInput(task.id, false);
         }
         continue;
       }
 
       if (failedRest) {
         this.hasWorked.delete(task.id);
+        this.store.setTaskNeedsInput(task.id, false);
         continue;
       }
       if (status === "working") {
         this.hasWorked.add(task.id);
+        this.store.setTaskNeedsInput(task.id, false);
+      } else if (status === "blocked") {
+        this.store.setTaskNeedsInput(task.id, true);
       } else if (status === "done" || (status === "idle" && this.hasWorked.has(task.id))) {
         this.hasWorked.delete(task.id);
+        this.awaitingDelivery.delete(task.id);
         this.store.markTaskDone(task.id);
+        this.syncMonitorTimer();
+      } else if (status === "idle") {
+        this.store.setTaskNeedsInput(task.id, false);
       }
-      // `blocked` and `unknown` leave the task `running` and preserve `hasWorked`.
+      // `unknown` preserves current `needsInput` and `hasWorked` until screen/process probes run.
     }
   }
 
   /** Receives pane exit / close notifications from `server/core/status.ts`. */
   onPaneGone(paneId: string, reason = "Terminal closed"): void {
     if (this.stopped) return;
+    this.cancelPrompt(paneId);
     const tasks = this.store.getDocument().tasks;
     for (const task of tasks) {
       if (task.status !== "running" || task.terminal !== paneId) continue;
+      this.awaitingDelivery.delete(task.id);
       this.hasWorked.delete(task.id);
       this.store.markTaskFailed(task.id, reason, paneId);
     }
+    this.syncMonitorTimer();
   }
 
   /** Updates the recorded terminal ID if a pane is moved under a new ID. */
   onPaneMoved(from: string, to: string): void {
     if (this.stopped) return;
-    const delivery = this.deliveringPanes.get(from);
-    if (delivery) {
-      this.deliveringPanes.delete(from);
-      this.deliveringPanes.set(to, delivery);
+    for (const entry of this.awaitingDelivery.values()) {
+      if (entry.paneId === from) entry.paneId = to;
     }
     const tasks = this.store.getDocument().tasks;
     for (const task of tasks) {
@@ -362,7 +443,6 @@ export class AgentQueueService {
     this.launchingTaskId = task.id;
     this.hasWorked.delete(task.id);
     let paneId: string | null = null;
-    let deliveryEntry: DeliveryState | null = null;
 
     try {
       const preferences = this.getPreferences();
@@ -374,60 +454,100 @@ export class AgentQueueService {
       paneId = await this.openTab(task.folder, task.title);
       this.store.markTaskRunning(task.id, paneId);
 
-      if (spec.prompt?.via === "pending") {
-        deliveryEntry = { sent: false };
-        this.deliveringPanes.set(paneId, deliveryEntry);
-      }
-
-      const launched = await this.launchAgentFn(paneId, spec.agent);
+      let launchedPid: number | null = null;
+      const launched = await this.launchAgentFn(paneId, spec.agent, (pid) => {
+        launchedPid = pid;
+      });
       if (!launched.agent_started) {
         const message = launched.error.message || "Agent launch failed";
-        return this.markFailedIfStillRunning(task.id, message, paneId);
+        return this.markFailedIfStillRunning(task.id, message, this.currentTaskTerminal(task.id) ?? paneId);
+      }
+
+      const activePane = this.currentTaskTerminal(task.id) ?? paneId;
+      const afterLaunch = this.getStoredTask(task.id);
+      if (!afterLaunch || afterLaunch.status !== "running") {
+        return afterLaunch ?? this.markFailedIfStillRunning(task.id, "Terminal closed", activePane);
       }
 
       if (spec.prompt?.via === "positional") {
-        this.forgetLaunchedAgent(paneId);
-      } else if (spec.prompt?.via === "pending" && deliveryEntry !== null) {
-        const currentPane = () => this.currentTaskTerminal(task.id) ?? paneId!;
-        await this.deliverPrompt(currentPane(), spec.prompt.text, {
-          beforeSend: () => {
-            const activePane = currentPane();
-            this.forgetLaunchedAgent(activePane);
+        this.forgetLaunchedAgent(activePane);
+      } else if (spec.prompt?.via === "pending") {
+        this.awaitingDelivery.set(task.id, { paneId: activePane, blocked: false });
+        const hooks: QueueFirstMessageHooks = {
+          onBlocked: (hookPaneId) => {
+            if (this.stopped) return;
+            const entry = this.awaitingDelivery.get(task.id);
+            if (!entry) return;
+            entry.paneId = hookPaneId;
+            entry.blocked = true;
+            this.store.setTaskNeedsInput(task.id, true);
+          },
+          onUnblocked: (hookPaneId) => {
+            if (this.stopped) return;
+            const entry = this.awaitingDelivery.get(task.id);
+            if (!entry) return;
+            entry.paneId = hookPaneId;
+            entry.blocked = false;
+            this.store.setTaskNeedsInput(task.id, false);
+          },
+          onBeforeCommit: (hookPaneId) => {
+            if (this.stopped) return;
+            this.awaitingDelivery.delete(task.id);
             this.hasWorked.delete(task.id);
-            deliveryEntry!.sent = true;
-            deliveryEntry!.latestStatus = undefined;
+            this.forgetLaunchedAgent(hookPaneId);
+            this.store.setTaskNeedsInput(task.id, false);
           },
-          onRetry: () => {
-            deliveryEntry!.sent = false;
+          onSent: (hookPaneId) => {
+            if (this.stopped) return;
+            if (this.awaitingDelivery.delete(task.id)) {
+              this.hasWorked.delete(task.id);
+              this.forgetLaunchedAgent(hookPaneId);
+              this.store.setTaskNeedsInput(task.id, false);
+            }
           },
-        });
-        const settledPane = currentPane();
-        this.deliveringPanes.delete(paneId);
-        this.deliveringPanes.delete(settledPane);
-        deliveryEntry.sent = false;
+          onFailed: (hookPaneId, reason) => {
+            if (this.stopped) return;
+            this.awaitingDelivery.delete(task.id);
+            this.markFailedIfStillRunning(task.id, reason || "Prompt delivery failed", hookPaneId);
+            this.syncMonitorTimer();
+            if (this.started) {
+              this.lastMemAvailableMb = this.readMemAvailableMb();
+              const doc = this.store.getDocument();
+              if (pickNextQueueTask(doc, this.currentMetrics(), this.resolveReal) !== null) {
+                void this.tick().catch(() => undefined);
+              }
+            }
+          },
+        };
 
-        const stored = this.getStoredTask(task.id);
-        if (stored && stored.status === "running") {
-          if (deliveryEntry.latestStatus === "done" || (deliveryEntry.latestStatus === "idle" && this.hasWorked.has(task.id))) {
-            this.hasWorked.delete(task.id);
-            return this.store.markTaskDone(task.id);
-          }
+        try {
+          await this.enqueuePrompt(activePane, spec.prompt.text, spec.agent.kind, hooks, launchedPid);
+        } catch (error) {
+          this.awaitingDelivery.delete(task.id);
+          const reason = error instanceof Error ? error.message : String(error);
+          return this.markFailedIfStillRunning(task.id, reason || "Prompt delivery failed", this.currentTaskTerminal(task.id) ?? activePane);
+        }
+
+        const afterEnqueue = this.getStoredTask(task.id);
+        if (!afterEnqueue || afterEnqueue.status !== "running") {
+          this.awaitingDelivery.delete(task.id);
+          this.cancelPrompt(this.currentTaskTerminal(task.id) ?? activePane);
+          return afterEnqueue ?? this.markFailedIfStillRunning(task.id, "Terminal closed", activePane);
         }
       }
 
-      return this.getStoredTask(task.id) ?? this.store.markTaskRunning(task.id, paneId);
+      return this.getStoredTask(task.id) ?? this.store.markTaskRunning(task.id, activePane);
     } catch (error) {
+      this.awaitingDelivery.delete(task.id);
       const reason = error instanceof Error ? error.message : String(error);
-      return this.markFailedIfStillRunning(task.id, reason || "Task launch failed", paneId);
+      return this.markFailedIfStillRunning(task.id, reason || "Task launch failed", this.currentTaskTerminal(task.id) ?? paneId);
     } finally {
-      if (paneId !== null) this.deliveringPanes.delete(paneId);
-      const currentPane = this.currentTaskTerminal(task.id);
-      if (currentPane) this.deliveringPanes.delete(currentPane);
       this.launchingTaskId = null;
+      this.syncMonitorTimer();
     }
   }
 
-  private reconcileWithTerminals(terminals: readonly HcTerminal[]): void {
+  private async reconcileWithTerminals(terminals: readonly HcTerminal[]): Promise<void> {
     const byAddress = new Map<string, HcTerminal>();
     for (const terminal of terminals) {
       byAddress.set(terminal.address, terminal);
@@ -438,6 +558,7 @@ export class AgentQueueService {
       if (task.id === this.launchingTaskId) continue;
 
       if (!task.terminal) {
+        this.awaitingDelivery.delete(task.id);
         this.hasWorked.delete(task.id);
         this.store.markTaskFailed(task.id, "No terminal associated with running task", null);
         continue;
@@ -445,25 +566,112 @@ export class AgentQueueService {
 
       const terminal = byAddress.get(task.terminal);
       if (!terminal) {
+        this.cancelPrompt(task.terminal);
+        this.awaitingDelivery.delete(task.id);
         this.hasWorked.delete(task.id);
         this.store.markTaskFailed(task.id, "Terminal closed", task.terminal);
         continue;
       }
       if (terminal.state !== "live") {
+        this.cancelPrompt(task.terminal);
+        this.awaitingDelivery.delete(task.id);
         this.hasWorked.delete(task.id);
         this.store.markTaskFailed(task.id, "Terminal ended", task.terminal);
         continue;
       }
 
       const shown = shownStatusOf(terminal.status, terminal.turn, terminal.labels);
-      if (shown === "working") {
-        this.hasWorked.add(task.id);
-      } else if (shown === "done" || (shown === "idle" && this.hasWorked.has(task.id))) {
-        if (!this.deliveringPanes.has(task.terminal)) {
+      if (!this.awaitingDelivery.has(task.id)) {
+        if (shown === "working") {
+          this.hasWorked.add(task.id);
+        } else if (shown === "done" || (shown === "idle" && this.hasWorked.has(task.id))) {
           this.hasWorked.delete(task.id);
           this.store.markTaskDone(task.id);
+          continue;
         }
       }
+
+      const exited = await this.checkAgentExited(terminal, task.agent).catch(() => false);
+      if (this.stopped) return;
+      const afterExitCheck = this.getStoredTask(task.id);
+      if (!afterExitCheck || afterExitCheck.status !== "running" || afterExitCheck.terminal !== terminal.address) {
+        continue;
+      }
+      if (exited) {
+        this.cancelPrompt(terminal.address);
+        this.awaitingDelivery.delete(task.id);
+        this.hasWorked.delete(task.id);
+        this.store.markTaskFailed(task.id, "Agent exited", terminal.address);
+        continue;
+      }
+
+      const dialogBlocked = await this.checkDialogBlocked(terminal, task.agent).catch(() => false);
+      if (this.stopped) return;
+      const afterDialogCheck = this.getStoredTask(task.id);
+      if (!afterDialogCheck || afterDialogCheck.status !== "running" || afterDialogCheck.terminal !== terminal.address) {
+        continue;
+      }
+      const delivery = this.awaitingDelivery.get(task.id);
+      this.store.setTaskNeedsInput(task.id, Boolean(delivery?.blocked || dialogBlocked));
+    }
+  }
+
+  private syncMonitorTimer(): void {
+    const hasRunning = !this.stopped && this.store.getDocument().tasks.some((task) => task.status === "running");
+    if (!hasRunning) {
+      if (this.monitorTimer !== null) {
+        clearInterval(this.monitorTimer);
+        this.monitorTimer = null;
+      }
+      return;
+    }
+    if (this.monitorTimer === null) {
+      this.monitorTimer = setInterval(() => {
+        void this.monitorTick().catch((error: unknown) => {
+          console.error("agent-queue: monitor failed:", error instanceof Error ? error.message : String(error));
+        });
+      }, this.monitorIntervalMs);
+      this.monitorTimer.unref?.();
+    }
+  }
+
+  private async monitorTick(): Promise<void> {
+    if (this.stopped || this.monitorBusy) return;
+    this.monitorBusy = true;
+    try {
+      await this.withLaunchLock(async () => {
+        if (this.stopped) return;
+        this.store.syncIfChanged(false);
+        this.lastMemAvailableMb = this.readMemAvailableMb();
+        const beforeRunning = this.store.getDocument().tasks.filter((task) => task.status === "running").length;
+        if (beforeRunning === 0) {
+          this.syncMonitorTimer();
+          return;
+        }
+        const terminals = await this.safeGetTerminals();
+        if (terminals !== null) {
+          this.lastWorkingCount = countCoreWorkingTerminals(terminals);
+          await this.reconcileWithTerminals(terminals);
+          const doc = this.store.getDocument();
+          const afterRunning = doc.tasks.filter((task) => task.status === "running").length;
+          if (this.started && afterRunning < beforeRunning) {
+            const next = pickNextQueueTask(doc, this.currentMetrics(), this.resolveReal);
+            if (next) {
+              await this.launchTask(next);
+              this.lastMemAvailableMb = this.readMemAvailableMb();
+              const updated = await this.safeGetTerminals();
+              if (updated !== null) {
+                this.lastWorkingCount = countCoreWorkingTerminals(updated);
+              }
+            }
+          }
+        }
+        this.syncMonitorTimer();
+        const snap = this.cachedSnapshot();
+        this.emitIfChanged(snap);
+      });
+    } finally {
+      this.monitorBusy = false;
     }
   }
 
@@ -472,6 +680,7 @@ export class AgentQueueService {
     if (current && current.status !== "running" && current.status !== "queued") {
       return current;
     }
+    this.awaitingDelivery.delete(id);
     this.hasWorked.delete(id);
     return this.store.markTaskFailed(id, reason, current?.terminal ?? fallbackPaneId);
   }

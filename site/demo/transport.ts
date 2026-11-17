@@ -2392,7 +2392,8 @@ async function queueRoute(path: string, method: string, init: RequestInit | unde
         : (createDemoWorkspace(folderKey, queueFolderName(folderKey), task.agent)).pane_id;
       structureChanged();
       demoQueueLastLaunchAt = now();
-      const updated: QueueTask = { ...task, status: "running", terminal: paneId, startedAt: demoQueueLastLaunchAt, finishedAt: null, error: null };
+      const { needsInput: _, ...baseTask } = task;
+      const updated: QueueTask = { ...baseTask, status: "running", terminal: paneId, startedAt: demoQueueLastLaunchAt, finishedAt: null, error: null };
       demoQueueTasks[index] = updated;
       submitToChat(paneId, task.prompt);
       const queue = emitDemoQueue();
@@ -2435,8 +2436,9 @@ async function queueRoute(path: string, method: string, init: RequestInit | unde
         const title = body["title"] !== undefined ? ((body["title"] as string).trim() || queueTaskTitleFallback(prompt)) : current.title;
         const hold = body["hold"] !== undefined ? (body["hold"] as boolean) : current.hold;
         const requeue = body["status"] === "queued" && current.status !== "queued";
+        const { needsInput: _, ...rest } = current;
         const next: QueueTask = {
-          ...current,
+          ...(requeue ? rest : current),
           folder,
           prompt,
           agent,

@@ -117,7 +117,7 @@ function mergeAgentsWithSelected(fetched: AgentKind[], selectedKind: string): Ag
 
 function statusBadgeClass(task: QueueTask): string {
   switch (task.status) {
-    case "running": return "badge badge-working";
+    case "running": return task.needsInput ? "badge queue-badge-needs" : "badge badge-working";
     case "done": return "badge badge-done";
     case "failed": return "badge badge-blocked";
     case "queued": return task.hold ? "badge badge-unknown" : "badge badge-idle";
@@ -420,7 +420,7 @@ export function AgentQueueDialog({
 
   const taskStatusLabel = (task: QueueTask): string => {
     switch (task.status) {
-      case "running": return t("Running|queue");
+      case "running": return task.needsInput ? t("Needs you") : t("Running|queue");
       case "done": return t("Done");
       case "failed": return t("Failed");
       case "queued": return task.hold ? t("On hold") : t("Queued");
@@ -817,7 +817,7 @@ export function AgentQueueDialog({
                         const isLast = index === group.tasks.length - 1;
 
                         return (
-                          <li key={task.id} className={`queue-task-row is-${task.status}${task.hold ? " is-hold" : ""}`}>
+                          <li key={task.id} className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}>
                             <div className="queue-task-top">
                               <span className={statusBadgeClass(task)}>{taskStatusLabel(task)}</span>
                               <span className="queue-task-agent" title={agentName(task.agent)}>

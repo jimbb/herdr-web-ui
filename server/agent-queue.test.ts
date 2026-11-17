@@ -4,20 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MachineEvent } from "../shared/machines.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
+import type { PendingMessage } from "../shared/protocol.ts";
 import type { SessionSnapshot } from "../shared/herdr-api.generated.ts";
 import { MAX_LABEL_CHARS } from "../shared/labels.ts";
 import { AgentQueueService } from "./agent-queue.ts";
-import { QueueConflictError, QueueNotFoundError } from "./agent-queue-store.ts";
-import { HerdrError } from "./herdr/client.ts";
-import { HcError } from "./herdr-core/connection.ts";
+import { evaluateQueueGate, QueueConflictError, QueueNotFoundError } from "./agent-queue-store.ts";
 import {
   countCoreWorkingTerminals,
-  deliverQueuePrompt,
+  isQueuePaneAgentExited,
+  isQueuePaneDialogBlocked,
   openQueueTab,
   truncateTabLabel,
 } from "./herdr-core/queue-helpers.ts";
 import type { HcTerminal } from "./herdr-core/snapshot.ts";
 import { subscribeMachineEvents } from "./machine-events.ts";
+import type { QueueFirstMessageHooks } from "./pending-input.ts";
 
 const tempDirs: string[] = [];
 const EMPTY_PREFERENCES: SharedPreferences = { revision: 0, settings: {} };
@@ -61,6 +62,16 @@ function emptySnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapsho
     focused_pane_id: null,
     ...overrides,
   } as unknown as SessionSnapshot;
+}
+
+function fakePending(text: string): PendingMessage {
+  return {
+    id: "pm-queue-1",
+    request_id: -1,
+    text,
+    state: "queued",
+    created_at: "2026-11-18T00:00:00.000Z",
+  };
 }
 
 describe("queue-helpers", () => {
@@ -182,70 +193,117 @@ describe("queue-helpers", () => {
     ).rejects.toThrow("Project folder does not exist");
   });
 
-  it("deliverQueuePrompt waits for readiness, retries transient errors, and stops on closed panes", async () => {
-    let clock = 0;
-    let poll = 0;
-    const events: string[] = [];
-    let promptAttempts = 0;
+  it("isQueuePaneAgentExited proves return to a live shell across two reads while ignoring Ctrl+Z jobs, races, and non-local panes", async () => {
+    const liveClaude = makeTerminal("t-exit", { status: { state: "unknown", app: "claude" } });
+    const shellInfo = { shell_pid: 4100, foreground_processes: [{ pid: 4100, name: "bash" }] };
+    const agentInfo = { shell_pid: 4100, foreground_processes: [{ pid: 4200, name: "claude" }] };
 
-    await deliverQueuePrompt("t1", "Run tests\nand report", {
-      timeoutMs: 500,
-      pollMs: 25,
-      settleMs: 50,
-      now: () => clock,
-      sleep: async (ms) => { clock += ms; },
-      hc: {
-        call: (async () => {
-          poll += 1;
-          if (poll === 1) return makeTerminal("t1", { status: null });
-          if (poll === 2) return makeTerminal("t1", { status: { state: "blocked", app: "claude" } });
-          return makeTerminal("t1", { status: { state: "idle", app: "claude" } });
-        }) as never,
+    // Live agent in front -> false
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => agentInfo as never,
+      stoppedAgentJob: async () => false,
+    })).toBe(false);
+
+    // Double-read confirms shell alone in front -> true
+    let reads = 0;
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => {
+        reads += 1;
+        return shellInfo as never;
       },
-      paneGet: async () => ({
-        pane_id: "t1",
-        agent: poll >= 2 ? "claude" : null,
-      }) as never,
-      beforeSend: () => events.push(`before:${poll}`),
-      onRetry: () => events.push(`retry:${poll}`),
-      sendPrompt: async (_paneId, text) => {
-        promptAttempts += 1;
-        events.push(`send:${promptAttempts}:${text}`);
-        if (promptAttempts === 1) {
-          throw new HerdrError("agent_not_ready", "still booting");
-        }
+      stoppedAgentJob: async () => false,
+    })).toBe(true);
+    expect(reads).toBe(2);
+
+    // Transient single-read race where second read still sees agent -> false
+    let transient = 0;
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => (++transient === 1 ? shellInfo : agentInfo) as never,
+      stoppedAgentJob: async () => false,
+    })).toBe(false);
+
+    // Suspended agent job (Ctrl+Z) under the shell -> false
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => shellInfo as never,
+      stoppedAgentJob: async (shellPid, expectedAgent) => shellPid === 4100 && expectedAgent === "claude",
+    })).toBe(false);
+
+    // Non-shell child in foreground -> false
+    expect(await isQueuePaneAgentExited(
+      makeTerminal("t-child", { pid: 4100, foreground: { pid: 4200, name: "git" } }),
+      "claude",
+      {
+        platform: "linux",
+        paneProcessInfo: async () => { throw new Error("should not be reached"); },
       },
-    });
+    )).toBe(false);
 
-    expect(events).toEqual([
-      "before:3",
-      "send:1:Run tests\nand report",
-      "retry:3",
-      "before:4",
-      "send:2:Run tests\nand report",
-    ]);
+    // Empty foreground list (missing foreground proof) -> fail-closed false
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => ({ shell_pid: 4100, foreground_processes: [] }) as never,
+      stoppedAgentJob: async () => false,
+    })).toBe(false);
 
-    await expect(
-      deliverQueuePrompt("t-gone", "Hi", {
-        now: () => clock,
-        sleep: async (ms) => { clock += ms; },
-        hc: {
-          async call() {
-            throw new HcError("not_found", "missing terminal");
-          },
-        },
-      }),
-    ).rejects.toThrow("no longer exists");
+    // Ended, remote, Windows, or RPC failure -> fail-closed false
+    expect(await isQueuePaneAgentExited(makeTerminal("t-ended", { state: "ended" }), "claude", { platform: "linux" })).toBe(false);
+    expect(await isQueuePaneAgentExited(makeTerminal("vps/t-rem"), "claude", { platform: "linux" })).toBe(false);
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", { platform: "win32" })).toBe(false);
+    expect(await isQueuePaneAgentExited(liveClaude, "claude", {
+      platform: "linux",
+      paneProcessInfo: async () => { throw new Error("socket gone"); },
+    })).toBe(false);
+  });
 
-    await expect(
-      deliverQueuePrompt("t-ended", "Hi", {
-        now: () => clock,
-        sleep: async (ms) => { clock += ms; },
-        hc: {
-          call: (async () => makeTerminal("t-ended", { state: "ended" })) as never,
-        },
-      }),
-    ).rejects.toThrow("ended before prompt delivery");
+  it("isQueuePaneDialogBlocked detects OSC blocked status, trust menus, and Codex own screens cleanly", async () => {
+    // OSC 7501 blocked state needs no screen read
+    expect(await isQueuePaneDialogBlocked(
+      makeTerminal("t-osc", { status: { state: "blocked", app: "claude" } }),
+      "claude",
+      { paneRead: async () => { throw new Error("should not read screen"); } },
+    )).toBe(true);
+
+    // Claude folder-trust menu while status is unknown -> true
+    const trustMenu = [
+      " Quick safety check: Is this a project you created or one you trust?",
+      "",
+      " ❯ No, exit",
+      "   Yes, I trust this folder",
+      "",
+      " Enter to confirm · Esc to cancel",
+    ].join("\n");
+    expect(await isQueuePaneDialogBlocked(
+      makeTerminal("t-trust", { status: { state: "unknown", app: "claude" } }),
+      "claude",
+      { paneRead: async () => ({ text: trustMenu }) as never },
+    )).toBe(true);
+
+    // Codex own screen (model/list footer) at rest -> true
+    expect(await isQueuePaneDialogBlocked(
+      makeTerminal("t-codex", { status: { state: "idle", app: "codex" } }),
+      "codex",
+      { paneRead: async () => ({ text: "Select Model and Effort\n› 1. gpt-5.4\n\nenter select · esc back" }) as never },
+    )).toBe(true);
+
+    // Clean empty input box at rest -> false
+    expect(await isQueuePaneDialogBlocked(
+      makeTerminal("t-clean", { status: { state: "idle", app: "claude" } }),
+      "claude",
+      { paneRead: async () => ({ text: "────────────\n❯ \n────────────" }) as never },
+    )).toBe(false);
+
+    // Ended, remote, or unreadable screen -> fail-closed false
+    expect(await isQueuePaneDialogBlocked(makeTerminal("t-ended", { state: "ended" }), "claude")).toBe(false);
+    expect(await isQueuePaneDialogBlocked(makeTerminal("vps/t-remote"), "claude")).toBe(false);
+    expect(await isQueuePaneDialogBlocked(
+      makeTerminal("t-err", { status: { state: "idle", app: "claude" } }),
+      "claude",
+      { paneRead: async () => { throw new Error("rpc timeout"); } },
+    )).toBe(false);
   });
 });
 
@@ -272,10 +330,12 @@ describe("AgentQueueService", () => {
         return paneId;
       },
       launchAgent: async () => ({ agent_started: true }),
-      deliverPrompt: async (paneId, text, deps) => {
-        deps?.beforeSend?.();
+      enqueuePrompt: async (paneId, text, kind, hooks) => {
+        hooks.onBeforeCommit?.(paneId);
+        hooks.onSent?.(paneId);
         const [, folder = "", title = ""] = paneId.split(":");
-        launches.push({ folder, title, agent: "pending", paneId, prompt: text });
+        launches.push({ folder, title, agent: kind, paneId, prompt: text });
+        return fakePending(text);
       },
       forgetLaunchedAgent: () => {},
     });
@@ -348,7 +408,7 @@ describe("AgentQueueService", () => {
     const dir = makeTempDir();
     let clock = Date.parse("2026-11-18T11:00:00.000Z");
     const launchedArgs: Array<{ paneId: string; kind: unknown; args: unknown; positionalForgot: boolean }> = [];
-    const delivered: Array<{ paneId: string; text: string }> = [];
+    const delivered: Array<{ paneId: string; text: string; pid: number | null }> = [];
     const forgotten: string[] = [];
     const terminals: HcTerminal[] = [makeTerminal("w1", { status: { state: "working" } })];
     let nextPane = 0;
@@ -368,12 +428,16 @@ describe("AgentQueueService", () => {
         terminals.push(makeTerminal(id, { status: { state: "idle" } }));
         return id;
       },
-      launchAgent: async (paneId, agent) => {
+      launchAgent: async (paneId, agent, onPid) => {
+        onPid?.(9000 + nextPane);
         launchedArgs.push({ paneId, kind: agent.kind, args: agent.args, positionalForgot: forgotten.includes(paneId) });
         return { agent_started: true };
       },
-      deliverPrompt: async (paneId, text) => {
-        delivered.push({ paneId, text });
+      enqueuePrompt: async (paneId, text, _kind, hooks, launchedPid) => {
+        delivered.push({ paneId, text, pid: launchedPid ?? null });
+        hooks.onBeforeCommit?.(paneId);
+        hooks.onSent?.(paneId);
+        return fakePending(text);
       },
       forgetLaunchedAgent: (paneId) => { forgotten.push(paneId); },
     });
@@ -401,7 +465,7 @@ describe("AgentQueueService", () => {
     // Missing / unknown ID throws QueueNotFoundError
     await expect(service.startNow("missing-id")).rejects.toBeInstanceOf(QueueNotFoundError);
 
-    // Start single-line Codex -> positional CLI prompt, no deliverPrompt call, forgetLaunchedAgent called
+    // Start single-line Codex -> positional CLI prompt, no enqueuePrompt call, forgetLaunchedAgent called
     const started1 = await service.startNow(codexSingle.id);
     expect(started1.task.status).toBe("running");
     expect(started1.task.terminal).toBe("pane-1");
@@ -414,27 +478,25 @@ describe("AgentQueueService", () => {
     // Starting an already-running task throws QueueConflictError("task_not_queued")
     await expect(service.startNow(codexSingle.id)).rejects.toBeInstanceOf(QueueConflictError);
 
-    // Finish codexSingle, start multiline Codex -> uses pending delivery
+    // Finish codexSingle, start multiline Codex -> uses pending delivery with captured pid
     service.onPaneStatus("pane-1", "working", "codex");
     service.onPaneStatus("pane-1", "done", "codex");
     const started2 = await service.startNow(codexSibling.id);
     expect(started2.task.terminal).toBe("pane-2");
-    expect(delivered).toEqual([{ paneId: "pane-2", text: "Line 1\nLine 2" }]);
+    expect(delivered[0]).toEqual({ paneId: "pane-2", text: "Line 1\nLine 2", pid: 9002 });
 
     // Other project can start in parallel via startNow -> Claude uses pending delivery
     const started3 = await service.startNow(claudeTask.id);
     expect(started3.task.terminal).toBe("pane-3");
-    expect(delivered[1]).toEqual({ paneId: "pane-3", text: "Audit routes" });
+    expect(delivered[1]).toEqual({ paneId: "pane-3", text: "Audit routes", pid: 9003 });
   });
 
   it("tracks lifecycle, ignores startup/error rests, handles pane moves and restarts/reconcile", async () => {
     const dir = makeTempDir();
     let clock = Date.parse("2026-11-18T12:00:00.000Z");
     let terminals: HcTerminal[] = [];
-    let beforeSendHook: (() => void) | undefined;
-    let markDeliverEntered!: () => void;
-    const deliverEntered = new Promise<void>((resolve) => { markDeliverEntered = resolve; });
-    let finishDeliver!: () => void;
+    const hooksByPane = new Map<string, QueueFirstMessageHooks>();
+    const cancelled: string[] = [];
 
     const service = new AgentQueueService({
       stateDir: dir,
@@ -444,48 +506,45 @@ describe("AgentQueueService", () => {
       getTerminals: async () => terminals,
       openTab: async () => "p-live",
       launchAgent: async () => ({ agent_started: true }),
-      deliverPrompt: async (_paneId, _text, deps) => {
-        beforeSendHook = deps?.beforeSend;
-        markDeliverEntered();
-        await new Promise<void>((resolve) => { finishDeliver = resolve; });
+      enqueuePrompt: async (paneId, text, _kind, hooks) => {
+        hooksByPane.set(paneId, hooks);
+        return fakePending(text);
       },
+      cancelPrompt: (paneId) => { cancelled.push(paneId); },
       forgetLaunchedAgent: () => {},
     });
 
     const t1 = service.createTask({ folder: "/srv/a", title: "Task 1", prompt: "Do work" }).task;
+    const launched = await service.startNow(t1.id);
+    expect(launched.task.status).toBe("running");
 
-    // Begin launch in background and wait until deliverPrompt begins
-    const startPromise = service.startNow(t1.id);
-    await deliverEntered;
-
-    // Startup noise (done/idle before beforeSend) must NOT mark task done
+    // Startup noise (working/done/idle before onBeforeCommit) must NOT mark task done
     service.onPaneStatus("p-live", "working", "claude");
     service.onPaneStatus("p-live", "done", "claude");
     expect(service.cachedSnapshot().tasks[0]!.status).toBe("running");
 
-    // Prompt actually sent -> fast turn finishes inside deliverPrompt
-    beforeSendHook?.();
+    // Prompt actually committed -> fast turn + pane move completes task cleanly
+    const t1Hooks = hooksByPane.get("p-live")!;
+    t1Hooks.onBeforeCommit?.("p-live");
     service.onPaneStatus("p-live", "working", "claude");
-    // While working -> blocked stays running
+    // While working -> blocked sets needsInput but keeps running
     service.onPaneStatus("p-live", "blocked", "claude");
     expect(service.cachedSnapshot().tasks[0]!.status).toBe("running");
-    // Pane moves during prompt delivery
+    expect(service.cachedSnapshot().tasks[0]!.needsInput).toBe(true);
+    // Pane moves during run, then finishes before onSent even fires
     service.onPaneMoved("p-live", "p-moved");
-    // Finishes before deliverPrompt resolves
     service.onPaneStatus("p-moved", "idle", "claude");
-    finishDeliver();
+    t1Hooks.onSent?.("p-moved");
 
-    const launched = await startPromise;
-    expect(launched.task.status).toBe("done");
-    expect(launched.task.terminal).toBe("p-moved");
-    expect(launched.task.finishedAt).toBe("2026-11-18T12:00:00.000Z");
+    const doneT1 = service.cachedSnapshot().tasks[0]!;
+    expect(doneT1.status).toBe("done");
+    expect(doneT1.terminal).toBe("p-moved");
+    expect(doneT1.needsInput).toBeUndefined();
+    expect(doneT1.finishedAt).toBe("2026-11-18T12:00:00.000Z");
 
     // Failed rollout rest (`failedRest = true`) must NOT mark running task done on idle
     clock += 1000;
     const t2 = service.createTask({ folder: "/srv/b", prompt: "Second" }).task;
-    let markT2Delivered!: () => void;
-    const t2Entered = new Promise<void>((resolve) => { markT2Delivered = resolve; });
-    let sendT2!: () => void;
     const fastService = new AgentQueueService({
       stateDir: dir,
       getPreferences: () => EMPTY_PREFERENCES,
@@ -494,24 +553,23 @@ describe("AgentQueueService", () => {
       getTerminals: async () => terminals,
       openTab: async () => "p-b",
       launchAgent: async () => ({ agent_started: true }),
-      deliverPrompt: async (_paneId, _text, deps) => {
-        deps?.beforeSend?.();
-        markT2Delivered();
-        await new Promise<void>((resolve) => { sendT2 = resolve; });
+      enqueuePrompt: async (paneId, text, _kind, hooks) => {
+        hooks.onBeforeCommit?.(paneId);
+        hooks.onSent?.(paneId);
+        return fakePending(text);
       },
+      cancelPrompt: (paneId) => { cancelled.push(paneId); },
       forgetLaunchedAgent: () => {},
     });
-    const t2Promise = fastService.startNow(t2.id);
-    await t2Entered;
-    sendT2();
-    await t2Promise;
+    await fastService.startNow(t2.id);
 
     fastService.onPaneStatus("p-b", "working", "codex", false);
     fastService.onPaneStatus("p-b", "idle", "codex", true);
     expect(fastService.cachedSnapshot().tasks.find((x) => x.id === t2.id)?.status).toBe("running");
 
-    // Terminal closed marks task failed
+    // Terminal closed marks task failed and cancels any pending delivery
     fastService.onPaneGone("p-b", "Terminal ended");
+    expect(cancelled).toContain("p-b");
     const failedT2 = fastService.cachedSnapshot().tasks.find((x) => x.id === t2.id)!;
     expect(failedT2.status).toBe("failed");
     expect(failedT2.error).toBe("Terminal ended");
@@ -526,7 +584,11 @@ describe("AgentQueueService", () => {
       getTerminals: async () => terminals,
       openTab: async () => "p-c",
       launchAgent: async () => ({ agent_started: true }),
-      deliverPrompt: async (_paneId, _text, deps) => { deps?.beforeSend?.(); },
+      enqueuePrompt: async (paneId, text, _kind, hooks) => {
+        hooks.onBeforeCommit?.(paneId);
+        hooks.onSent?.(paneId);
+        return fakePending(text);
+      },
       forgetLaunchedAgent: () => {},
     });
     await restarted.startNow(t3.id);
@@ -559,6 +621,184 @@ describe("AgentQueueService", () => {
     const missingT4 = recovered.cachedSnapshot().tasks.find((x) => x.id === t4.id)!;
     expect(missingT4.status).toBe("failed");
     expect(missingT4.error).toBe("Terminal closed");
+  });
+
+  it("tracks needsInput during pending dialogs and clears it when answered or delivered", async () => {
+    const dir = makeTempDir();
+    let terminals: HcTerminal[] = [makeTerminal("p-dlg", { status: { state: "unknown", app: "claude" } })];
+    let dialogBlocked = true;
+    let capturedHooks: QueueFirstMessageHooks | undefined;
+
+    const service = new AgentQueueService({
+      stateDir: dir,
+      getPreferences: () => EMPTY_PREFERENCES,
+      readMemAvailableMb: () => 8192,
+      getTerminals: async () => terminals,
+      checkDialogBlocked: async () => dialogBlocked,
+      openTab: async () => "p-dlg",
+      launchAgent: async () => ({ agent_started: true }),
+      enqueuePrompt: async (_paneId, text, _kind, hooks) => {
+        capturedHooks = hooks;
+        hooks.onBlocked?.("p-dlg", "Quick safety check");
+        return fakePending(text);
+      },
+      forgetLaunchedAgent: () => {},
+    });
+
+    const task = service.createTask({ folder: "/srv/dlg", prompt: "Reply with just: QUEUE OK" }).task;
+    const started = await service.startNow(task.id);
+    expect(started.task.status).toBe("running");
+    expect(started.task.needsInput).toBe(true);
+
+    // Periodic reconcile keeps running + needsInput while trust dialog stays open
+    await service.reconcile();
+    expect(service.cachedSnapshot().tasks[0]?.status).toBe("running");
+    expect(service.cachedSnapshot().tasks[0]?.needsInput).toBe(true);
+
+    // User answers the prompt in UI -> needsInput clears immediately before delivery completes
+    dialogBlocked = false;
+    service.onPanePromptAnswered("p-dlg");
+    expect(service.cachedSnapshot().tasks[0]?.needsInput).toBeUndefined();
+
+    // Pending hook delivers prompt -> task completes normally on working -> idle
+    capturedHooks?.onUnblocked?.("p-dlg");
+    capturedHooks?.onBeforeCommit?.("p-dlg");
+    capturedHooks?.onSent?.("p-dlg");
+    service.onPaneStatus("p-dlg", "working", "claude");
+    service.onPaneStatus("p-dlg", "idle", "claude");
+    expect(service.cachedSnapshot().tasks[0]?.status).toBe("done");
+    expect(service.cachedSnapshot().tasks[0]?.needsInput).toBeUndefined();
+  });
+
+  it("fails Agent exited via live monitor, cancels pending delivery, and unblocks the next task for that project", async () => {
+    const dir = makeTempDir();
+    let clock = Date.parse("2026-11-18T14:00:00.000Z");
+    const terminals: HcTerminal[] = [];
+    const exitedPanes = new Set<string>();
+    const cancelled: string[] = [];
+    const launchedOrder: string[] = [];
+    const secondEnqueued = Promise.withResolvers<void>();
+    let paneCounter = 0;
+
+    const service = new AgentQueueService({
+      stateDir: dir,
+      getPreferences: () => EMPTY_PREFERENCES,
+      now: () => clock,
+      readMemAvailableMb: () => 8192,
+      pollIntervalMs: 60_000,
+      monitorIntervalMs: 15,
+      getTerminals: async () => [...terminals],
+      checkAgentExited: async (terminal) => exitedPanes.has(terminal.address),
+      openTab: async () => {
+        const id = `p-mon-${++paneCounter}`;
+        terminals.push(makeTerminal(id, { status: { state: "unknown", app: "claude" } }));
+        return id;
+      },
+      launchAgent: async () => ({ agent_started: true }),
+      enqueuePrompt: async (paneId, text, _kind, hooks) => {
+        launchedOrder.push(`${paneId}:${text}`);
+        if (paneId === "p-mon-1") {
+          hooks.onBlocked?.(paneId, "trust menu");
+        } else {
+          hooks.onBeforeCommit?.(paneId);
+          hooks.onSent?.(paneId);
+          secondEnqueued.resolve();
+        }
+        return fakePending(text);
+      },
+      cancelPrompt: (paneId) => { cancelled.push(paneId); },
+      forgetLaunchedAgent: () => {},
+    });
+
+    try {
+      service.updateSettings({ cooldownSec: 0 });
+      const first = service.createTask({ folder: "/srv/proj", title: "Task 1", prompt: "First" }).task;
+      const second = service.createTask({ folder: "/srv/proj", title: "Task 2", prompt: "Second" }).task;
+
+      service.start();
+      const snap1 = await service.tick();
+      expect(snap1.tasks.find((t) => t.id === first.id)?.status).toBe("running");
+      expect(snap1.tasks.find((t) => t.id === first.id)?.needsInput).toBe(true);
+      expect(snap1.tasks.find((t) => t.id === second.id)?.status).toBe("queued");
+
+      // User exits Claude back to bash on first task's pane -> 2s monitor detects exit & unblocks Task 2
+      clock += 1000;
+      exitedPanes.add("p-mon-1");
+
+      await Promise.race([secondEnqueued.promise, Bun.sleep(5_000).then(() => { throw new Error("Timed out waiting for second task launch"); })]);
+
+      const snap2 = service.cachedSnapshot();
+      const firstAfter = snap2.tasks.find((t) => t.id === first.id)!;
+      const secondAfter = snap2.tasks.find((t) => t.id === second.id)!;
+      expect(cancelled).toEqual(["p-mon-1"]);
+      expect(firstAfter.status).toBe("failed");
+      expect(firstAfter.error).toBe("Agent exited");
+      expect(firstAfter.needsInput).toBeUndefined();
+      expect(secondAfter.status).toBe("running");
+      expect(secondAfter.terminal).toBe("p-mon-2");
+      expect(launchedOrder).toEqual(["p-mon-1:First", "p-mon-2:Second"]);
+    } finally {
+      service.stop();
+    }
+  });
+
+  it("marks persisted running task failed with Agent exited on startup reconcile and unblocks project", async () => {
+    const dir = makeTempDir();
+    const seeder = new AgentQueueService({
+      stateDir: dir,
+      getPreferences: () => EMPTY_PREFERENCES,
+      readMemAvailableMb: () => 8192,
+      getTerminals: async () => [],
+    });
+    const crashed = seeder.createTask({ folder: "/srv/reconcile", prompt: "Crashed run" }).task;
+    const waiting = seeder.createTask({ folder: "/srv/reconcile", prompt: "Queued behind it" }).task;
+    seeder.store.markTaskRunning(crashed.id, "p-crashed");
+    seeder.stop();
+
+    const cancelled: string[] = [];
+    const recovered = new AgentQueueService({
+      stateDir: dir,
+      getPreferences: () => EMPTY_PREFERENCES,
+      readMemAvailableMb: () => 8192,
+      getTerminals: async () => [makeTerminal("p-crashed", { state: "live", status: { state: "unknown", app: "claude" } })],
+      checkAgentExited: async (terminal) => terminal.address === "p-crashed",
+      cancelPrompt: (paneId) => { cancelled.push(paneId); },
+    });
+
+    try {
+      const snap = await recovered.reconcile();
+      expect(cancelled).toEqual(["p-crashed"]);
+      expect(snap.tasks.find((t) => t.id === crashed.id)).toMatchObject({ status: "failed", error: "Agent exited" });
+      expect(snap.tasks.find((t) => t.id === waiting.id)?.status).toBe("queued");
+      expect(evaluateQueueGate(recovered.store.getDocument(), { memAvailableMb: 8192, workingCount: 0, nowMs: Date.now() + 200_000 }).status).toBe("ready");
+    } finally {
+      recovered.stop();
+    }
+  });
+
+  it("marks running task failed when asynchronous prompt delivery fails via onFailed hook", async () => {
+    const dir = makeTempDir();
+    let capturedHooks: QueueFirstMessageHooks | undefined;
+    const service = new AgentQueueService({
+      stateDir: dir,
+      getPreferences: () => EMPTY_PREFERENCES,
+      readMemAvailableMb: () => 8192,
+      getTerminals: async () => [makeTerminal("p-async")],
+      openTab: async () => "p-async",
+      launchAgent: async () => ({ agent_started: true }),
+      enqueuePrompt: async (_paneId, text, _kind, hooks) => {
+        capturedHooks = hooks;
+        return fakePending(text);
+      },
+      forgetLaunchedAgent: () => {},
+    });
+
+    const t1 = service.createTask({ folder: "/srv/async", prompt: "Wait then exit" }).task;
+    await service.startNow(t1.id);
+    expect(service.cachedSnapshot().tasks[0]?.status).toBe("running");
+
+    capturedHooks?.onFailed?.("p-async", "Agent exited", "first_message_launch_ended");
+    expect(service.cachedSnapshot().tasks[0]).toMatchObject({ status: "failed", error: "Agent exited" });
   });
 
   it("records failure reason when launchAgent fails and emits deduplicated machine-events frames", async () => {
