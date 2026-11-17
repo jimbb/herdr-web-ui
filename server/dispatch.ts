@@ -71,6 +71,7 @@ import { readHerdrUi } from "./herdr-ui.ts";
 import { MachineRelay, type RelayReceiptIds } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
+import { handleAgentQueueRequest } from "./agent-queue-routes.ts";
 import type { AgentQueueService } from "./agent-queue.ts";
 import type { createServer } from "./index.ts";
 import type { TailnetIdentity } from "./tailscale.ts";
@@ -896,6 +897,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       return errorResponse(error);
     }
   }
+
+  const agentQueueResponse = await handleAgentQueueRequest(request, pathname, ctx, agentQueue);
+  if (agentQueueResponse) return agentQueueResponse;
 
   if (pathname.startsWith("/api/")) {
     return jsonResponse({ error: { code: "not_found", message: `unknown endpoint ${pathname}` } }, 404);

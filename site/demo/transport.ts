@@ -1,5 +1,19 @@
 import { NO_AGENT_MESSAGE } from "../../shared/submit-outcome.ts";
 import { resolveHerdrKeys } from "../../shared/herdr-keys.ts";
+import {
+  DEFAULT_QUEUE_AGENT,
+  DEFAULT_QUEUE_SETTINGS,
+  formatQueueDuration,
+  formatQueueGb,
+  normalizeQueueFolder,
+  queueFolderName,
+  queueTaskTitleFallback,
+  VALID_QUEUE_AGENT,
+  type QueueGateState,
+  type QueueSettings,
+  type QueueSnapshot,
+  type QueueTask,
+} from "../../shared/agent-queue.ts";
 import type { AgentIntegration, AgentStatus, CommandForm, CommandOutcome, ConversationTurn, DevicePairedEvent, DevicesRevokedAll, HealthAuth, IntegrationsResponse, Machine, MachineEvent, OmoActivity, OmoTask, PairedDevice, PairingCode, PaneBackgroundAgentDetail, PaneDirection, PaneFindMatch, PaneFindRequest, PaneMoved, PanePlan, PaneResized, PaneSplit, PaneSwapped, PaneZoomed, PendingMessage, PlanStep, PluginActionResult, PluginActions, PluginActionsResponse, PortalStatus, RelayStatus, SecuritySummary, ServerMessage, SessionSnapshot, SlashCommand, TabMoved, TabMovedToWorkspace, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeInventory, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
 import type { PushSubscriptionStatus, RepoBranchComparison, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffRefs, RepoDiffRepository, RepoDiffScope, SessionHistoryAgent, SessionHistoryResponse, SessionResumeResponse } from "../../shared/protocol.ts";
 import { nextTabLabels, normalizeThemeChange, sharedPreferencesBody, type SharedPreferences } from "../../shared/preferences.ts";
@@ -332,6 +346,130 @@ function changePreferences(raw: unknown): Response {
   preferences = { revision: preferences.revision + 1, settings: merged, ...(pins === undefined ? {} : { pins }), muted_panes: change.muted_panes ?? preferences.muted_panes ?? [], ...(kept === undefined ? {} : { tab_labels: kept }) };
   emitSse({ type: "preferences", preferences });
   return json(preferences, 200, { "cache-control": "no-store" });
+}
+
+// ---- per-project agent task queue (server/agent-queue-store.ts & server/agent-queue-routes.ts) ----
+
+let demoQueueSettings: QueueSettings = { ...DEFAULT_QUEUE_SETTINGS };
+let demoQueueLastLaunchAt: string | null = ago(1);
+let demoQueueNextId = 100;
+const DEMO_QUEUE_MEM_AVAILABLE_MB = 4096;
+
+const demoQueueTasks: QueueTask[] = [
+  {
+    id: "demo-queue-1",
+    folder: "/home/demo/checkout-api",
+    title: "Idempotent payments metric",
+    prompt: "Add payments_idempotent_replays_total counter and verify with tests.",
+    agent: "claude",
+    hold: false,
+    status: "running",
+    terminal: panesFixture.api,
+    createdAt: ago(5),
+    startedAt: ago(2),
+    finishedAt: null,
+    error: null,
+  },
+  {
+    id: "demo-queue-2",
+    folder: "/home/demo/checkout-api",
+    title: "Cap exponential retry backoff",
+    prompt: "Cap backoff after eight retries and cover jitter determinism in unit tests.",
+    agent: "codex",
+    hold: false,
+    status: "queued",
+    terminal: null,
+    createdAt: ago(4),
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+  },
+  {
+    id: "demo-queue-3",
+    folder: "/home/demo/cli-tools",
+    title: "Validate config schema on startup",
+    prompt: "Validate CLI config schema on startup and report clear errors for unknown keys.",
+    agent: "claude",
+    hold: true,
+    status: "queued",
+    terminal: null,
+    createdAt: ago(3),
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+  },
+  {
+    id: "demo-queue-4",
+    folder: "/home/demo/cli-tools",
+    title: "Plan the config file",
+    prompt: "Draft config structure for workspace overrides and env fallbacks.",
+    agent: "omp",
+    hold: false,
+    status: "done",
+    terminal: panesFixture.omp,
+    createdAt: ago(20),
+    startedAt: ago(18),
+    finishedAt: ago(12),
+    error: null,
+  },
+];
+
+function demoQueueGate(): QueueGateState {
+  const workingCount = snapshot().panes.filter((pane) => pane.agent_status === "working" || pane.background_wait).length;
+  const lastMs = demoQueueLastLaunchAt ? Date.parse(demoQueueLastLaunchAt) : Number.NaN;
+  const cooldownLeftSec = Number.isFinite(lastMs) && demoQueueSettings.cooldownSec > 0
+    ? Math.max(0, Math.ceil((lastMs + demoQueueSettings.cooldownSec * 1000 - Date.now()) / 1000))
+    : 0;
+  const base = {
+    memAvailableMb: DEMO_QUEUE_MEM_AVAILABLE_MB,
+    workingCount,
+    cooldownLeftSec,
+  };
+  if (demoQueueSettings.paused) return { status: "paused", summary: "Paused", ...base };
+  if (DEMO_QUEUE_MEM_AVAILABLE_MB < demoQueueSettings.minMemMb) {
+    return { status: "low_memory", summary: `Waiting: ${formatQueueGb(DEMO_QUEUE_MEM_AVAILABLE_MB)} free < ${formatQueueGb(demoQueueSettings.minMemMb)}`, ...base };
+  }
+  if (workingCount >= demoQueueSettings.maxWorking) {
+    return { status: "max_working", summary: `Waiting: ${workingCount} agents working`, ...base };
+  }
+  if (cooldownLeftSec > 0) {
+    return { status: "cooldown", summary: `Cooldown: ${formatQueueDuration(cooldownLeftSec)}`, ...base };
+  }
+  const runningFolders = new Set(demoQueueTasks.filter((task) => task.status === "running").map((task) => normalizeQueueFolder(task.folder)));
+  const runnable = demoQueueTasks.some((task) => task.status === "queued" && !task.hold && !runningFolders.has(normalizeQueueFolder(task.folder)));
+  if (runnable) return { status: "ready", summary: "Ready", ...base };
+  const waitingProject = demoQueueTasks.some((task) => task.status === "queued" && !task.hold);
+  if (waitingProject) return { status: "project_busy", summary: "Waiting: project already has a running agent", ...base };
+  return { status: "idle", summary: "Idle", ...base };
+}
+
+function demoQueueSnapshot(): QueueSnapshot {
+  return {
+    version: 1,
+    settings: { ...demoQueueSettings },
+    tasks: structuredClone(demoQueueTasks),
+    gate: demoQueueGate(),
+    lastLaunchAt: demoQueueLastLaunchAt,
+  };
+}
+
+function emitDemoQueue(): QueueSnapshot {
+  const queue = demoQueueSnapshot();
+  emitSse({ type: "agent-queue", queue });
+  return queue;
+}
+
+function finishDemoQueueTask(paneId: string): void {
+  let changed = false;
+  for (const task of demoQueueTasks) {
+    if (task.status === "running" && task.terminal === paneId) {
+      task.status = "done";
+      task.finishedAt = now();
+      task.error = null;
+      changed = true;
+    }
+  }
+  if (changed) emitDemoQueue();
 }
 
 function paneOf(paneId: string): Pane | undefined {
@@ -710,6 +848,7 @@ function finishDemoTurn(paneId: string, status: "idle" | "done" = "done"): void 
   replying.delete(paneId);
   if (!paneOf(paneId)) return;
   setStatus(paneId, status);
+  finishDemoQueueTask(paneId);
   if (deliverFirstMessage(paneId)) return;
   for (const socket of [...sockets].sort((a, b) => a.pendingOrder(paneId) - b.pendingOrder(paneId))) {
     if (socket.drainPending(paneId)) break;
@@ -1114,11 +1253,11 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     if (query.get("scope") === "bridge") {
       if (variant === "loading") return await new Promise<Response>(() => undefined);
       if (variant === "error") return error("server_unavailable", "The demo server is not answering.", 503);
-      return json({ ok: true, auth, bridge_protocol: 1, relay: demoRelayStatus(), ...facts, ...DEMO_RUNTIME_FACTS }, 200, { "cache-control": "no-store" });
+      return json({ ok: true, auth, bridge_protocol: 1, relay: demoRelayStatus(), ...facts, ...DEMO_RUNTIME_FACTS, agent_queue: true }, 200, { "cache-control": "no-store" });
     }
     // the LAN warning is drawn only where a real server would send it: an other-address bind, no token, nothing paired
     const lan = variant === "unknown" ? { lan_exposure: { host: "0.0.0.0" } } : {};
-    return json({ ok: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, relay: demoRelayStatus(), ...lan, ...facts, ...DEMO_RUNTIME_FACTS, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } }, 200, { "cache-control": "no-store" });
+    return json({ ok: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, relay: demoRelayStatus(), ...lan, ...facts, ...DEMO_RUNTIME_FACTS, agent_queue: true, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } }, 200, { "cache-control": "no-store" });
   }
   if (path === "/api/runtime/move") return json({ available: false, reason: "not_herdr", status: { state: "idle" } }, 200, { "cache-control": "no-store" });
   if (path === "/api/devices/pair/start") {
@@ -1313,6 +1452,7 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   if (path === "/api/cliproxy/login" || path === "/api/cliproxy/callback") return error("demo", "Sign in from an installed server, not the public demo.", 409);
   if (path === "/api/push" || path.startsWith("/api/push/")) return pushRoute(path, method, init);
   if (path === "/api/alerts/webhook" || path === "/api/alerts/webhook/test") return alertWebhookRoute(path, method, init);
+  if (path === "/api/queue" || path.startsWith("/api/queue/")) return queueRoute(path, method, init, input);
   if (path === "/api/machines/settings") return json({ auto_update_bridges: true });
   if (path.startsWith("/api/machines/")) return error("demo", "remote PCs need a real machine", 404);
 
@@ -2098,6 +2238,223 @@ function alertWebhookRoute(path: string, method: string, init: RequestInit | und
   return json(demoWebhook, 200, { "cache-control": "no-store" });
 }
 
+async function readQueueJson(init: RequestInit | undefined, input: RequestInfo | URL): Promise<Record<string, unknown> | Response> {
+  let body: unknown;
+  try {
+    body = init?.body ? JSON.parse(String(init.body)) : input instanceof Request ? await input.clone().json() : undefined;
+  } catch {
+    return error("invalid_json", "request body must be JSON", 400);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return error("invalid_body", "request body must be a JSON object", 400);
+  }
+  return body as Record<string, unknown>;
+}
+
+async function queueRoute(path: string, method: string, init: RequestInit | undefined, input: RequestInfo | URL): Promise<Response> {
+  if (method !== "GET" && (demoSecurity() === "watch" || demoAuth.role === "watch")) {
+    return error("read_only", "this device can only watch", 403);
+  }
+
+  if (path === "/api/queue") {
+    if (method !== "GET") return error("method_not_allowed", "Use GET /api/queue", 405);
+    return json(demoQueueSnapshot(), 200, { "cache-control": "no-store" });
+  }
+
+  if (path === "/api/queue/tasks") {
+    if (method !== "POST") return error("method_not_allowed", "Use POST /api/queue/tasks", 405);
+    const body = await readQueueJson(init, input);
+    if (body instanceof Response) return body;
+    if (typeof body["folder"] !== "string" || body["folder"].trim() === "") return error("invalid_folder", "folder is required", 400);
+    if (typeof body["prompt"] !== "string" || body["prompt"].trim() === "" || body["prompt"].includes("\0")) return error("invalid_prompt", "prompt cannot be empty", 400);
+    const agent = body["agent"] === undefined ? DEFAULT_QUEUE_AGENT : typeof body["agent"] === "string" ? body["agent"].trim() : "";
+    if (!VALID_QUEUE_AGENT.test(agent)) return error("invalid_agent", "agent must be a lowercase agent id such as claude or codex", 400);
+    if (body["title"] !== undefined && typeof body["title"] !== "string") return error("invalid_title", "title must be a string", 400);
+    if (body["hold"] !== undefined && typeof body["hold"] !== "boolean") return error("invalid_hold", "hold must be true or false", 400);
+    const prompt = body["prompt"];
+    const title = (typeof body["title"] === "string" ? body["title"].trim() : "") || queueTaskTitleFallback(prompt);
+    const task: QueueTask = {
+      id: `demo-queue-${++demoQueueNextId}`,
+      folder: normalizeQueueFolder(body["folder"]),
+      title,
+      prompt,
+      agent,
+      hold: body["hold"] === true,
+      status: "queued",
+      terminal: null,
+      createdAt: now(),
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    };
+    demoQueueTasks.push(task);
+    const queue = emitDemoQueue();
+    return json({ task: structuredClone(task), queue }, 201, { "cache-control": "no-store" });
+  }
+
+  if (path === "/api/queue/reorder") {
+    if (method !== "POST") return error("method_not_allowed", "Use POST /api/queue/reorder", 405);
+    const body = await readQueueJson(init, input);
+    if (body instanceof Response) return body;
+    if ("id" in body) {
+      const targetIndex = demoQueueTasks.findIndex((task) => task.id === body["id"]);
+      if (targetIndex < 0) return error("task_not_found", `Queue task ${String(body["id"])} not found`, 404);
+      const direction = body["direction"];
+      if (direction !== "up" && direction !== "down") return error("invalid_direction", "direction must be up or down", 400);
+      const key = normalizeQueueFolder(demoQueueTasks[targetIndex]!.folder);
+      const folderIndices: number[] = [];
+      demoQueueTasks.forEach((task, index) => { if (normalizeQueueFolder(task.folder) === key) folderIndices.push(index); });
+      const pos = folderIndices.indexOf(targetIndex);
+      const swapPos = direction === "up" ? pos - 1 : pos + 1;
+      if (swapPos >= 0 && swapPos < folderIndices.length) {
+        const a = folderIndices[pos]!;
+        const b = folderIndices[swapPos]!;
+        const tmp = demoQueueTasks[a]!;
+        demoQueueTasks[a] = demoQueueTasks[b]!;
+        demoQueueTasks[b] = tmp;
+      }
+      const queue = emitDemoQueue();
+      return json({ tasks: queue.tasks, queue }, 200, { "cache-control": "no-store" });
+    }
+    if (typeof body["folder"] !== "string" || body["folder"].trim() === "" || !Array.isArray(body["orderedIds"]) || !body["orderedIds"].every((id) => typeof id === "string")) {
+      return error("invalid_reorder", "folder and orderedIds are required", 400);
+    }
+    const targetFolder = normalizeQueueFolder(body["folder"]);
+    const folderIndices: number[] = [];
+    const byId = new Map<string, QueueTask>();
+    demoQueueTasks.forEach((task, index) => {
+      if (normalizeQueueFolder(task.folder) === targetFolder) {
+        folderIndices.push(index);
+        byId.set(task.id, task);
+      }
+    });
+    const placed: QueueTask[] = [];
+    const seen = new Set<string>();
+    for (const id of body["orderedIds"]) {
+      const task = byId.get(id);
+      if (!task || seen.has(id)) return error("invalid_reorder", `Task ${id} does not belong to folder ${targetFolder}`, 400);
+      seen.add(id);
+      placed.push(task);
+    }
+    for (const idx of folderIndices) {
+      const task = demoQueueTasks[idx]!;
+      if (!seen.has(task.id)) placed.push(task);
+    }
+    folderIndices.forEach((idx, offset) => { demoQueueTasks[idx] = placed[offset]!; });
+    const queue = emitDemoQueue();
+    return json({ tasks: queue.tasks, queue }, 200, { "cache-control": "no-store" });
+  }
+
+  if (path === "/api/queue/settings") {
+    if (method !== "PATCH") return error("method_not_allowed", "Use PATCH /api/queue/settings", 405);
+    const body = await readQueueJson(init, input);
+    if (body instanceof Response) return body;
+    const next = { ...demoQueueSettings };
+    if (body["paused"] !== undefined) {
+      if (typeof body["paused"] !== "boolean") return error("invalid_settings", "paused must be a boolean", 400);
+      next.paused = body["paused"];
+    }
+    if (body["minMemMb"] !== undefined) {
+      if (typeof body["minMemMb"] !== "number" || !Number.isFinite(body["minMemMb"]) || body["minMemMb"] < 0) return error("invalid_settings", "minMemMb must be a non-negative number", 400);
+      next.minMemMb = Math.round(body["minMemMb"]);
+    }
+    if (body["maxWorking"] !== undefined) {
+      if (typeof body["maxWorking"] !== "number" || !Number.isFinite(body["maxWorking"]) || body["maxWorking"] < 1) return error("invalid_settings", "maxWorking must be an integer >= 1", 400);
+      next.maxWorking = Math.round(body["maxWorking"]);
+    }
+    if (body["cooldownSec"] !== undefined) {
+      if (typeof body["cooldownSec"] !== "number" || !Number.isFinite(body["cooldownSec"]) || body["cooldownSec"] < 0) return error("invalid_settings", "cooldownSec must be a non-negative number", 400);
+      next.cooldownSec = Math.round(body["cooldownSec"]);
+    }
+    demoQueueSettings = next;
+    const queue = emitDemoQueue();
+    return json({ settings: { ...demoQueueSettings }, queue }, 200, { "cache-control": "no-store" });
+  }
+
+  if (path.startsWith("/api/queue/tasks/")) {
+    const parts = path.slice("/api/queue/tasks/".length).split("/");
+    let taskId = "";
+    try { taskId = decodeURIComponent(parts[0] ?? "").trim(); } catch { taskId = ""; }
+    if (!taskId) return error("invalid_task_id", "Invalid task ID", 400);
+    const index = demoQueueTasks.findIndex((task) => task.id === taskId);
+
+    if (parts.length === 2 && parts[1] === "start") {
+      if (method !== "POST") return error("method_not_allowed", "Use POST /api/queue/tasks/:id/start", 405);
+      if (index < 0) return error("task_not_found", `Queue task ${taskId} not found`, 404);
+      const task = demoQueueTasks[index]!;
+      if (task.status !== "queued") return error("task_not_queued", `Only queued tasks can be started (task is ${task.status})`, 409);
+      const folderKey = normalizeQueueFolder(task.folder);
+      const runningSibling = demoQueueTasks.find((candidate) => candidate.status === "running" && normalizeQueueFolder(candidate.folder) === folderKey);
+      if (runningSibling) return error("project_busy", `Project already has a running task: ${runningSibling.title}`, 409);
+      const existingWorkspace = snapshot().workspaces.find((workspace) => workspace.worktree?.checkout_path === folderKey || snapshot().panes.some((pane) => pane.workspace_id === workspace.workspace_id && pane.cwd === folderKey));
+      const paneId = existingWorkspace
+        ? (createDemoWorkspace(folderKey, `${queueFolderName(folderKey)} · queue`, task.agent)).pane_id
+        : (createDemoWorkspace(folderKey, queueFolderName(folderKey), task.agent)).pane_id;
+      structureChanged();
+      demoQueueLastLaunchAt = now();
+      const updated: QueueTask = { ...task, status: "running", terminal: paneId, startedAt: demoQueueLastLaunchAt, finishedAt: null, error: null };
+      demoQueueTasks[index] = updated;
+      submitToChat(paneId, task.prompt);
+      const queue = emitDemoQueue();
+      return json({ task: structuredClone(updated), queue }, 200, { "cache-control": "no-store" });
+    }
+
+    if (parts.length === 1) {
+      if (index < 0) return error("task_not_found", `Queue task ${taskId} not found`, 404);
+      const current = demoQueueTasks[index]!;
+      if (method === "DELETE") {
+        if (current.status === "running") return error("task_running", "Cannot delete a running task", 409);
+        demoQueueTasks.splice(index, 1);
+        const queue = emitDemoQueue();
+        return json({ ok: true, queue }, 200, { "cache-control": "no-store" });
+      }
+      if (method === "PATCH") {
+        const body = await readQueueJson(init, input);
+        if (body instanceof Response) return body;
+        if (body["hold"] !== undefined && typeof body["hold"] !== "boolean") return error("invalid_hold", "hold must be true or false", 400);
+        if (body["status"] !== undefined && body["status"] !== "queued") return error("invalid_status", "status may only be set to queued", 400);
+        if (current.status === "running") {
+          if (body["folder"] !== undefined || body["prompt"] !== undefined || body["agent"] !== undefined) {
+            return error("task_running", "Cannot edit a running task's folder, prompt, or agent", 409);
+          }
+          if (body["status"] === "queued") return error("task_running", "Cannot requeue a task while it is running", 409);
+        }
+        const folder = body["folder"] !== undefined
+          ? (typeof body["folder"] === "string" && body["folder"].trim() !== "" ? normalizeQueueFolder(body["folder"]) : null)
+          : current.folder;
+        if (folder === null) return error("invalid_folder", "folder must be a non-empty string", 400);
+        const prompt = body["prompt"] !== undefined
+          ? (typeof body["prompt"] === "string" && body["prompt"].trim() !== "" && !body["prompt"].includes("\0") ? body["prompt"] : null)
+          : current.prompt;
+        if (prompt === null) return error("invalid_prompt", "prompt cannot be empty", 400);
+        const agent = body["agent"] !== undefined
+          ? (typeof body["agent"] === "string" && VALID_QUEUE_AGENT.test(body["agent"].trim()) ? body["agent"].trim() : null)
+          : current.agent;
+        if (agent === null) return error("invalid_agent", "agent must be a lowercase agent id such as claude or codex", 400);
+        if (body["title"] !== undefined && typeof body["title"] !== "string") return error("invalid_title", "title must be a string", 400);
+        const title = body["title"] !== undefined ? ((body["title"] as string).trim() || queueTaskTitleFallback(prompt)) : current.title;
+        const hold = body["hold"] !== undefined ? (body["hold"] as boolean) : current.hold;
+        const requeue = body["status"] === "queued" && current.status !== "queued";
+        const next: QueueTask = {
+          ...current,
+          folder,
+          prompt,
+          agent,
+          title,
+          hold,
+          ...(requeue ? { status: "queued", terminal: null, startedAt: null, finishedAt: null, error: null } : {}),
+        };
+        demoQueueTasks[index] = next;
+        const queue = emitDemoQueue();
+        return json({ task: structuredClone(next), queue }, 200, { "cache-control": "no-store" });
+      }
+      return error("method_not_allowed", "Use PATCH or DELETE /api/queue/tasks/:id", 405);
+    }
+  }
+
+  return error("not_found", `unknown endpoint ${path}`, 404);
+}
+
 const realFetch = window.fetch.bind(window);
 window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href);
@@ -2124,6 +2481,7 @@ class DemoEventSource extends EventTarget {
       this.onopen?.(new Event("open"));
       this.listener(new MessageEvent("message", { data: JSON.stringify({ type: "machines", machines: readRoster() } satisfies MachineEvent) }));
       this.listener(new MessageEvent("message", { data: JSON.stringify({ type: "preferences", preferences } satisfies MachineEvent) }));
+      this.listener(new MessageEvent("message", { data: JSON.stringify({ type: "agent-queue", queue: demoQueueSnapshot() } satisfies MachineEvent) }));
     }, 30);
   }
   close(): void { this.readyState = 2; sseListeners.delete(this.listener); }
