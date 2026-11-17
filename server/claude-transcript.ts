@@ -1,7 +1,7 @@
 import type { ConversationPart, ConversationTurn, OmoTaskResult } from "../shared/protocol.ts";
 import { invokedSkill } from "./skill-activity.ts";
 import { claudeCommandEcho } from "./skill-invocations/claude.ts";
-import { agentTaskResult, CLAUDE_HANDBACK_POINTER, claudeHandback, claudePeerId, claudePeerNotice, hcNote, isContextClear, MAX_TURNS, OMO_TASK_RESULT_MAX, toolSummary, type TranscriptParser } from "./transcript-records.ts";
+import { agentTaskResult, CLAUDE_HANDBACK_POINTER, claudeHandback, claudePeerId, claudePeerNotice, isContextClear, MAX_TURNS, OMO_TASK_RESULT_MAX, toolSummary, type TranscriptParser } from "./transcript-records.ts";
 import { taskNotification, type SubagentDetail } from "./claude-subagents.ts";
 import { trimOutput } from "./tool-output.ts";
 import { base64Size, inlineImageType, MAX_IMAGE_BYTES } from "./codex-images.ts";
@@ -636,7 +636,7 @@ function claudeTranscriptParser(options: ClaudeTranscriptOptions, state: ClaudeP
     if (queued?.commandMode === "task-notification" && typeof queued.prompt === "string" && notified(queued.prompt, entry.timestamp ?? null)) return;
     if (queued?.type === "queued_command" && queued.commandMode === "prompt" && queued.origin?.kind === "human") {
       if (typeof queued.prompt === "string" && queued.prompt.trim() && !isCommandEntry(queued.prompt.trim(), queued)) {
-        turns.push({ role: "user", ts: entry.timestamp ?? null, parts: [hcNote(queued.prompt) ?? { kind: "text", text: unwrapPastes(queued.prompt) }] });
+        turns.push({ role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "text", text: unwrapPastes(queued.prompt) }] });
       }
       return;
     }
@@ -694,7 +694,7 @@ function claudeTranscriptParser(options: ClaudeTranscriptOptions, state: ClaudeP
       }
       if (printed !== null) return;
       if (isCommandEntry(content, entry)) return;
-      pushPrompt({ role: "user", ts: entry.timestamp ?? null, parts: [hcNote(content) ?? { kind: "text", text: unwrapPastes(content) }] }, entry);
+      pushPrompt({ role: "user", ts: entry.timestamp ?? null, parts: [{ kind: "text", text: unwrapPastes(content) }] }, entry);
       return;
     }
 

@@ -35,6 +35,15 @@ export function hcNote(text: string): Extract<ConversationPart, { kind: "notice"
   return { kind: "notice", text: body, source: from ? `peer:${from}` : "hc" };
 }
 
+/** Every agent's turns with each prompt that is only an hc note (hcNote) as that notice. */
+export function withHcNotes(turns: ConversationTurn[]): ConversationTurn[] {
+  return turns.map((turn) => {
+    const only = turn.role === "user" && turn.parts.length === 1 ? turn.parts[0] : undefined;
+    const note = only?.kind === "text" ? hcNote(only.text) : null;
+    return note === null ? turn : { ...turn, parts: [note] };
+  });
+}
+
 /**
  * Another Claude session's message (Claude Code cross-session messaging). It starts the agent's
  * work like a prompt, but nobody typed it here: a notice, sourced `peer:<sender>`. Claude records it

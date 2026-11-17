@@ -10,7 +10,7 @@ import * as fsp from "node:fs/promises";
 import * as cmd from "./cmd.ts";
 import * as piTree from "./pi-tree.ts";
 import type { HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
-import { MAX_TURNS, parseOmpTranscript } from "./transcript-records.ts";
+import { MAX_TURNS, parseOmpTranscript, withHcNotes } from "./transcript-records.ts";
 import { turnStarts } from "./transcript-turns.ts";
 import { claudeImageType } from "./claude-transcript.ts";
 import { toolVerb } from "../src/lib/toolVerbs.ts";
@@ -2012,7 +2012,7 @@ describe("transcript pages", () => {
     ]);
   });
 
-  it("shows hc's notes (a child's report, hc's word on a child that exited) as notices, not as the person's prompt", () => {
+  it("shows hc's notes (a child's report, hc's word on a child that exited) as notices in any agent's chat, not as the person's prompt", () => {
     const path = join(temp(), "hc-notes.jsonl");
     const say = (text: string) => ({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
     const human = { kind: "human" };
@@ -2024,9 +2024,12 @@ describe("transcript pages", () => {
       // the person quoting a note, with words of their own, is still their prompt
       { type: "user", timestamp: "2026-11-17T03:06:00.000Z", origin: human, permissionMode: "bypassPermissions", message: { role: "user", content: "<hc>t3m exited</hc> why this format?" } },
     ].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
-    const page = transcriptPage("claude-transcript", path);
-    expect(page.turns.map((turn) => turn.parts.map((part) => part.kind === "notice" ? `${part.source}|${part.text}` : part.kind === "text" ? part.text : part.kind).join(" "))).toEqual([
+    // any agent's prompt that is only a note, as a codex worker's task from its lead
+    const codex: ConversationTurn[] = [{ role: "user", ts: null, parts: [{ kind: "text", text: "<hc from=\"t45 lead\" reach=\"hc send t45 when done or stuck\">\nReview x.rs\n</hc>" }] }];
+    const turns = withHcNotes([...transcriptPage("claude-transcript", path).turns, ...codex]);
+    expect(turns.map((turn) => turn.parts.map((part) => part.kind === "notice" ? `${part.source}|${part.text}` : part.kind === "text" ? part.text : part.kind).join(" "))).toEqual([
       "hc|t3m hub-repair-hc exited (signal 1). Read: hc read t3m", "reading t3m", "peer:t2q try2-cmd|done: /tmp/x.md", "noted", "<hc>t3m exited</hc> why this format?",
+      "peer:t45 lead|Review x.rs",
     ]);
   });
 
