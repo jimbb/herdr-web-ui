@@ -1,3 +1,4 @@
+import type { QueueSnapshot } from "./agent-queue.ts";
 import type { AgentRowTokens } from "./pane-tokens.ts";
 import type { SharedPreferences } from "./preferences.ts";
 import type { HealthAuth, SecuritySummary, ServerMessage, SessionSnapshot } from "./protocol.ts";
@@ -447,6 +448,8 @@ export type MachineEvent = { type: "machines"; machines: Machine[] } | { type: "
   | { type: "herdr-sidebar"; agents: AgentRowTokens | null }
   /** finishes a browser of this server presented (shared/seen.ts): every record when the stream opens, then each change */
   | { type: "seen"; finishes: SeenFinish[] }
+  /** live per-project agent task queue snapshot */
+  | { type: "agent-queue"; queue: QueueSnapshot }
   | DevicePairedEvent
   | DeviceRemovedEvent
   | RelayPairingsEvent
