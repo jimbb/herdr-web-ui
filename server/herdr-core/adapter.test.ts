@@ -1276,6 +1276,23 @@ describe("herdr-core adapter, agents", () => {
     expect(cores[0]!.typed).toEqual([]);
   });
 
+  // hc 0.1.21 runs a template's `command:` as `sh -c "<line>"`: dash stays in front and the agent is its child (#4052)
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")("names the program a template's shell runs below it, and nothing below any other program in front", async () => {
+    const line = "sleep 30; true";
+    const shell = Bun.spawn(["sh", "-c", line], { stdout: "ignore", stderr: "ignore" });
+    try {
+      const { socket } = await posix([
+        terminal("t1", { pid: shell.pid, argv: ["sh", "-c", line], foreground: { pid: shell.pid, name: "sh", argv: ["sh", "-c", line] } }),
+        terminal("t2", { pid: shell.pid, argv: ["agent"], foreground: { pid: shell.pid, name: "agent", argv: ["agent"] } }),
+      ]);
+      let info = await paneProcessInfo("t1", socket);
+      // until the shell has started its child
+      for (let tries = 0; (info?.foreground_processes?.length ?? 0) < 2 && tries < 100; tries++) { await Bun.sleep(20); info = await paneProcessInfo("t1", socket); }
+      expect(info?.foreground_processes?.map(({ name, argv }) => [name, argv])).toEqual([["sh", ["sh", "-c", line]], ["sleep", ["sleep", "30"]]]);
+      expect((await paneProcessInfo("t2", socket))?.foreground_processes?.map(({ name }) => name)).toEqual(["agent"]);
+    } finally { shell.kill("SIGKILL"); }
+  });
+
   it("types into no pane whose own program is not a shell, even with that program in front of itself", async () => {
     // a terminal the app started as a program: hc reports it in front of itself, like a shell
     const { socket, cores } = await posix([
