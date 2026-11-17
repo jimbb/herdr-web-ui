@@ -17,6 +17,7 @@ import { SETUP_JA } from "./i18n/setup.ja.ts";
 import { GUIDE_JA } from "./i18n/guide.ja.ts";
 import { UPDATES_JA } from "./i18n/updates.ja.ts";
 import { PALETTE_JA } from "./i18n/palette.ja.ts";
+import { QUEUE_JA } from "./i18n/queue.ja.ts";
 import { RELAY_JA } from "./i18n/relay.ja.ts";
 import { DASHBOARD_JA } from "./i18n/dashboard.ja.ts";
 import { MY_MACHINES_JA } from "./i18n/my-machines.ja.ts";
@@ -617,6 +618,7 @@ const BASE: Record<string, string> = {
   "From every workspace.": "すべてのワークスペースから。",
   "Pick a folder to start in.": "始めるフォルダーを選びます。",
   "Show QR code": "QR コードを表示",
+  "Agent Queue": "エージェントキュー",
 };
 
 export const JA_PARTS: Record<string, Record<string, string>> = {
@@ -635,6 +637,7 @@ export const JA_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_JA,
   updates: UPDATES_JA,
   palette: PALETTE_JA,
+  queue: QUEUE_JA,
   relay: RELAY_JA,
   dashboard: DASHBOARD_JA,
   "my-machines": MY_MACHINES_JA,

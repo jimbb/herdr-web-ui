@@ -64,6 +64,7 @@ export function actionAliases(t: Translate): Readonly<Record<string, string>> {
     files: t("folder explorer open file"),
     refresh: t("reload update sync"),
     "local-page": t("web browser localhost port site address"),
+    "agent-queue": t("queue tasks schedule batch"),
   };
 }
 

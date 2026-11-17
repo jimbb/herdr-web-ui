@@ -38,6 +38,7 @@ export interface AppActions {
   connectPc: (machine: Machine) => void;
   toggleSidebar: () => void;
   inboxMode: { on: boolean; go: () => void } | null;
+  openQueue: (() => void) | null;
   openSidebarFilter: () => void;
   toggleTheme: () => void;
   /** Sign out of token/device authentication; null for automatic local/Tailscale access. */

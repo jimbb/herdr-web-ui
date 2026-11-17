@@ -17,6 +17,7 @@ import { SETUP_ZH } from "./i18n/setup.zh.ts";
 import { GUIDE_ZH } from "./i18n/guide.zh.ts";
 import { UPDATES_ZH } from "./i18n/updates.zh.ts";
 import { PALETTE_ZH } from "./i18n/palette.zh.ts";
+import { QUEUE_ZH } from "./i18n/queue.zh.ts";
 import { RELAY_ZH } from "./i18n/relay.zh.ts";
 import { DASHBOARD_ZH } from "./i18n/dashboard.zh.ts";
 import { MY_MACHINES_ZH } from "./i18n/my-machines.zh.ts";
@@ -622,6 +623,7 @@ const BASE: Record<string, string> = {
   "From every workspace.": "来自所有工作区。",
   "Pick a folder to start in.": "选择要启动的文件夹。",
   "Show QR code": "显示二维码",
+  "Agent Queue": "Agent 队列",
 };
 
 export const ZH_PARTS: Record<string, Record<string, string>> = {
@@ -640,6 +642,7 @@ export const ZH_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_ZH,
   updates: UPDATES_ZH,
   palette: PALETTE_ZH,
+  queue: QUEUE_ZH,
   relay: RELAY_ZH,
   dashboard: DASHBOARD_ZH,
   "my-machines": MY_MACHINES_ZH,

@@ -30,7 +30,7 @@ const snapshot: SessionSnapshot = {
   }],
 };
 const machines: Machine[] = [{ id: "local", name: "Host", kind: "local", enabled: true, state: "connected", error: null, snapshot }];
-const actionsOf = (offer: LayoutOffer, own: Partial<AppActions> = {}) => new Proxy({ splitPane: offer.split ? () => {} : null, zoomPane: offer.arrange ? () => {} : null, enableNotifications: null, openFiles: null, lock: null, openLocalPage: null, inboxMode: null, closeTab: null, ...own }, { get: (own, key) => key in own ? own[key as keyof typeof own] : () => {} }) as unknown as AppActions;
+const actionsOf = (offer: LayoutOffer, own: Partial<AppActions> = {}) => new Proxy({ splitPane: offer.split ? () => {} : null, zoomPane: offer.arrange ? () => {} : null, enableNotifications: null, openFiles: null, lock: null, openLocalPage: null, inboxMode: null, openQueue: null, closeTab: null, ...own }, { get: (own, key) => key in own ? own[key as keyof typeof own] : () => {} }) as unknown as AppActions;
 const LAYOUT_ROWS = ["Rename tab", "Split pane right", "Split pane down", "Split pane right and open it", "Split pane down and open it", "Zoom pane"];
 
 describe("the command palette on a PC the Herdr app lays out", () => {
@@ -214,5 +214,14 @@ describe("the command palette on a PC the Herdr app lays out", () => {
     const listed = await rows(named, "p1", ">");
     expect(listed).toContain("Rename tab");
     for (const row of LAYOUT_ROWS.filter((row) => row !== "Rename tab")) expect(listed).not.toContain(row);
+  });
+
+  it("lists Agent Queue only where App offers it", async () => {
+    let opened = 0;
+    expect(await rows(TUI, "p1", ">agent queue")).toEqual([]);
+    const withQueue = actionsOf(APP_CORE, { openQueue: () => { opened += 1; } });
+    expect(await rows(APP_CORE, "p1", ">agent queue", withQueue)).toEqual(["Agent Queue"]);
+    await act(async () => renderer!.root.find((node) => node.props.id === "palette-item-0").props.onClick());
+    expect(opened).toBe(1);
   });
 });

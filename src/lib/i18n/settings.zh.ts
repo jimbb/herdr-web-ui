@@ -287,4 +287,5 @@ export const SETTINGS_ZH: Record<string, string> = {
   "Remove PC {name}": "移除 PC {name}",
 
   "Could not read this PC's alert destination ({error}). Close Settings and open it again.": "无法读取此 PC 的外部提醒设置（{error}）。请关闭设置后重新打开。",
+  "queue tasks schedule batch": "队列 任务 调度 批量 排队",
 };

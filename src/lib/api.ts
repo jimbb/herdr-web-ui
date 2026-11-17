@@ -1,6 +1,13 @@
 import { apiFetch } from "./api-request-id.ts";
 import { CompactAgentsError, expandMachine, type WireMachine } from "../../shared/compact-agents.ts";
 import type { PreferencesChange, SharedPreferences } from "../../shared/preferences.ts";
+import type {
+  QueueCreateTaskRequest,
+  QueueReorderRequest,
+  QueueSnapshot,
+  QueueUpdateSettingsRequest,
+  QueueUpdateTaskRequest,
+} from "../../shared/agent-queue.ts";
 import type { AlertWebhookSave, AlertWebhookView } from "../../shared/alert-webhook.ts";
 import type { SeenFinish, SeenPresentation } from "../../shared/seen.ts";
 import type { AgentCatalogResponse, AgentTabStarted } from "../../shared/agent-catalog.ts";
@@ -811,6 +818,8 @@ export interface HealthInfo {
   herdr_core?: HerdrCoreFacts;
   /** a driving owner only; absent from an older server */
   herdr_runtime?: HerdrRuntimeFacts;
+  /** present and true when this server exposes the per-project agent task queue (/api/queue*) */
+  agent_queue?: boolean;
 }
 
 export async function fetchHealth(): Promise<HealthInfo> {
@@ -1522,4 +1531,49 @@ export async function saveVoiceConfig(update: VoiceConfigUpdate): Promise<VoiceS
   const response = await apiFetch("/api/voice/config", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(update) });
   if (!response.ok) throw await errorFrom("/api/voice/config", response);
   return (await response.json()) as VoiceStatus;
+}
+
+function readQueueSnapshot(payload: QueueSnapshot | { queue: QueueSnapshot }): QueueSnapshot {
+  return "queue" in payload ? payload.queue : payload;
+}
+
+/** GET /api/queue: current per-project agent task queue snapshot and gate status. */
+export async function fetchQueue(): Promise<QueueSnapshot> {
+  return readQueueSnapshot(await getJson<QueueSnapshot | { queue: QueueSnapshot }>("/api/queue", { cache: "no-store" }));
+}
+
+/** POST /api/queue/tasks: append a queued task to a project folder. */
+export async function createQueueTask(request: QueueCreateTaskRequest): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson("/api/queue/tasks", "POST", request)).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
+}
+
+/** PATCH /api/queue/tasks/:id: edit a queued/finished task, toggle hold, or requeue it. */
+export async function updateQueueTask(id: string, request: QueueUpdateTaskRequest): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson(`/api/queue/tasks/${encodeURIComponent(id)}`, "PATCH", request)).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
+}
+
+/** DELETE /api/queue/tasks/:id: delete a non-running queued task. */
+export async function deleteQueueTask(id: string): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson(`/api/queue/tasks/${encodeURIComponent(id)}`, "DELETE", {})).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
+}
+
+/** POST /api/queue/tasks/:id/start: launch a queued task immediately, bypassing global gates. */
+export async function startQueueTask(id: string): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson(`/api/queue/tasks/${encodeURIComponent(id)}/start`, "POST", {})).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
+}
+
+/** POST /api/queue/reorder: reorder tasks within a project folder. */
+export async function reorderQueueTasks(request: QueueReorderRequest): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson("/api/queue/reorder", "POST", request)).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
+}
+
+/** PATCH /api/queue/settings: update pause state, memory threshold, max working agents, or cooldown. */
+export async function updateQueueSettings(request: QueueUpdateSettingsRequest): Promise<QueueSnapshot> {
+  const payload = (await (await sendJson("/api/queue/settings", "PATCH", request)).json()) as { queue: QueueSnapshot };
+  return readQueueSnapshot(payload);
 }

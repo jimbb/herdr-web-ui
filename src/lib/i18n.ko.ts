@@ -17,6 +17,7 @@ import { SETUP_KO } from "./i18n/setup.ko.ts";
 import { GUIDE_KO } from "./i18n/guide.ko.ts";
 import { UPDATES_KO } from "./i18n/updates.ko.ts";
 import { PALETTE_KO } from "./i18n/palette.ko.ts";
+import { QUEUE_KO } from "./i18n/queue.ko.ts";
 import { RELAY_KO } from "./i18n/relay.ko.ts";
 import { DASHBOARD_KO } from "./i18n/dashboard.ko.ts";
 import { MY_MACHINES_KO } from "./i18n/my-machines.ko.ts";
@@ -615,6 +616,7 @@ const BASE: Record<string, string> = {
   "From every workspace.": "모든 워크스페이스에서 모아요.",
   "Pick a folder to start in.": "시작할 폴더를 골라요.",
   "Show QR code": "QR 코드 보기",
+  "Agent Queue": "에이전트 대기열",
 };
 
 export const KO_PARTS: Record<string, Record<string, string>> = {
@@ -633,6 +635,7 @@ export const KO_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_KO,
   updates: UPDATES_KO,
   palette: PALETTE_KO,
+  queue: QUEUE_KO,
   relay: RELAY_KO,
   dashboard: DASHBOARD_KO,
   "my-machines": MY_MACHINES_KO,
