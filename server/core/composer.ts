@@ -356,7 +356,7 @@ export async function freeClaudeBox(paneId: string, working: boolean, authorize:
  * can change during the read, so the widths tried are every one at which the row above the last reaches the right edge
  * (secretPrompt joins only such a row): fail closed rather than trust a width the screen was not drawn at.
  */
-function maskedPromptAtAnyWidth(screen: string): boolean {
+export function maskedPromptAtAnyWidth(screen: string): boolean {
   const rows = screen.split(/\r?\n/u);
   while (rows.length > 0 && !rows.at(-1)!.trim()) rows.pop();
   const above = displayWidth(rows.at(-2)?.trimEnd() ?? "");

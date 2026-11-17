@@ -1314,7 +1314,7 @@ export interface PromptRequestOptions {
   readOnly?: boolean;
   openCodeStateDir?: string;
   openCodeState?: OpenCodePromptState;
-  onAnswered?: () => void;
+  onAnswered?: (paneId: string) => void;
   answerDeadlineMs?: number;
   beforeKey?: (paneId: string, agent: string, deadline: AbortSignal) => Promise<void>;
 }
@@ -2225,7 +2225,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     // the wait for the form's next step only reads the pane: after the pane's turn, so a message
     // queued for it meanwhile is not held up behind the polls
     if (form.still !== undefined) await formMovedOn(body.pane_id, form.still, options.codexHome, options.openCodeStateDir);
-    if (response.ok && delivered) options.onAnswered?.();
+    if (response.ok && delivered) options.onAnswered?.(body.pane_id);
     for (const told of answering.splice(0)) told(waitedOn && response.ok && delivered);
     await logAnswer(log, response);
     return response;

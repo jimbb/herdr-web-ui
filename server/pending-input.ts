@@ -1,6 +1,14 @@
 import type { AgentStatus, PendingMessage } from "../shared/protocol.ts";
 import { submitNotTyped } from "../shared/submit-outcome.ts";
 
+export interface QueueFirstMessageHooks {
+  onBlocked?: (paneId: string, reason: string) => void;
+  onUnblocked?: (paneId: string) => void;
+  onBeforeCommit?: (paneId: string) => void;
+  onSent?: (paneId: string) => void;
+  onFailed?: (paneId: string, reason: string, code: string) => void;
+}
+
 export interface PendingIdentity {
   agent: string | null;
   terminalId: string;
@@ -247,16 +255,21 @@ export class PendingInputs<Owner, Lease> {
 
   holds(paneId: string): boolean { return [...this.records.values()].some((item) => item.paneId === paneId); }
 
-  next(paneId: string): PendingRecord<Owner, Lease> | null {
-    if (!ready(this.statuses.get(paneId)) || this.gates.has(paneId)
+  nextFor(paneId: string, allowStatus: (item: PendingRecord<Owner, Lease>, status: AgentStatus | undefined) => boolean = (_item, status) => ready(status)): PendingRecord<Owner, Lease> | null {
+    if (this.gates.has(paneId)
       || [...this.records.values()].some((item) => item.paneId === paneId && (item.inFlight || item.message.state === "uncertain"))) return null;
-    return [...this.records.values()].find((item) => item.paneId === paneId && item.message.state === "queued") ?? null;
+    const status = this.statuses.get(paneId);
+    return [...this.records.values()].find((item) => item.paneId === paneId && item.message.state === "queued" && allowStatus(item, status)) ?? null;
   }
 
-  claim(item: PendingRecord<Owner, Lease>, automatic: boolean): boolean {
+  next(paneId: string): PendingRecord<Owner, Lease> | null {
+    return this.nextFor(paneId);
+  }
+
+  claim(item: PendingRecord<Owner, Lease>, automatic: boolean, allowUnready = false): boolean {
     if (this.records.get(item.message.id) !== item || item.inFlight || item.message.state === "uncertain"
       || [...this.records.values()].some((other) => other.paneId === item.paneId && other.inFlight)
-      || (automatic ? this.next(item.paneId) !== item : !["queued", "held"].includes(item.message.state))) return false;
+      || (automatic ? (allowUnready ? this.nextFor(item.paneId, () => true) : this.next(item.paneId)) !== item : !["queued", "held"].includes(item.message.state))) return false;
     item.message.state = "sending"; delete item.message.error; item.inFlight = true;
     // before anything is typed: the row's turn is written after this on this PC's clock (src/lib/sentWaiting.ts)
     item.message.sending_at = new Date(this.now()).toISOString();
@@ -423,6 +436,13 @@ export class PendingInputs<Owner, Lease> {
     for (const pane of panes) this.publish(owner, pane);
   }
 
+  /** One held message restored to the queue (a headless queue message moved with its pane). */
+  requeue(item: PendingRecord<Owner, Lease>): void {
+    if (this.records.get(item.message.id) !== item || item.inFlight || item.message.state !== "held") return;
+    item.message.state = "queued";
+    delete item.message.error;
+    this.publish(item.owner, item.paneId);
+  }
   holdItem(item: PendingRecord<Owner, Lease>, fault: Fault): void {
     if (this.records.get(item.message.id) !== item || item.inFlight || item.message.state !== "queued") return;
     item.message.state = "held"; item.message.error = fault;

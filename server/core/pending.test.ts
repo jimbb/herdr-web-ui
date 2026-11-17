@@ -18,11 +18,15 @@ import type { TerminalSighting } from "./terminals.ts";
 const roots: string[] = [];
 const paths = new Map<string, string>();
 const originalProcessInfo = herdr.paneProcessInfo;
-const { paneSendText, paneSendKeys, paneRead } = herdr;
+const { paneSendText, paneSendKeys, paneRead, paneScrollInfo } = herdr;
 const originalTranscriptPath = pi.piTranscriptPath;
 let lookup: { at: "identity" | "transcript"; entered: () => void; release: Promise<void> } | null = null;
 type Processes = { shell_pid: number; foreground_processes: { pid: number; name: string; argv0?: string; argv?: string[] }[] };
 const processes = new Map<string, Processes>();
+/** optional screen reader for panes under test; when absent, paneRead throws as before */
+const screens = new Map<string, (source?: string, format?: string) => string>();
+/** recorded paneSendText / paneSendKeys payloads for panes with `screens` */
+const writes: Array<{ paneId: string; type: "text" | "keys"; payload: string | string[] }> = [];
 const calls: string[] = [];
 mock.module("../herdr/client.ts", () => ({
   ...herdr,
@@ -35,16 +39,32 @@ mock.module("../herdr/client.ts", () => ({
   },
   paneSendText: async (...args: Parameters<typeof paneSendText>) => {
     if (!processes.has(args[0])) return paneSendText(...args);
+    if (screens.has(args[0])) {
+      if (args[3] && !args[3]()) throw new herdr.HerdrError("cancelled", "Cancelled before write");
+      writes.push({ paneId: args[0], type: "text", payload: args[1] });
+      return;
+    }
     calls.push(`text ${args[0]}`);
   },
   paneSendKeys: async (...args: Parameters<typeof paneSendKeys>) => {
     if (!processes.has(args[0])) return paneSendKeys(...args);
+    if (screens.has(args[0])) {
+      if (args[3] && !args[3]()) throw new herdr.HerdrError("cancelled", "Cancelled before write");
+      writes.push({ paneId: args[0], type: "keys", payload: [...args[1]] });
+      return;
+    }
     calls.push(`keys ${args[0]}`);
   },
   paneRead: async (...args: Parameters<typeof paneRead>) => {
     if (!processes.has(args[0].paneId)) return paneRead(...args);
     calls.push(`read ${args[0].paneId}`);
+    const reader = screens.get(args[0].paneId);
+    if (reader) return { text: reader(args[0].source, args[0].format) };
     throw new Error("no herdr answers here");
+  },
+  paneScrollInfo: async (paneId: string) => {
+    if (screens.has(paneId)) return { offset_from_bottom: 0, viewport_rows: 24 };
+    return paneScrollInfo(paneId);
   },
 }));
 mock.module("../pi.ts", () => ({
@@ -57,9 +77,9 @@ mock.module("../pi.ts", () => ({
     return { path: paths.get(paneId)! };
   },
 }));
-afterEach(() => { lookup = null; paths.clear(); processes.clear(); calls.length = 0; for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { lookup = null; paths.clear(); processes.clear(); screens.clear(); writes.length = 0; calls.length = 0; for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 afterAll(() => {
-  mock.module("../herdr/client.ts", () => ({ ...herdr, paneProcessInfo: originalProcessInfo, paneSendText, paneSendKeys, paneRead }));
+  mock.module("../herdr/client.ts", () => ({ ...herdr, paneProcessInfo: originalProcessInfo, paneSendText, paneSendKeys, paneRead, paneScrollInfo }));
   mock.module("../pi.ts", () => ({ ...pi, piTranscriptPath: originalTranscriptPath }));
 });
 
@@ -1059,3 +1079,181 @@ it.skipIf(Boolean(process.env["CLAUDE_CONFIG_DIR"]))("holds a message queued for
     expect(delivery.pending.list(owner, "p")).toMatchObject([{ id: item.message.id, state: "held" }]);
   } finally { session.mockRestore(); }
 });
+
+const TRUST_SCREEN = [
+  " Accessing workspace:",
+  "",
+  " Quick safety check: Is this a project you created or one you trust?",
+  "",
+  " ❯ No, exit",
+  "   Yes, I trust this folder",
+  "",
+  " Enter to confirm · Esc to cancel",
+].join("\n");
+
+const EMPTY_CLAUDE_BOX = [
+  "────────────────────────────",
+  "❯ ",
+  "────────────────────────────",
+].join("\n");
+
+const PASTED_CLAUDE_BOX = [
+  "────────────────────────────",
+  "❯ Reply with just: QUEUE OK",
+  "────────────────────────────",
+].join("\n");
+
+it("delivers a headless queue first message after a Claude folder-trust dialog clears without needing an attached viewer or double-sending", async () => {
+  const clients = new Set<Client>();
+  let queue = Promise.resolve<unknown>(undefined);
+  const serialize = <T>(_pane: string, task: () => T | Promise<T>): Promise<T> => {
+    const next = queue.catch(() => {}).then(task);
+    queue = next;
+    return next;
+  };
+  let agentStatus: "unknown" | "idle" | "working" = "unknown";
+  let screenMode: "trust" | "ready" = "trust";
+  let readCount = 0;
+  const hooksLog: string[] = [];
+  const blockedAgain = Promise.withResolvers<void>();
+  const sentDone = Promise.withResolvers<void>();
+
+  processes.set("Q", { shell_pid: SHELL, foreground_processes: [{ pid: AGENT, name: "claude" }] });
+  screens.set("Q", () => {
+    readCount += 1;
+    if (screenMode === "trust") return TRUST_SCREEN;
+    return writes.some((entry) => entry.paneId === "Q" && entry.type === "text") ? PASTED_CLAUDE_BOX : EMPTY_CLAUDE_BOX;
+  });
+
+  const delivery = createPendingDelivery({
+    options: { submitDeadlineMs: 5, queueRetryMs: 15 },
+    clients,
+    attachments: new Map(),
+    serialize,
+    lastTyped: new Map(),
+    sight: () => { throw new Error("headless queue delivery takes no attach sighting"); },
+    submitText: async () => { throw new Error("headless queue delivery should not call submitText"); },
+    authorizeSocket: () => {},
+    clientSnapshot: async () => ({ panes: [{ pane_id: "Q", terminal_id: "Q", agent: "claude", agent_status: agentStatus }] }) as SessionSnapshot,
+    omo: { sessionOf: () => null },
+    SUBMIT_DEADLINE_MS: 5,
+    SUBMIT_DELAY_MS: 0,
+    TYPED_SETTLE_MS: 0,
+  });
+
+  try {
+    let blockedCalls = 0;
+    const message = await delivery.queueFirstMessage("Q", "Reply with just: QUEUE OK", "claude", null, AGENT, {
+      onBlocked: (paneId) => {
+        blockedCalls += 1;
+        hooksLog.push(`blocked:${paneId}`);
+        if (blockedCalls >= 3) blockedAgain.resolve();
+      },
+      onUnblocked: (paneId) => hooksLog.push(`unblocked:${paneId}`),
+      onBeforeCommit: (paneId) => hooksLog.push(`beforeCommit:${paneId}`),
+      onSent: (paneId) => {
+        hooksLog.push(`sent:${paneId}`);
+        sentDone.resolve();
+      },
+      onFailed: (paneId, reason, code) => hooksLog.push(`failed:${paneId}:${code}:${reason}`),
+    });
+
+    // Waits past submitDeadlineMs (5ms) across >= 3 blocked retries with zero writes.
+    await Promise.race([blockedAgain.promise, Bun.sleep(5_000).then(() => { throw new Error("Timed out waiting for blocked retries"); })]);
+    expect(writes).toEqual([]);
+    expect(readCount).toBeGreaterThanOrEqual(3);
+
+    // An attached browser still sees the headless pending message in the pane list.
+    const viewerFrames: ServerMessage[] = [];
+    const viewer = {
+      data: connectionData({ deviceId: undefined, readOnly: false }),
+      getBufferedAmount: () => 0,
+      send: (value: string) => { viewerFrames.push(JSON.parse(value)); return 1; },
+    } as Client;
+    viewer.data.attached.set("Q", { keepSize: false });
+    clients.add(viewer);
+    delivery.attached(viewer, "Q");
+    expect(viewerFrames.some((frame) => frame.type === "pending-messages" && frame.pane_id === "Q" && frame.messages.some((m) => m.id === message.id))).toBe(true);
+
+    // Answering the trust dialog transitions the pane to an empty input box (still agent_status: "unknown").
+    screenMode = "ready";
+    delivery.onPromptAnswered("Q");
+
+    await Promise.race([sentDone.promise, Bun.sleep(5_000).then(() => { throw new Error("Timed out waiting for headless prompt delivery"); })]);
+
+    expect(writes).toEqual([
+      { paneId: "Q", type: "text", payload: "\u001b[200~Reply with just: QUEUE OK\u001b[201~" },
+      { paneId: "Q", type: "keys", payload: ["Enter"] },
+    ]);
+    expect(hooksLog).toContain("blocked:Q");
+    expect(hooksLog).toContain("unblocked:Q");
+    expect(hooksLog).toContain("beforeCommit:Q");
+    expect(hooksLog).toContain("sent:Q");
+    expect(hooksLog.some((entry) => entry.startsWith("failed:"))).toBe(false);
+
+    // Subsequent status transitions and drains must not resend or double-send.
+    agentStatus = "idle";
+    delivery.drainPending("Q");
+    await serialize("Q", () => {});
+    expect(writes).toHaveLength(2);
+  } finally {
+    delivery.stopPending();
+  }
+});
+
+it.each([null, "claude"] as const)(
+  "fails a headless queue first message with Agent exited when user picks No, exit and the shell returns (herdr agent label after exit: %s)",
+  async (postExitLabel) => {
+    const clients = new Set<Client>();
+    let queue = Promise.resolve<unknown>(undefined);
+    const serialize = <T>(_pane: string, task: () => T | Promise<T>): Promise<T> => {
+      const next = queue.catch(() => {}).then(task);
+      queue = next;
+      return next;
+    };
+    let agentName: string | null = "claude";
+    const firstBlocked = Promise.withResolvers<void>();
+    const failed = Promise.withResolvers<{ paneId: string; reason: string; code?: string }>();
+
+    processes.set("Q", { shell_pid: SHELL, foreground_processes: [{ pid: AGENT, name: "claude" }] });
+    screens.set("Q", () => TRUST_SCREEN);
+
+    const delivery = createPendingDelivery({
+      options: { queueRetryMs: 25 },
+      clients,
+      attachments: new Map(),
+      serialize,
+      lastTyped: new Map(),
+      sight: () => { throw new Error("no sighting"); },
+      submitText: async () => {},
+      authorizeSocket: () => {},
+      clientSnapshot: async () => ({ panes: [{ pane_id: "Q", terminal_id: "Q", agent: agentName, agent_status: "unknown" }] }) as SessionSnapshot,
+      omo: { sessionOf: () => null },
+      SUBMIT_DEADLINE_MS: 45_000,
+      SUBMIT_DELAY_MS: 0,
+      TYPED_SETTLE_MS: 0,
+    });
+
+    try {
+      await delivery.queueFirstMessage("Q", "Reply with just: QUEUE OK", "claude", null, AGENT, {
+        onBlocked: () => firstBlocked.resolve(),
+        onFailed: (paneId, reason, code) => failed.resolve({ paneId, reason, code }),
+      });
+
+      await Promise.race([firstBlocked.promise, Bun.sleep(5_000).then(() => { throw new Error("Timed out waiting for blocked hook"); })]);
+      expect(writes).toEqual([]);
+
+      // User chooses "No, exit": Claude terminates and the login shell returns.
+      agentName = postExitLabel;
+      processes.set("Q", shellIn("bash"));
+      delivery.onPromptAnswered("Q");
+
+      const failure = await Promise.race([failed.promise, Bun.sleep(5_000).then(() => { throw new Error("Timed out waiting for launch failure"); })]);
+
+      expect(failure).toEqual({ paneId: "Q", reason: "Agent exited", code: "first_message_launch_ended" });
+      expect(writes).toEqual([]);
+    } finally {
+      delivery.stopPending();
+    }
+  },
+);
