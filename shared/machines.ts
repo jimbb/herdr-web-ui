@@ -461,7 +461,7 @@ export interface RemotePairingsEvent { type: "remote-pairings"; pairings: Remote
  * serves. `accepted`: its launcher took it as its own past the startup check (absent when no launcher
  * runs it). All three absent from older servers.
  */
-export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; security?: SecuritySummary; web_ui?: { boot_id: string }; runtime?: RuntimeName; accepted?: boolean; /** a driving owner only, as on the whole answer */ herdr_runtime?: HerdrRuntimeFacts }
+export interface BridgeHealth { ok: true; auth: HealthAuth; bridge_protocol: number; security?: SecuritySummary; web_ui?: { boot_id: string }; runtime?: RuntimeName; accepted?: boolean; /** a driving owner only, as on the whole answer */ herdr_runtime?: HerdrRuntimeFacts; /** true when this server runs the local herdr-core agent task queue */ agent_queue?: boolean }
 export interface BridgeIdentity {
   /** Only on an authenticated /api/bridge?discover=herdr request. */
   found_herdr_sessions?: FoundHerdrSession[];

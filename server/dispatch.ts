@@ -71,6 +71,7 @@ import { readHerdrUi } from "./herdr-ui.ts";
 import { MachineRelay, type RelayReceiptIds } from "./machine-relay.ts";
 import { sameOrigin } from "./machine-security.ts";
 import { handlePluginRequest } from "./plugin-routes.ts";
+import type { AgentQueueService } from "./agent-queue.ts";
 import type { createServer } from "./index.ts";
 import type { TailnetIdentity } from "./tailscale.ts";
 import type { CLIProxyRoutes } from "./cliproxy-routes.ts";
@@ -117,6 +118,7 @@ export interface RequestServices {
   readonly seen: SeenStore;
   readonly piReader: PiSessionReader;
   readonly orderSequence: OrderSequence;
+  readonly agentQueue: AgentQueueService | null;
   readonly clientConnectionLog: ClientConnectionLog;
   readonly requestLog: RequestLog;
   /** acts waiting for this PC's screen (server/account/local-confirm.ts); only with the Step 2 release flag */
@@ -150,7 +152,7 @@ export interface ServerContext {
 const OTHER_MACHINE_FILES = /^\/api\/(?:fs\/|pane\/(?:files|docs|image)$|workspace\/(?:diff\/|git\/|directories$|pr(?:$|\/)))/;
 
 export async function handleRequest(request: Request, ctx: ServerContext): Promise<Response | undefined> {
-  const { options, hostname, token, bridgeToken, bootId, devices, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartupResult, portalStartup } = ctx.services;
+  const { options, hostname, token, bridgeToken, bootId, devices, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, agentQueue, clientConnectionLog, requestLog, portalStartupResult, portalStartup } = ctx.services;
   const { sidecar, serialize, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage, askFirstMessage } = core;
   return requestLog.handle(request, async (headers) => {
   if (options.profile === "machine") wordHerdrFailures(machineFailure, machineLayoutReason);
@@ -464,7 +466,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
       } };
       // a stream ends with what let it in: a device's revoke, the gate closing on one the open LAN let in, Portal's recheck
-      const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : openAccess ? (close) => devices.endWithGate(close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, ownerAccess(access));
+      const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : openAccess ? (close) => devices.endWithGate(close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, ownerAccess(access), agentQueue ?? undefined);
       response.headers.set("cache-control", "no-store");
       if (issuedKey !== null && response.ok) response.headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
       return response;
@@ -510,6 +512,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
     const machineEvents = useMachineEvents ? {
       manager: machines, preferences, herdrSidebar, seen,
+      ...(agentQueue ? { agentQueue } : {}),
       pairings: { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void) => {
         const stopPaired = devices.onPaired((event, origin) => {
           if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event);
@@ -667,14 +670,14 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
         ...(security ? { security } : {}), web_ui: { boot_id: bootId, ...(serverId ? { server_id: serverId } : {}) },
       }, 200, { "cache-control": "no-store" });
     }
-    if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL, ...relay, ...(security ? { security } : {}), web_ui: { boot_id: bootId }, runtime: runtime(), ...(options.launchAccepted ? { accepted: options.launchAccepted() } : {}), ...(herdr_runtime ? { herdr_runtime } : {}) }, 200, securityHeaders);
+    if (url.searchParams.get("scope") === "bridge") return jsonResponse({ ok: true, auth, bridge_protocol: BRIDGE_PROTOCOL, ...relay, ...(security ? { security } : {}), web_ui: { boot_id: bootId }, runtime: runtime(), ...(options.launchAccepted ? { accepted: options.launchAccepted() } : {}), ...(herdr_runtime ? { herdr_runtime } : {}), ...(agentQueue !== null && access.level === "full" ? { agent_queue: true as const } : {}) }, 200, securityHeaders);
     const herdr_core = owner ? options.herdrCoreFacts?.() : undefined;
     try {
       const info = await ping();
       // a forced answer (tests) and a runtime without the PTY sidecar are told the way a Windows herdr's own would be
       const herdr = attachableIdentity(info, sidecar);
       // this server's own version (package.json, embedded in the compiled binary), told with the other facts to a client that got in
-      return jsonResponse({ ok: true, herdr, auth, ...(access.level === "full" ? { version } : {}), ...relay, ...exposure, ...(security ? { security } : {}), ...(herdr_core ? { herdr_core } : {}), ...(herdr_runtime ? { herdr_runtime } : {}), ...(account_devices ? { account_devices } : {}),
+      return jsonResponse({ ok: true, herdr, auth, ...(access.level === "full" ? { version } : {}), ...relay, ...exposure, ...(security ? { security } : {}), ...(herdr_core ? { herdr_core } : {}), ...(herdr_runtime ? { herdr_runtime } : {}), ...(account_devices ? { account_devices } : {}), ...(agentQueue !== null && access.level === "full" ? { agent_queue: true as const } : {}),
         web_ui: { boot_id: bootId, revision: process.env["OVIS_REVISION"] ?? null, ...(serverId ? { server_id: serverId } : {}) } }, 200, securityHeaders);
     } catch (error) {
       const failed = errorResponse(error);

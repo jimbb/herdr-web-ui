@@ -72,6 +72,7 @@ import { holdOpenCodeNative } from "./opencode-native.ts";
 import { holdCommandHistory } from "./claude-command-history.ts";
 import { holdFilePool } from "./file-pool.ts";
 import { handleRequest, type RequestServices, type ServerContext } from "./dispatch.ts";
+import { AgentQueueService } from "./agent-queue.ts";
 import { lanHttpsCertificate, lanHttpsConfig, privateLanAddresses, privateLanPeer, type LanHttpsConfig } from "./lan-https.ts";
 
 
@@ -222,6 +223,8 @@ export function createServer(
     sidecar?: boolean | (() => boolean);
     shellAgents?: ShellAgentLocator;
     agentDetector?: AgentDetector;
+    /** Tests supply an isolated or null agent queue service. */
+    agentQueue?: AgentQueueService | null;
   } = {},
 ): ServerInstance {
   // resolved once: a merge can give the old dir files of its own, after which resolving again could name the other dir
@@ -346,9 +349,30 @@ export function createServer(
   // a snapshot as a browser is told it, wherever it goes: without the token values herdr's sidebar rows hide (#2160).
   // A bridge this app starts on a PC (`bridgeOnly`, server/remote-entry.ts) serves only its connection server, with
   // the credential it registered as its token: that server applies its own rows, so it gets every snapshot whole.
+  const agentQueue = options.agentQueue !== undefined
+    ? options.agentQueue
+    : capabilities().agentQueue && hcMachine() === null
+      ? new AgentQueueService({ stateDir, getPreferences: () => preferences.get() })
+      : null;
   const shownSnapshot = <S extends SessionSnapshot>(snapshot: S): S => options.bridgeOnly ? snapshot : snapshotWithoutHiddenTokens(herdrSidebar.get(), snapshot);
   const browserSnapshot = options.profile === "machine" ? <S extends SessionSnapshot>(snapshot: S): S => machineSnapshot(shownSnapshot(snapshot)) : shownSnapshot;
-  const core = createCore({ options: { ...options, stateDir, openCodeState, orderSequence, ...(options.profile === "machine" ? { herdrFailure: machineFailure } : {}), serverId: () => ovisRelay.serverId(), seenMoved: (from, to, renumber) => seen.moved(LOCAL_MACHINE, from, to, renumber) }, devices, preferences, usage, usageLogin, browserSnapshot, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS });
+  const core = createCore({
+    options: {
+      ...options,
+      stateDir,
+      openCodeState,
+      orderSequence,
+      ...(options.profile === "machine" ? { herdrFailure: machineFailure } : {}),
+      serverId: () => ovisRelay.serverId(),
+      seenMoved: (from, to, renumber) => seen.moved(LOCAL_MACHINE, from, to, renumber),
+      ...(agentQueue ? {
+        onQueuePaneStatus: (paneId, status, agent, failedRest) => agentQueue.onPaneStatus(paneId, status, agent, failedRest),
+        onQueuePaneGone: (paneId, reason) => agentQueue.onPaneGone(paneId, reason),
+        onQueuePaneMoved: (from, to) => agentQueue.onPaneMoved(from, to),
+      } : {}),
+    },
+    devices, preferences, usage, usageLogin, browserSnapshot, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS,
+  });
   const { machines, collector, queueFirstMessage, push } = core;
   const seen = new SeenStore(stateDir, (pc, epoch) => machines?.finishEnded(pc, epoch) ?? false);
   machines?.subscribe((event) => {
@@ -415,6 +439,7 @@ export function createServer(
       });
     } catch (error) {
       server.stop(true);
+      agentQueue?.stop();
       core.stop(() => clearInterval(draftTimer));
       piReader.close();
       throw error;
@@ -480,7 +505,7 @@ export function createServer(
       switchRuntime: () => { const answer = options.runtimeService!.request("herdr-core"); return answer.ok ? null : answer.message; },
       ...(options.herdrCoreInstaller ? { installer: options.herdrCoreInstaller } : {}),
     }) : null,
-    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup, localConfirms,
+    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, agentQueue, clientConnectionLog, requestLog, portalStartup, localConfirms,
     get portalStartupResult() { return portalStartupResult; },
   };
   ovisRelay.resume(services, server.port ?? DEFAULT_PORT);
@@ -541,6 +566,7 @@ export function createServer(
   const releaseFilePool = holdFilePool();
   const releaseCommandHistory = holdCommandHistory();
   core.start();
+  agentQueue?.start();
 
   return {
     context: socketContext(server),
@@ -557,6 +583,7 @@ export function createServer(
       });
     },
     stop: () => {
+      agentQueue?.stop();
       services.runtimeMove?.stop();
       accountMailbox.stop();
       void ovisRelay.shutdown();

@@ -96,6 +96,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     seenMoved?: (from: string, to: string, renumber: (id: number) => number) => void;
     /** runs each tick of the card reads (CARD_READ_MS) and returns how to stop them; tests tick by hand */
     cardTimer?: (tick: () => Promise<void>) => () => void;
+    onQueuePaneStatus?: (paneId: string, status: AgentStatus, agent: string | null, failedRest?: boolean) => void;
+    onQueuePaneGone?: (paneId: string, reason: string) => void;
+    onQueuePaneMoved?: (from: string, to: string) => void;
   };
   devices: DeviceStore;
   preferences: PreferenceStore;
@@ -531,7 +534,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     waits.running(paneId, background, null, false);
     if (turn) waits.status(paneId, status);
     broadcastAll(paneStatus(paneId, status, { background_tasks: background }));
-    if (turn || waits.waiting(paneId) !== held) alert(paneId, alertStatus(status, waits.waiting(paneId)));
+    if (turn || waits.waiting(paneId) !== held) {
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, "omo", turn && rest === "failed" && status === "idle");
+      alert(paneId, effective);
+    }
     if (turn && rest === "failed" && status === "idle") push.onFailed(paneId).catch(logPushError);
   }
 
@@ -540,7 +547,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     const status = turn ? completions.observe(paneId, derived, agent, rest) : completions.current(paneId) ?? completions.observe(paneId, derived, agent);
     if (turn) { pending.status(paneId, status); drainPending(paneId); }
     broadcastAll(paneStatus(paneId, status));
-    if (turn) alert(paneId, status);
+    if (turn) {
+      options.onQueuePaneStatus?.(paneId, status, agent, rest === "failed" && status === "idle");
+      alert(paneId, status);
+    }
     if (turn && rest === "failed" && status === "idle") push.onFailed(paneId).catch(logPushError);
   }
 
@@ -556,8 +566,12 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     const status = completions.current(paneId);
     if (status === undefined) return;
     broadcastAll(paneStatus(paneId, status, { background_tasks: running }));
-    if (changed) alert(paneId, alertStatus(status, waits.waiting(paneId)));
-    if (changed) claudeFailHeldEnds(paneId);
+    if (changed) {
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
+      alert(paneId, effective);
+      claudeFailHeldEnds(paneId);
+    }
   }
 
   function waitsRanOut(): void {
@@ -565,7 +579,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const status = completions.current(paneId);
       if (status === undefined) continue;
       broadcastAll(paneStatus(paneId, status));
-      alert(paneId, alertStatus(status, waits.waiting(paneId)));
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
+      alert(paneId, effective);
       claudeFailHeldEnds(paneId);
     }
   }
@@ -718,7 +734,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     } else waits.forget(paneId);
     const tell = (): void => {
       broadcastAll(paneStatus(paneId, status, tracker !== null ? { background_tasks: tracker.countOf(paneId) } : {}));
-      alert(paneId, alertStatus(status, waits.waiting(paneId)));
+      const effective = alertStatus(status, waits.waiting(paneId));
+      options.onQueuePaneStatus?.(paneId, effective, agent, failedRest);
+      alert(paneId, effective);
     };
     if (agent === "codex" && status === "done" && !omo.runs(paneId) && !gjc.runs(paneId) && (codexTurns.get(paneId) ?? 0) > 0) {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -766,6 +784,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         pending.status(paneId, queueStatus(paneId, status)); drainPending(paneId);
         waits.status(paneId, status);
         broadcastAll(paneStatus(paneId, status));
+        options.onQueuePaneStatus?.(paneId, status, "codex", false);
         alert(paneId, status);
         return;
       }
@@ -777,6 +796,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       pending.status(paneId, queueStatus(paneId, status)); drainPending(paneId);
       waits.status(paneId, status);
       broadcastAll(paneStatus(paneId, status));
+      options.onQueuePaneStatus?.(paneId, status, "codex", true);
       alert(paneId, status);
       push.onFailed(paneId).catch(logPushError);
     }, () => undefined).finally(() => codexLooking.delete(paneId));
@@ -854,6 +874,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         // the tracker's remembered working is what its events already told the queue, and no reading of a new turn
         if (read || status !== "working") pending.baseline(pane.pane_id, queueStatus(pane.pane_id, status), askedAt);
         drainPending(pane.pane_id);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(status, waits.waiting(pane.pane_id)), pane.agent ?? null);
       }
     },
     onReconciled: (panes) => {
@@ -872,20 +893,24 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
       // read from a snapshot: one asked for before an Enter says nothing of its turn. A pane with an event since has it already
       for (const pane of panes) {
-        if (!newer.has(pane.pane_id)) pending.baseline(pane.pane_id, queueStatus(pane.pane_id, settled(pane)), askedAt);
+        const current = settled(pane);
+        if (!newer.has(pane.pane_id)) pending.baseline(pane.pane_id, queueStatus(pane.pane_id, current), askedAt);
         drainPending(pane.pane_id);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(current, waits.waiting(pane.pane_id)), pane.agent ?? null);
       }
       for (const pane of panes) if (!newer.has(pane.pane_id) && (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent))) waits.status(pane.pane_id, settled(pane));
       push.resync(panes.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(settled(pane), waits.waiting(pane.pane_id))) })), newer);
     },
     onPaneEnded: (paneId) => {
       paneGone(paneId);
+      options.onQueuePaneGone?.(paneId, "Terminal ended");
       broadcastAll({ type: "pane-exited", pane_id: paneId });
       push.onEnded(paneId).catch(logPushError);
     },
     onPaneClosed: (paneId) => {
       paneGone(paneId);
       push.closed(paneId);
+      options.onQueuePaneGone?.(paneId, "Terminal closed");
     },
     onPaneMoved: (from, to) => {
       const renumber = finishes.moved(from, to);
@@ -897,6 +922,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (claudeRested.has(from)) { claudeRested.set(to, claudeRested.get(from)!); claudeRested.delete(from); }
       try { options.seenMoved?.(from, to, renumber); }
       catch (error) { console.warn(`seen: could not carry the reads of ${from} to ${to}:`, error); }
+      options.onQueuePaneMoved?.(from, to);
       broadcastAll({ type: "pane-moved", from, to });
       push.moved(from, to);
       paneMoved?.(from, to);
