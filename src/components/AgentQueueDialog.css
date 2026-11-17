@@ -30,7 +30,7 @@
 }
 
 .queue-header-actions .is-spinning {
-  animation: queue-spin 1s linear infinite;
+  animation: queue-spin var(--dur-spin) steps(8) infinite;
 }
 
 @keyframes queue-spin {

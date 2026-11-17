@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   formatQueueDuration,
   formatQueueGb,
@@ -9,7 +10,33 @@ import {
   type QueueSnapshot,
   type QueueTask,
 } from "../../shared/agent-queue.ts";
+import { fetchQueue } from "./api.ts";
 import type { Translate } from "./i18n.ts";
+
+/** Manages the local agent-queue snapshot and dialog open state synchronized with server capability and auth. */
+export function useAgentQueue(locked: boolean | null, queueEnabled: boolean | null) {
+  const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueSupported = queueEnabled === true || queueSnapshot !== null;
+  useEffect(() => {
+    if (locked !== false || queueEnabled === false) {
+      setQueueOpen(false);
+      setQueueSnapshot(null);
+      return;
+    }
+    if (queueEnabled !== true) return;
+    let cancelled = false;
+    void fetchQueue()
+      .then((fresh) => {
+        if (!cancelled) setQueueSnapshot(fresh);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [locked, queueEnabled]);
+  return { queueSnapshot, setQueueSnapshot, queueOpen, setQueueOpen, queueSupported };
+}
 
 export interface QueueProjectGroup {
   folder: string;

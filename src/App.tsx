@@ -1,10 +1,9 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, ChevronDown, ChevronLeft, Eye, Plus, CircleHelp, Ellipsis, FolderOpen, Inbox, Link, ListOrdered, Menu, MessageCircle, MessageSquare, PanelLeft, PanelsTopLeft, Search, Settings as SettingsGlyph, SquareTerminal, Target, TextSearch, X } from "lucide-react";
 
-import type { QueueSnapshot } from "../shared/agent-queue.ts";
 import type { HerdrPane, PaneDirection } from "../shared/protocol.ts";
-import { authenticate, createTab, fetchQueue, movePaneBeside, moveTabToWorkspace, paneSessionKey, shareSeen, swapPaneWith } from "./lib/api.ts";
-import { queueBadgeCounts } from "./lib/agentQueue.ts";
+import { authenticate, createTab, movePaneBeside, moveTabToWorkspace, paneSessionKey, shareSeen, swapPaneWith } from "./lib/api.ts";
+import { queueBadgeCounts, useAgentQueue } from "./lib/agentQueue.ts";
 import { openGroupItems, useGroupClosedWhenEmpty, useMoreMenu } from "./lib/moreMenu.ts";
 import { layoutActions } from "./lib/layoutActions.ts";
 import { displayPaneTitle, storedBackgroundFolded, storedWorktreeCollapsed, tabPaneTitle } from "./components/Sidebar.tsx";
@@ -282,27 +281,7 @@ export function App() {
   // a diff's line notes go to its own pane: none while this window only watches that pane
   const diffPaneObserving = usePaneObserving(diffViewing?.paneId ? paneStorageId(diffViewing.machineId, diffViewing.paneId) : null);
   const { settingsOpen, setSettingsOpen, settingsLinkPage, setSettingsLinkPage, settingsLinkSection, setSettingsLinkSection, settingsPage, settingsSection, setSettingsSection, closeSettings, onSettingsPage } = useSettingsDialog(initialLink);
-  const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
-  const [queueOpen, setQueueOpen] = useState(false);
-  const queueSupported = health?.agent_queue === true || queueSnapshot !== null;
-  const queueEnabled = health ? health.agent_queue === true : null;
-  useEffect(() => {
-    if (locked !== false || queueEnabled === false) {
-      setQueueOpen(false);
-      setQueueSnapshot(null);
-      return;
-    }
-    if (queueEnabled !== true) return;
-    let cancelled = false;
-    void fetchQueue()
-      .then((fresh) => {
-        if (!cancelled) setQueueSnapshot(fresh);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [locked, queueEnabled]);
+  const { queueSnapshot, setQueueSnapshot, queueOpen, setQueueOpen, queueSupported } = useAgentQueue(locked, health ? health.agent_queue === true : null);
   const { newSessionOpen, setNewSessionOpen, newPrefill, setNewPrefill, newFields, setNewFields, pendingCreate, newSessionPending, newTab, setNewTab, sessionHistory, setSessionHistory, worktreeFor, setWorktreeFor } = useNewSessionState({ initialLink, watching: auth?.role === "watch" });
   const { connected, setConnected, connectedBefore, setConnectedBefore, paneLost, outputStopped, setOutputStopped, reportedBy, setReportedBy } = useConnectionChip();
   const { notifications, setNotifications, pushOn, setPushOn, pushOnRef } = useNotificationState();
