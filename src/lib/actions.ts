@@ -80,6 +80,8 @@ export interface AppActions {
   toggleSidebar: () => void;
   /** into the agent inbox (lib/inboxMode.ts) or, while `on`, back out of it; null where the mode is not offered */
   inboxMode: { on: boolean; go: () => void } | null;
+  /** Opens the local per-project agent task queue dialog (components/AgentQueueDialog.tsx); null when unsupported. */
+  openQueue: (() => void) | null;
   /** the sidebar's Filter field, focused, with the drawer or the sidebar opened first: drawn even where Settings → Appearance leaves it out */
   openSidebarFilter: () => void;
   /** flips dark/light (a `system` setting becomes the opposite of the resolved theme) */

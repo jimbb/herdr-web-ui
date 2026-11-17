@@ -17,6 +17,7 @@ import { SETUP_KO } from "./i18n/setup.ko.ts";
 import { GUIDE_KO } from "./i18n/guide.ko.ts";
 import { UPDATES_KO } from "./i18n/updates.ko.ts";
 import { PALETTE_KO } from "./i18n/palette.ko.ts";
+import { QUEUE_KO } from "./i18n/queue.ko.ts";
 import { RELAY_KO } from "./i18n/relay.ko.ts";
 import { DASHBOARD_KO } from "./i18n/dashboard.ko.ts";
 import { RUNTIME_MOVE_KO } from "./i18n/runtime-move.ko.ts";
@@ -586,6 +587,7 @@ const BASE: Record<string, string> = {
   "{used}/{max} PCs": "PC {used}/{max}대",
   "{used} / {cap} relay data": "릴레이 데이터 {used} / {cap}",
   "Agent": "에이전트",
+  "Agent Queue": "에이전트 대기열",
   "Install another agent ({count})": "다른 에이전트 설치 ({count})",
 };
 
@@ -606,6 +608,7 @@ export const KO_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_KO,
   updates: UPDATES_KO,
   palette: PALETTE_KO,
+  queue: QUEUE_KO,
   relay: RELAY_KO,
   dashboard: DASHBOARD_KO,
   "runtime-move": RUNTIME_MOVE_KO,

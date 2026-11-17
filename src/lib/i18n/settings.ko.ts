@@ -320,4 +320,5 @@ export const SETTINGS_KO: Record<string, string> = {
 
   // Settings → Alerts → Also send to, when the server could not say what it holds (design pass G-111)
   "Could not read this PC's alert destination ({error}). Close Settings and open it again.": "이 PC의 외부 알림 설정을 읽지 못했습니다({error}). 설정을 닫았다가 다시 여세요.",
+  "queue tasks schedule batch": "대기열 작업 예약 배치 일괄 큐",
 };

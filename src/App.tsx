@@ -1,8 +1,10 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, ChevronDown, ChevronLeft, Eye, Plus, CircleHelp, Ellipsis, FolderOpen, Inbox, Link, Menu, MessageCircle, MessageSquare, PanelLeft, PanelsTopLeft, Search, Settings as SettingsGlyph, SquareTerminal, Target, TextSearch, X } from "lucide-react";
+import { Bell, ChevronDown, ChevronLeft, Eye, Plus, CircleHelp, Ellipsis, FolderOpen, Inbox, Link, ListOrdered, Menu, MessageCircle, MessageSquare, PanelLeft, PanelsTopLeft, Search, Settings as SettingsGlyph, SquareTerminal, Target, TextSearch, X } from "lucide-react";
 
+import type { QueueSnapshot } from "../shared/agent-queue.ts";
 import type { HerdrPane, PaneDirection } from "../shared/protocol.ts";
-import { authenticate, createTab, movePaneBeside, moveTabToWorkspace, paneSessionKey, shareSeen, swapPaneWith } from "./lib/api.ts";
+import { authenticate, createTab, fetchQueue, movePaneBeside, moveTabToWorkspace, paneSessionKey, shareSeen, swapPaneWith } from "./lib/api.ts";
+import { queueBadgeCounts } from "./lib/agentQueue.ts";
 import { openGroupItems, useGroupClosedWhenEmpty, useMoreMenu } from "./lib/moreMenu.ts";
 import { layoutActions } from "./lib/layoutActions.ts";
 import { displayPaneTitle, storedBackgroundFolded, storedWorktreeCollapsed, tabPaneTitle } from "./components/Sidebar.tsx";
@@ -15,6 +17,7 @@ import { PANE_TABPANEL_ID, paneTabPanelLabel } from "./lib/paneRegion.ts";
 import { worktreeRepoName } from "./lib/composerStrip.ts";
 import { AccessGate } from "./components/AccessGate.tsx";
 import { AgentMark } from "./components/AgentMark.tsx";
+import { AgentQueueDialog, QueueFootEntry } from "./components/AgentQueueDialog.tsx";
 import { NewSessionDialog } from "./components/NewSessionDialog.tsx";
 import { SetupGuide, SetupGuideResume } from "./components/SetupGuide.tsx";
 import { useSetupGuide } from "./lib/useSetupGuide.ts";
@@ -308,6 +311,27 @@ export function App() {
   // a diff's line notes go to its own pane: none while this window only watches that pane
   const diffPaneObserving = usePaneObserving(diffViewing?.paneId ? paneStorageId(diffViewing.machineId, diffViewing.paneId) : null);
   const { settingsOpen, setSettingsOpen, settingsLinkPage, setSettingsLinkPage, settingsLinkSection, setSettingsLinkSection, settingsPage, settingsSection, setSettingsSection, closeSettings, onSettingsPage } = useSettingsDialog(initialLink);
+  const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const queueSupported = health?.agent_queue === true || queueSnapshot !== null;
+  const queueEnabled = health ? health.agent_queue === true : null;
+  useEffect(() => {
+    if (locked !== false || queueEnabled === false) {
+      setQueueOpen(false);
+      setQueueSnapshot(null);
+      return;
+    }
+    if (queueEnabled !== true) return;
+    let cancelled = false;
+    void fetchQueue()
+      .then((fresh) => {
+        if (!cancelled) setQueueSnapshot(fresh);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [locked, queueEnabled]);
   const { newSessionOpen, setNewSessionOpen, newPrefill, setNewPrefill, newFields, setNewFields, pendingCreate, newSessionPending, newTab, setNewTab, sessionHistory, setSessionHistory, worktreeFor, setWorktreeFor } = useNewSessionState({ initialLink, watching: auth?.role === "watch" });
   const { connected, setConnected, connectedBefore, setConnectedBefore, paneLost, outputStopped, setOutputStopped, reportedBy, setReportedBy } = useConnectionChip();
   const { notifications, setNotifications, pushOn, setPushOn, pushOnRef } = useNotificationState();
@@ -345,7 +369,7 @@ export function App() {
   const { dropIn, chime, onRoster, onPaneStatus, onPaneExited } = useAlertSignals({ settings, selectionRef, drawerOpenRef: inbox.coveredRef, splitRef, splitShownRef, machinesRef, alertsRef, alertsOnRef, pushOnRef, statusRef, turnStartRef, lastTurnRef, alertSoundRef });
 
   // herdr moved a pane under a new ID, from anywhere (the server's pane-moved): followPaneMove below, called at the event
-  useRosterEvents({ onPaneMoved: (machineId, from, to) => followPaneMove(machineId, from, to), machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef: () => takeNotificationTargetRef });
+  useRosterEvents({ onAgentQueue: setQueueSnapshot, onPaneMoved: (machineId, from, to) => followPaneMove(machineId, from, to), machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef: () => takeNotificationTargetRef });
 
   const handleServerMessage = useServerMessageHandler(setOutputStopped);
 
@@ -528,11 +552,11 @@ export function App() {
   const { dialogCover, webDialogCover, contentReady } = usePaneCoverage({ contentKey });
   // covered by something (closing it brings the pane into view again), or in view with its content still loading
   const panePresence = useCallback((): PanePresence => !(locked === false && linkLanded && pendingFile.current === null && pendingCreate.current === null
-    && !drawerOpen && !settingsOpen && !newSessionOpen
+    && !drawerOpen && !settingsOpen && !newSessionOpen && !queueOpen
     && !(filesOpen && !filesDocked) && !machineDialog && !paletteOpen && !diffViewing && !(viewing && !fileDocked)
     && !dialogCover && !paneCovered() && !inbox.shown) ? "covered"
     : contentReady && paneContentPresented(contentKey) ? "front" : "loading",
-  [locked, linkLanded, inbox.shown, drawerOpen, settingsOpen, newSessionOpen, filesOpen, filesDocked, machineDialog, paletteOpen, diffViewing, viewing, fileDocked, dialogCover, contentReady, contentKey]);
+  [locked, linkLanded, inbox.shown, drawerOpen, settingsOpen, newSessionOpen, queueOpen, filesOpen, filesDocked, machineDialog, paletteOpen, diffViewing, viewing, fileDocked, dialogCover, contentReady, contentKey]);
   // one source for the sidebar's two lists: live counters per PC and finishes looked at here
   const activity = useSidebarActivityState(machines, selectedMachineId, presentedPaneId, panePresence, shareSeen);
   // and one for how long each agent has been in its state: stamped here, read by the lists (lib/useAgentStateSince.ts)
@@ -775,6 +799,7 @@ export function App() {
       },
       openSidebarFilter: () => { if (!inMode) openSidebarFilter(); },
       inboxMode: modeOffered ? { on: inMode, go: inMode ? leaveMode : enterInbox } : null,
+      openQueue: !queueSupported ? null : () => { setDrawerOpen(false); setQueueOpen(true); },
       toggleTheme: () => updateSettings({ theme: resolvedTheme === "dark" ? "light" : "dark" }),
       lock: canSignOut ? lock : null,
       enableNotifications: bell.run === enableNotifications ? () => void enableNotifications() : null,
@@ -795,7 +820,7 @@ export function App() {
       },
       closeTab: !tabCloseOffered ? null : () => requestCloseTab(selectedMachineId, selectedPaneId!),
     }),
-    [closeOffered, tabCloseOffered, requestCloseTab, inbox.shown, inMode, modeOffered, enterInbox, leaveMode, revealFiles, selectPane, selectTarget, selectedPaneId, selectedPane?.own_tab, selectedMachineId, appLayout, reorderCoordinator, tabStripMounted, setView, view, terminalPeek, endPeek, updateSettings, resolvedTheme, canSignOut, lock, bell.run, enableNotifications, load, layoutRefused, moveRefused, lenses, openSidebarFilter, selectedSearchable, requestSearch, split, soloSlot, settings.webLinks, settings.sidebarBackgroundWorkspaces, openWebPage],
+    [closeOffered, tabCloseOffered, requestCloseTab, inbox.shown, inMode, modeOffered, queueSupported, enterInbox, leaveMode, revealFiles, selectPane, selectTarget, selectedPaneId, selectedPane?.own_tab, selectedMachineId, appLayout, reorderCoordinator, tabStripMounted, setView, view, terminalPeek, endPeek, updateSettings, resolvedTheme, canSignOut, lock, bell.run, enableNotifications, load, layoutRefused, moveRefused, lenses, openSidebarFilter, selectedSearchable, requestSearch, split, soloSlot, settings.webLinks, settings.sidebarBackgroundWorkspaces, openWebPage],
   );
 
   useShortcuts(actions, locked === false);
@@ -897,6 +922,7 @@ export function App() {
   // in a thread opened from the list, the header's first button goes back to it; beside the list (from 769px) a
   // thread has nothing to go back to
   const inboxBack = inbox.enabled && !inbox.shown && !drawerOpen && !guideShown && !inboxWide;
+  const queueActiveCount = queueBadgeCounts(queueSnapshot).active;
   const moreItems: RowMenuItem[] = [
     ...(waitingInMore && nextWaiting !== null ? [{ id: "next-waiting", label: t("Open the next session waiting for you"), hint: String(moreWaiting), icon: CircleHelp, run: openNextWaiting }] : []),
     // first at every width: a phone's header has no palette button, and a touch screen no shortcut
@@ -912,6 +938,7 @@ export function App() {
     ...paneMoreItems.filter((item) => !(foldFind && item.id === "search-conversation") && (!foldPane || item.id.startsWith("pane:")))
       .map((item, index) => index === 0 ? { ...item, divider: true } : item),
     ...(foldPane && more ? [{ id: "pane-group", label: t("Pane and tab…"), icon: PanelsTopLeft, divider: true, run: () => openMoreGroup("pane", more.anchor) }] : []),
+    ...(actions.openQueue ? [{ id: "agent-queue", label: t("Agent Queue"), ...(queueActiveCount > 0 ? { hint: String(queueActiveCount) } : {}), icon: ListOrdered, divider: true, run: actions.openQueue }] : []),
     // the way into the agent inbox (lib/inboxMode.ts), More's last group at every width
     ...(modeOffered ? [{ id: "enter-inbox", label: t("Open agent inbox"), icon: Inbox, divider: true, run: enterInbox }] : []),
   ];
@@ -939,6 +966,7 @@ export function App() {
     ...fromMore("palette"),
   ];
   const modeEndItems: RowMenuItem[] = [
+    ...fromMore("agent-queue").map((item) => ({ ...item, divider: false })),
     ...fromMore("alerts").map((item) => ({ ...item, divider: false })),
     { id: "settings", label: t("Settings"), icon: SettingsGlyph, divider: true, run: actions.openSettings },
   ];
@@ -1297,7 +1325,10 @@ export function App() {
           <RenderBoundary resetKey={null} fallback={(retry) => <RegionCrash message={t("The sidebar can't be shown.")} retry={retry} />}>
             <CrashProbe region="sidebar" />
             <ReorderContext.Provider value={reorderCoordinator}><MachineSidebar machines={sidebarMachines} allMachines={machines} watching={auth?.role === "watch"} appLayout={appLayoutOn} drawerOpen={drawerOpen} filterRequest={sidebarFilterRequest} selectedMachineId={selectedMachineId} selectedPaneId={selectedPaneId} activity={activity} actions={actions} onSelect={selectTarget} onUsageLogin={(paneId) => { selectTarget("local", paneId, "terminal"); void load(); }} onSetup={(machine, update = false) => { setUpdateRemote(update); setMachineDialog(machine); }} onNew={openNewOn}
-              footerStart={modeOffered ? <InboxFootEntry onOpen={enterInbox} /> : undefined} /></ReorderContext.Provider>
+              footerStart={queueSupported || modeOffered ? <>
+                {queueSupported && <QueueFootEntry snapshot={queueSnapshot} onOpen={() => actions.openQueue?.()} />}
+                {modeOffered && <InboxFootEntry onOpen={enterInbox} />}
+              </> : undefined} /></ReorderContext.Provider>
           </RenderBoundary>
           <SidebarResizer width={sidebarWidth} onResize={setSidebarWidth} />
         </aside>}
@@ -1629,6 +1660,21 @@ export function App() {
         selectTarget(worktreeFor.machineId, opened.pane_id);
       }} />}
       {unsentFor && <UnsentTextDialog machines={machines} target={unsentFor} canRecover={unsentFor.pane.agent != null} onClose={closeUnsent} onRecover={recover} />}
+      <MachineContext.Provider value="local">
+        <AgentQueueDialog
+          open={queueOpen}
+          snapshot={queueSnapshot}
+          watching={auth?.role === "watch"}
+          defaultFolder={selectedMachineId === "local" ? (selectedPane?.foreground_cwd ?? selectedPane?.cwd ?? null) : null}
+          onClose={() => setQueueOpen(false)}
+          onChange={setQueueSnapshot}
+          onOpenPane={(paneId) => {
+            setQueueOpen(false);
+            selectTarget("local", paneId);
+            void load();
+          }}
+        />
+      </MachineContext.Provider>
       <CommandPalette key={selectedMachineId} machines={sidebarMachines} onSelect={selectTarget} open={paletteOpen} initialQuery={paletteQuery} onClose={() => setPaletteOpen(false)} snapshot={snapshot} online={selectedMachine?.state === "connected"} selectedPaneId={selectedPaneId}
         // a peek shows the terminal: its toggle says Switch to chat, which ends the peek
         view={terminalPeek !== null ? "terminal" : view} actions={actions} watching={auth?.role === "watch"} inboxMode={inMode} />

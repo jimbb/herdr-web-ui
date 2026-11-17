@@ -17,6 +17,7 @@ import { SETUP_ZH } from "./i18n/setup.zh.ts";
 import { GUIDE_ZH } from "./i18n/guide.zh.ts";
 import { UPDATES_ZH } from "./i18n/updates.zh.ts";
 import { PALETTE_ZH } from "./i18n/palette.zh.ts";
+import { QUEUE_ZH } from "./i18n/queue.zh.ts";
 import { RELAY_ZH } from "./i18n/relay.zh.ts";
 import { DASHBOARD_ZH } from "./i18n/dashboard.zh.ts";
 import { RUNTIME_MOVE_ZH } from "./i18n/runtime-move.zh.ts";
@@ -590,6 +591,7 @@ const BASE: Record<string, string> = {
   "{used}/{max} PCs": "{used}/{max} 台电脑",
   "{used} / {cap} relay data": "中继流量 {used} / {cap}",
   "Agent": "Agent",
+  "Agent Queue": "Agent 队列",
   "Install another agent ({count})": "安装其他代理（{count}）",
 };
 
@@ -610,6 +612,7 @@ export const ZH_PARTS: Record<string, Record<string, string>> = {
   guide: GUIDE_ZH,
   updates: UPDATES_ZH,
   palette: PALETTE_ZH,
+  queue: QUEUE_ZH,
   relay: RELAY_ZH,
   dashboard: DASHBOARD_ZH,
   "runtime-move": RUNTIME_MOVE_ZH,
