@@ -81,7 +81,7 @@ export function createCore({ options, devices, preferences, usage, usageLogin, b
 
   const submitText = createSubmitText({ options, lastTyped, attachments, terminalAttach, SUBMIT_DEADLINE_MS, TYPED_SETTLE_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS, SUBMIT_DELAY_MS });
 
-  const { pending, holdPending, holdPendingPane, movePendingPane, drainPending, pendingFrames, queueFirstMessage, attached, closeConnection, reconcilePiDeliveries } = createPendingDelivery({ options, clients, attachments, sight, serialize, lastTyped, typedInto, submitText, authorizeSocket: (client) => authorizeSocket(client), clientSnapshot: () => clientSnapshot(), omo: { sessionOf: (paneId) => omo.sessionOf(paneId) }, queueHeld: (paneId, fresh) => queueHeld(paneId, fresh), SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, TYPED_SETTLE_MS });
+  const { pending, holdPending, holdPendingPane, movePendingPane, drainPending, pendingFrames, queueFirstMessage, cancelQueueMessage, onPromptAnswered, stopPending, attached, closeConnection, reconcilePiDeliveries } = createPendingDelivery({ options, clients, attachments, sight, serialize, lastTyped, typedInto, submitText, authorizeSocket: (client) => authorizeSocket(client), clientSnapshot: () => clientSnapshot(), omo: { sessionOf: (paneId) => omo.sessionOf(paneId) }, queueHeld: (paneId, fresh) => queueHeld(paneId, fresh), SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, TYPED_SETTLE_MS });
 
   // the watches read OpenCode's forms and omp's sessions into a state of their own: the route's entries, drafts and
   // lookups are its answers' (the route's drafts are only read, for the step an answer moved its card to)
@@ -125,7 +125,7 @@ export function createCore({ options, devices, preferences, usage, usageLogin, b
   let outputTimer: ReturnType<typeof setInterval> | undefined;
 
   return {
-    sidecar, serialize, settleAfterTyping, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, websocket, queueFirstMessage,
+    sidecar, serialize, settleAfterTyping, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, websocket, queueFirstMessage, cancelQueueMessage, onPromptAnswered,
     /** a message someone sent through Ovis still waits for the pane (runtime-move.ts) */
     holdsPending: (paneId: string): boolean => pending.holds(paneId),
     /** true: Claude Code's input box reads empty; false: text is in it or it cannot be read whole; null: an agent whose box Ovis cannot read */
@@ -147,6 +147,7 @@ export function createCore({ options, devices, preferences, usage, usageLogin, b
     /** `beforeTerminals` runs once the services are stopped and before the terminals close */
     stop(beforeTerminals: () => void): void {
       stopped = true;
+      stopPending();
       conversations.stop();
       promptWatch.stop();
       clearInterval(outputTimer);

@@ -1412,7 +1412,7 @@ export interface PromptRequestOptions {
   /** Each server owns its drafts and clears them when stopped. */
   openCodeState?: OpenCodePromptState;
   /** an answer reached the agent (a 2xx that sent it on, not a saved step or a navigation), for the daily active message's usage */
-  onAnswered?: () => void;
+  onAnswered?: (paneId: string) => void;
   /** how long an answer or a move may take, from its first read to its last key (ms); tests shorten it */
   answerDeadlineMs?: number;
   /** the look right before each key an answer or a move sends (beforeKey); tests stand in for it */
@@ -2297,7 +2297,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     // the wait for the form's next step only reads the pane: after the pane's turn, so a message
     // queued for it meanwhile is not held up behind the polls
     if (form.still !== undefined) await formMovedOn(body.pane_id, form.still, options.codexHome, options.openCodeStateDir);
-    if (response.ok && delivered) options.onAnswered?.();
+    if (response.ok && delivered) options.onAnswered?.(body.pane_id);
     await logAnswer(log, response);
     return response;
   } catch (error) {
