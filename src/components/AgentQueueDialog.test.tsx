@@ -425,6 +425,57 @@ describe("AgentQueueDialog", () => {
     }
   });
 
+  it("renders Needs you badge when a running task is blocked waiting on input, plus Agent exited failures", async () => {
+    const snapshot = makeSnapshot({
+      tasks: [
+        makeTask({
+          id: "t-needs",
+          folder: "/repo/wait",
+          title: "Needs input run",
+          prompt: "Reply with just: QUEUE OK",
+          status: "running",
+          needsInput: true,
+          terminal: "pane-needs",
+        }),
+        makeTask({
+          id: "t-plain",
+          folder: "/repo/run",
+          title: "Plain run",
+          prompt: "Work normally",
+          status: "running",
+          terminal: "pane-plain",
+        }),
+        makeTask({
+          id: "t-exited",
+          folder: "/repo/exit",
+          title: "Exited run",
+          prompt: "Exited task",
+          status: "failed",
+          terminal: "pane-exited",
+          error: "Agent exited",
+        }),
+      ],
+    });
+    const { spy } = mockQueueFetch(snapshot);
+    try {
+      await renderDialog({ snapshot });
+      const rows = renderer!.root.findAll((node) => node.type === "li");
+      expect(rows).toHaveLength(3);
+
+      expect(rows[0]!.props.className).toContain("is-running");
+      expect(rows[0]!.props.className).toContain("is-needs-input");
+      expect(textOf(rows[0]!.findByProps({ className: "badge queue-badge-needs" }))).toBe("Needs you");
+
+      expect(rows[1]!.props.className).not.toContain("is-needs-input");
+      expect(textOf(rows[1]!.findByProps({ className: "badge badge-working" }))).toBe("Running");
+
+      expect(textOf(rows[2]!.findByProps({ className: "badge badge-blocked" }))).toBe("Failed");
+      expect(textOf(rows[2]!.findByProps({ className: "queue-task-error" }))).toBe("Agent exited");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("hides all mutating controls when watching is true", async () => {
     const snapshot = makeSnapshot({
       tasks: [

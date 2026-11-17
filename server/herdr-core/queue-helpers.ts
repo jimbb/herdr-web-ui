@@ -2,16 +2,25 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { queueFolderName } from "../../shared/agent-queue.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
+import { displayWidth, secretPrompt } from "../../shared/secret-prompt.ts";
 import { canonicalProjectKey } from "../agent-queue-store.ts";
-import { agentPrompt, HerdrError, paneGet, sessionSnapshot, tabCreate, workspaceCreate } from "../herdr/client.ts";
-import { HcError, type HcConnection } from "./connection.ts";
+import { claudeRewindOpen } from "../claude-input.ts";
+import { stoppedAgentJob } from "../conversation.ts";
+import { codexOwnScreenOpen } from "../dialogs/codex.ts";
+import { agentPickerWaits, registry } from "../dialogs/registry.ts";
+import { paneProcessInfo, paneRead, sessionSnapshot, tabCreate, workspaceCreate } from "../herdr/client.ts";
+import { parseInteractivePrompt } from "../prompt.ts";
+import type { HcConnection } from "./connection.ts";
 import { coreConnection, coreTerminalEnv } from "./runtime.ts";
 import {
+  agentOf,
+  coreHost,
   isRecord,
   LAYOUT_DOC,
   onOtherMachine,
   OTHER_WORKSPACE_ID,
   SEEN_LABEL,
+  shownStatusOf,
   SPACE_LABEL,
   TAB_LABEL,
   TAB_NAME_LABEL,
@@ -155,119 +164,82 @@ function defaultFolderExists(path: string): boolean {
   return statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
-export interface DeliverQueuePromptDeps {
-  hc?: Pick<HcConnection, "call">;
-  paneGet?: typeof paneGet;
-  sendPrompt?: (paneId: string, text: string) => Promise<void>;
-  beforeSend?: () => void;
-  onRetry?: () => void;
-  timeoutMs?: number;
-  pollMs?: number;
-  settleMs?: number;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+const SHELL_NAME_RE = /(?:^|\/)-?(?:sh|bash|dash|zsh|fish|ksh|mksh|csh|tcsh|ash|nu)$/u;
+
+export interface QueuePaneProbeDeps {
+  paneProcessInfo?: typeof paneProcessInfo;
+  paneRead?: typeof paneRead;
+  stoppedAgentJob?: typeof stoppedAgentJob;
+  platform?: NodeJS.Platform;
 }
 
-const RETRYABLE_PROMPT_CODES = new Set(["agent_blocked", "blocked", "agent_not_ready", "agent_not_found"]);
+function shellAlone(info: Awaited<ReturnType<typeof paneProcessInfo>> | null): info is NonNullable<Awaited<ReturnType<typeof paneProcessInfo>>> & { shell_pid: number } {
+  if (!info || info.shell_pid == null) return false;
+  const fg = info.foreground_processes;
+  if (!fg || fg.length !== 1) return false;
+  const front = fg[0]!;
+  if (front.pid !== info.shell_pid) return false;
+  return SHELL_NAME_RE.test(front.name) && SHELL_NAME_RE.test(front.argv?.[0] ?? front.argv0 ?? front.name);
+}
 
 /**
- * Waits until the launched agent in `paneId` is live and ready (not blocked at a trust prompt or still
- * booting), then submits `text` via `agent.prompt`.
+ * Returns `true` only with positive proof that the launched agent exited back to a live shell
+ * (excluding Ctrl+Z suspended jobs and racey foreground transitions). Fail-closed (`false`) on
+ * errors, remote machines, Windows, or ambiguous states.
  */
-export async function deliverQueuePrompt(
-  paneId: string,
-  text: string,
-  deps: DeliverQueuePromptDeps = {},
-): Promise<void> {
-  const hc = deps.hc ?? coreConnection();
-  const readPane = deps.paneGet ?? paneGet;
-  const sendPrompt = deps.sendPrompt ?? ((id, msg) => agentPrompt(id, msg));
-  const timeoutMs = deps.timeoutMs ?? 30_000;
-  const pollMs = deps.pollMs ?? 250;
-  const settleMs = deps.settleMs ?? 1_500;
-  const now = deps.now ?? Date.now;
+export async function isQueuePaneAgentExited(
+  terminal: HcTerminal,
+  expectedAgent: string,
+  deps: QueuePaneProbeDeps = {},
+): Promise<boolean> {
+  const platform = deps.platform ?? process.platform;
+  if (terminal.state !== "live" || onOtherMachine(terminal.address) || platform === "win32") return false;
+  if (terminal.foreground && terminal.pid != null && terminal.foreground.pid !== terminal.pid) return false;
 
-  const start = now();
-  const deadline = start + timeoutMs;
-  const settleUntil = Math.min(deadline, start + settleMs);
-  let lastBlocked = false;
-  let lastAgent = false;
-  let seenStatus = false;
-  let lastRetryError: Error | null = null;
-
-  while (now() < deadline) {
-    let terminal: HcTerminal;
-    try {
-      terminal = await hc.call("terminal.get", { terminal: paneId }) as HcTerminal;
-    } catch (error) {
-      if ((error instanceof HcError && error.kind === "not_found") || (error instanceof HerdrError && error.code === "pane_not_found")) {
-        throw new Error(`Terminal ${paneId} no longer exists`);
-      }
-      throw error;
-    }
-
-    if (terminal.state !== "live") {
-      throw new Error(`Terminal ${paneId} ended before prompt delivery`);
-    }
-
-    if (terminal.status != null) seenStatus = true;
-    const statusState = terminal.status?.state;
-
-    let agentRunning = false;
-    try {
-      const pane = await readPane(paneId);
-      agentRunning = Boolean(pane.agent);
-    } catch (error) {
-      if (error instanceof HerdrError && error.code === "pane_not_found") {
-        throw new Error(`Terminal ${paneId} no longer exists`);
-      }
-    }
-
-    lastAgent = agentRunning;
-    lastBlocked = statusState === "blocked";
-
-    const readyByStatus =
-      statusState === "blocked" || statusState === "working"
-        ? false
-        : seenStatus
-          ? true
-          : now() >= settleUntil;
-
-    if (agentRunning && readyByStatus) {
-      deps.beforeSend?.();
-      try {
-        await sendPrompt(paneId, text);
-        return;
-      } catch (error) {
-        const code =
-          error instanceof HerdrError ? error.code
-            : error instanceof HcError ? error.kind
-              : "";
-        if (RETRYABLE_PROMPT_CODES.has(code)) {
-          deps.onRetry?.();
-          lastRetryError = error instanceof Error ? error : new Error(String(error));
-          if (code === "agent_blocked" || code === "blocked") lastBlocked = true;
-        } else {
-          throw error;
-        }
-      }
-    }
-
-    if (now() >= deadline) break;
-    const waitMs = Math.min(pollMs, Math.max(1, deadline - now()));
-    if (deps.sleep) await deps.sleep(waitMs);
-    else await Bun.sleep(waitMs);
+  const readProcessInfo = deps.paneProcessInfo ?? paneProcessInfo;
+  const stoppedJob = deps.stoppedAgentJob ?? stoppedAgentJob;
+  try {
+    const first = await readProcessInfo(terminal.address);
+    if (!shellAlone(first)) return false;
+    if (await stoppedJob(first.shell_pid, expectedAgent)) return false;
+    const second = await readProcessInfo(terminal.address);
+    return shellAlone(second) && second.shell_pid === first.shell_pid;
+  } catch {
+    return false;
   }
+}
 
-  if (lastBlocked) {
-    throw new Error("Agent is blocked waiting for interactive approval before prompt delivery");
+function maskedPromptAtAnyWidthLocal(screen: string): boolean {
+  const rows = screen.split(/\r?\n/u);
+  while (rows.length > 0 && !rows.at(-1)!.trim()) rows.pop();
+  const above = displayWidth(rows.at(-2)?.trimEnd() ?? "");
+  return [Infinity, ...(above > 0 ? [above, above + 1] : [])].some((columns) => secretPrompt(screen, columns) !== null);
+}
+
+/**
+ * Returns `true` when `terminal` is waiting on user input (OSC 7501 `blocked`, interactive menu/trust
+ * dialog, picker, Codex own screen, Claude rewind dialog, or masked secret prompt). Fail-closed (`false`)
+ * on RPC read errors.
+ */
+export async function isQueuePaneDialogBlocked(
+  terminal: HcTerminal,
+  expectedAgent?: string | null,
+  deps: QueuePaneProbeDeps = {},
+): Promise<boolean> {
+  if (terminal.state !== "live" || onOtherMachine(terminal.address)) return false;
+  if (shownStatusOf(terminal.status, terminal.turn, terminal.labels) === "blocked") return true;
+
+  const readScreen = deps.paneRead ?? paneRead;
+  try {
+    const { text: screen } = await readScreen({ paneId: terminal.address, source: "detection", format: "text" });
+    if (maskedPromptAtAnyWidthLocal(screen)) return true;
+    const agent = agentOf(terminal, coreHost(false, deps.platform ?? process.platform)) ?? expectedAgent ?? null;
+    if (agent === null) return false;
+    if (agent === "claude" && claudeRewindOpen(screen)) return true;
+    if (agent === "codex" && codexOwnScreenOpen(screen)) return true;
+    if (agentPickerWaits(agent, screen) || registry.waits(agent, screen)) return true;
+    return parseInteractivePrompt(agent, screen, null, true, [], null) !== null;
+  } catch {
+    return false;
   }
-  if (!lastAgent) {
-    throw new Error("Agent did not become ready before prompt delivery timed out");
-  }
-  throw new Error(
-    lastRetryError
-      ? `Prompt delivery timed out: ${lastRetryError.message}`
-      : "Prompt delivery timed out waiting for agent readiness",
-  );
 }

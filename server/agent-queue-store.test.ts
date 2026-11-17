@@ -180,9 +180,70 @@ describe("AgentQueueStore", () => {
     expect(requeued.startedAt).toBeNull();
     expect(requeued.finishedAt).toBeNull();
     expect(requeued.error).toBeNull();
+    expect(requeued.needsInput).toBeUndefined();
 
     store.deleteTask(task.id);
     expect(store.getDocument().tasks).toEqual([]);
+  });
+
+  it("tracks needsInput only on running tasks and clears it cleanly on transitions and sanitization", () => {
+    const dir = makeTempDir();
+    const queuePath = join(dir, QUEUE_FILE_NAME);
+    const store = new AgentQueueStore(dir, { home: () => "/home/tester" });
+    const queuedTask = store.createTask({ folder: "/proj/a", prompt: "Needs input test" });
+    expect(queuedTask.needsInput).toBeUndefined();
+
+    // Non-running tasks ignore setTaskNeedsInput.
+    let changes = 0;
+    const unsub = store.subscribe(() => { changes += 1; });
+    expect(store.setTaskNeedsInput(queuedTask.id, true)).toBeNull();
+    expect(changes).toBe(0);
+
+    // Running task accepts setTaskNeedsInput(true), is idempotent, and persists to disk.
+    store.markTaskRunning(queuedTask.id, "t-needs");
+    changes = 0;
+    const blocked = store.setTaskNeedsInput(queuedTask.id, true);
+    expect(blocked?.needsInput).toBe(true);
+    expect(changes).toBe(1);
+    expect(store.setTaskNeedsInput(queuedTask.id, true)?.needsInput).toBe(true);
+    expect(changes).toBe(1);
+
+    // Reloading retains needsInput on running tasks and strips stale needsInput on non-running tasks.
+    const reloaded = new AgentQueueStore(dir, { home: () => "/home/tester" });
+    expect(reloaded.getDocument().tasks[0]?.needsInput).toBe(true);
+
+    writeFileSync(
+      queuePath,
+      JSON.stringify({
+        version: 1,
+        settings: DEFAULT_QUEUE_SETTINGS,
+        tasks: [
+          { ...blocked, needsInput: true },
+          { ...queuedTask, id: "stale-queued", status: "queued", needsInput: true },
+          { ...queuedTask, id: "stale-failed", status: "failed", error: "err", needsInput: true },
+        ],
+      }),
+    );
+    const future = new Date(Date.now() + 5000);
+    utimesSync(queuePath, future, future);
+    expect(reloaded.syncIfChanged().changed).toBe(true);
+    const syncedTasks = reloaded.getDocument().tasks;
+    expect(syncedTasks[0]?.needsInput).toBe(true);
+    expect(syncedTasks[1]?.needsInput).toBeUndefined();
+    expect(syncedTasks[2]?.needsInput).toBeUndefined();
+
+    // Transitions clear needsInput.
+    expect(reloaded.setTaskNeedsInput(queuedTask.id, false)?.needsInput).toBeUndefined();
+    reloaded.setTaskNeedsInput(queuedTask.id, true);
+    expect(reloaded.markTaskRunning(queuedTask.id, "t-needs-2").needsInput).toBeUndefined();
+    reloaded.setTaskNeedsInput(queuedTask.id, true);
+    expect(reloaded.markTaskDone(queuedTask.id).needsInput).toBeUndefined();
+
+    const tFail = reloaded.createTask({ folder: "/proj/b", prompt: "Fail clears needsInput" });
+    reloaded.markTaskRunning(tFail.id, "t-fail");
+    reloaded.setTaskNeedsInput(tFail.id, true);
+    expect(reloaded.markTaskFailed(tFail.id, "Agent exited").needsInput).toBeUndefined();
+    unsub();
   });
 
   it("validates task fields and settings updates", () => {

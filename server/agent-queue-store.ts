@@ -262,6 +262,11 @@ function sanitizeTask(
       : "queued";
   if (rawStatus !== status) changed = true;
 
+  const needsInput = status === "running" && raw["needsInput"] === true;
+  if ((raw["needsInput"] !== undefined && raw["needsInput"] !== needsInput) || (!needsInput && "needsInput" in raw)) {
+    changed = true;
+  }
+
   const terminal = typeof raw["terminal"] === "string" && raw["terminal"].trim() !== "" ? raw["terminal"].trim() : null;
   if (raw["terminal"] !== terminal) changed = true;
 
@@ -284,6 +289,7 @@ function sanitizeTask(
       agent,
       hold,
       status,
+      ...(needsInput ? { needsInput: true } : {}),
       terminal,
       createdAt: createdRaw,
       startedAt: started.value,
@@ -502,6 +508,7 @@ export class AgentQueueStore {
         finishedAt: null,
         error: null,
       };
+      delete next.needsInput;
     }
 
     this.doc.tasks[index] = next;
@@ -632,6 +639,7 @@ export class AgentQueueStore {
       finishedAt: null,
       error: null,
     };
+    delete next.needsInput;
     this.doc.lastLaunchAt = atIso;
     this.replaceTask(next);
     return structuredClone(next);
@@ -644,6 +652,18 @@ export class AgentQueueStore {
     return structuredClone(next);
   }
 
+  /** Marks whether a `running` task is waiting on user input; a no-op if unchanged or not `running`. */
+  setTaskNeedsInput(id: string, needsInput: boolean): QueueTask | null {
+    const task = this.doc.tasks.find((candidate) => candidate.id === id);
+    if (!task || task.status !== "running") return null;
+    if (Boolean(task.needsInput) === needsInput) return structuredClone(task);
+    const next: QueueTask = { ...task };
+    if (needsInput) next.needsInput = true;
+    else delete next.needsInput;
+    this.replaceTask(next);
+    return structuredClone(next);
+  }
+
   markTaskDone(id: string, atIso = new Date(this.now()).toISOString()): QueueTask {
     const task = this.requireTask(id);
     const next: QueueTask = {
@@ -652,6 +672,7 @@ export class AgentQueueStore {
       finishedAt: atIso,
       error: null,
     };
+    delete next.needsInput;
     this.replaceTask(next);
     return structuredClone(next);
   }
@@ -665,6 +686,7 @@ export class AgentQueueStore {
       finishedAt: atIso,
       error: reason.trim() || "Task failed",
     };
+    delete next.needsInput;
     this.replaceTask(next);
     return structuredClone(next);
   }

@@ -149,7 +149,7 @@ const OTHER_MACHINE_FILES = /^\/api\/(?:fs\/|pane\/(?:files|docs|image)$|workspa
 
 export async function handleRequest(request: Request, ctx: ServerContext): Promise<Response | undefined> {
   const { options, hostname, token, bridgeToken, bootId, devices, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, voice, browserSnapshot, core, seen, piReader, orderSequence, agentQueue, clientConnectionLog, requestLog, portalStartupResult, portalStartup } = ctx.services;
-  const { sidecar, serialize, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
+  const { sidecar, serialize, push, alertWebhook, logPushError, omo, claudeAgents, opencodeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage, onPromptAnswered } = core;
   return requestLog.handle(request, async (headers) => {
   const startup = portalStartupResult ?? await portalStartup;
   if (!startup.ok) {
@@ -849,7 +849,19 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
 
   if (pathname.startsWith("/api/pane/prompt")) {
     try {
-      const response = await handlePromptRequest(request, url, { serialize, codexHome: options.codexHome, claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null, readOnly, openCodeStateDir: options.openCodeStateDir, openCodeState, onAnswered: () => options.telemetry?.tally("prompt_answers") });
+      const response = await handlePromptRequest(request, url, {
+        serialize,
+        codexHome: options.codexHome,
+        claudeTranscript: (paneId) => claudeAgents.sessionOf(paneId)?.path ?? null,
+        readOnly,
+        openCodeStateDir: options.openCodeStateDir,
+        openCodeState,
+        onAnswered: (paneId) => {
+          options.telemetry?.tally("prompt_answers");
+          onPromptAnswered(paneId);
+          agentQueue?.onPanePromptAnswered(paneId);
+        },
+      });
       if (response) return response;
     } catch (error) {
       return errorResponse(error);

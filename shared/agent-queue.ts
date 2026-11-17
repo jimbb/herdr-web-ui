@@ -19,6 +19,7 @@ export interface QueueTask {
   agent: string;
   hold: boolean;
   status: QueueTaskStatus;
+  needsInput?: boolean;
   terminal: string | null;
   createdAt: string;
   startedAt: string | null;
