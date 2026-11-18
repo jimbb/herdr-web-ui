@@ -5,6 +5,9 @@
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const SIDEBAR_KO: Record<string, string> = {
+  "Group by project": "프로젝트별로 묶기",
+  "Agents: {agents} · Tasks: {tasks}": "에이전트: {agents} · 작업: {tasks}",
+  "Queue": "대기열",
   "Pin agent": "에이전트 고정",
   "Unpin agent": "에이전트 고정 해제",
   "Lock agent": "에이전트 잠금",

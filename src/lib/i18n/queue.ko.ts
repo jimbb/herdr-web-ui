@@ -1,6 +1,6 @@
 /**
  * Korean for the keys only the agent queue files use:
- * components/AgentQueueDialog.tsx, lib/agentQueue.ts.
+ * components/AgentQueueDialog.tsx, components/InboxQueueRow.tsx, lib/agentQueue.ts.
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const QUEUE_KO: Record<string, string> = {
@@ -14,6 +14,8 @@ export const QUEUE_KO: Record<string, string> = {
   "Running|queue": "실행 중",
   "On hold": "보류 중",
   "Queued": "대기 중",
+  "Held": "보류 중",
+  "Actions for {task}": "{task} 작업",
   "Close agent queue": "에이전트 대기열 닫기",
   "Add queued task": "대기 작업 추가",
   "Edit queued task": "대기 작업 편집",

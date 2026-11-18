@@ -1,6 +1,6 @@
 /**
  * Japanese for the keys only the agent queue files use:
- * components/AgentQueueDialog.tsx, lib/agentQueue.ts.
+ * components/AgentQueueDialog.tsx, components/InboxQueueRow.tsx, lib/agentQueue.ts.
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const QUEUE_JA: Record<string, string> = {
@@ -14,6 +14,8 @@ export const QUEUE_JA: Record<string, string> = {
   "Running|queue": "実行中",
   "On hold": "保留中",
   "Queued": "待機中",
+  "Held": "保留中",
+  "Actions for {task}": "{task} の操作",
   "Close agent queue": "エージェントキューを閉じる",
   "Add queued task": "キューにタスクを追加",
   "Edit queued task": "キューのタスクを編集",

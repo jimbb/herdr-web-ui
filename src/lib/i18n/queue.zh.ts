@@ -1,6 +1,6 @@
 /**
  * Simplified Chinese for the keys only the agent queue files use:
- * components/AgentQueueDialog.tsx, lib/agentQueue.ts.
+ * components/AgentQueueDialog.tsx, components/InboxQueueRow.tsx, lib/agentQueue.ts.
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const QUEUE_ZH: Record<string, string> = {
@@ -14,6 +14,8 @@ export const QUEUE_ZH: Record<string, string> = {
   "Running|queue": "运行中",
   "On hold": "已挂起",
   "Queued": "排队中",
+  "Held": "已挂起",
+  "Actions for {task}": "{task} 的操作",
   "Close agent queue": "关闭 Agent 队列",
   "Add queued task": "添加排队任务",
   "Edit queued task": "编辑排队任务",

@@ -1,3 +1,6 @@
+/* The inbox mode's list (InboxList.tsx). On a phone it is the screen: one flat surface, round controls floating
+   at its top and a round button and a search pill at its foot, the rows scrolling under both. From 769px it is the
+   column beside the thread it opens (.is-wide), after the mode's rail (InboxRail.css), its controls in a top row. */
 .mode-inbox {
   --inbox-gutter: calc(var(--space-4) + var(--space-1) / 2);
   --inbox-inset: calc(var(--inbox-gutter) + var(--space-1));
@@ -61,6 +64,37 @@
   gap: var(--space-2);
 }
 
+.mode-inbox:not(.is-wide) .inbox-group-toggle {
+  margin-inline-start: auto;
+}
+
+.mode-inbox .inbox-group-toggle[aria-pressed="true"] {
+  background: var(--side-selected);
+  color: var(--text-strong);
+}
+
+.mode-inbox .inbox-group-head {
+  display: flex;
+  padding-inline: var(--space-3);
+}
+
+.mode-inbox .inbox-group-head > button {
+  min-width: 0;
+  height: var(--inbox-control);
+  padding-inline: var(--space-2);
+  font-size: var(--fs-sm);
+}
+
+.mode-inbox .inbox-group-head > button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What the connection has to say (Reconnecting…, then Connected for a moment), centred between a phone's two top
+   controls, on their centre line. It floats over the rows as they do, so it is drawn as they are: a small round
+   pill on the raised surface, with the hairline edge and the soft shadow, and a row that scrolls under it passes
+   under a thing of the page, not under a patch of the page's colour. It takes no press. */
 .mode-inbox .inbox-top > .inbox-connection {
   position: absolute;
   inset-block: 0;
@@ -81,6 +115,11 @@
   pointer-events: none;
 }
 
+.mode-inbox .inbox-top:has(> .inbox-add) > .inbox-connection {
+  max-inline-size: calc(100% - 2 * (var(--inbox-gutter) + 2 * (var(--inbox-control) + var(--space-2))));
+}
+
+/* with no More before it (nothing to offer), New workspace keeps the end corner */
 .mode-inbox .inbox-top > .inbox-add:first-child {
   margin-inline-start: auto;
 }
@@ -225,6 +264,42 @@
 
 .mode-inbox .inbox-item {
   position: relative;
+}
+
+.mode-inbox .inbox-project {
+  padding: var(--space-3) var(--inbox-inset) var(--space-1);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.mode-inbox .inbox-project h2 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: var(--fs-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mode-inbox .inbox-item[data-depth] {
+  --inbox-indent: var(--space-4);
+  margin-inline-start: var(--inbox-indent);
+}
+
+.mode-inbox .inbox-item[data-depth="2"] {
+  margin-inline-start: calc(2 * var(--inbox-indent));
+}
+
+.mode-inbox .inbox-item[data-depth]::before {
+  position: absolute;
+  inset-block-start: calc(50% - var(--space-2));
+  inset-inline-start: calc(var(--inbox-inset) - var(--inbox-indent));
+  width: var(--space-2);
+  height: var(--space-2);
+  border-inline-start: var(--hairline) solid var(--border-strong);
+  border-block-end: var(--hairline) solid var(--border-strong);
+  content: "";
+  pointer-events: none;
 }
 
 .mode-inbox .inbox-row {
@@ -403,6 +478,15 @@
   white-space: nowrap;
 }
 
+.mode-inbox .inbox-queue-tag {
+  padding-inline: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+/* how long the agent has been in its state, at the end of the name's line */
 .mode-inbox .inbox-time {
   flex: 0 0 auto;
   color: var(--text-dim);
@@ -633,6 +717,12 @@
   min-height: var(--row-h);
   padding: var(--space-2);
   border-radius: var(--radius-lg);
+}
+
+.mode-inbox.is-wide .inbox-project { padding-inline: var(--space-2); }
+
+.mode-inbox.is-wide .inbox-item[data-depth]::before {
+  inset-inline-start: calc(var(--space-2) - var(--inbox-indent));
 }
 
 @media (hover: hover) {

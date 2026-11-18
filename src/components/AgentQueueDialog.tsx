@@ -67,6 +67,7 @@ import { Toggle } from "./SettingsControls.tsx";
 export interface AgentQueueDialogProps {
   open: boolean;
   snapshot: QueueSnapshot | null;
+  initialTaskId?: string;
   watching?: boolean;
   defaultFolder?: string | null;
   onClose: () => void;
@@ -125,6 +126,7 @@ function statusBadgeClass(task: QueueTask): string {
 export function AgentQueueDialog({
   open,
   snapshot,
+  initialTaskId,
   watching = false,
   defaultFolder = null,
   onClose,
@@ -170,6 +172,7 @@ export function AgentQueueDialog({
   const folderInputRef = useRef<HTMLInputElement>(null);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const initialTask = useRef<HTMLLIElement>(null);
   const inFlight = useRef(false);
   const busy = busyKey !== null;
 
@@ -190,6 +193,9 @@ export function AgentQueueDialog({
   };
 
   const surface = useFocusTrap<HTMLDivElement>(open, { initialFocus: closeButtonRef });
+  useEffect(() => {
+    if (open) initialTask.current?.scrollIntoView({ block: "nearest" });
+  }, [open, initialTaskId]);
   useSheetSwipe(surface, busy ? null : onClose);
   usePhoneSheetBack(() => {
     if (busy) return false;
@@ -815,7 +821,7 @@ export function AgentQueueDialog({
                         const isLast = index === group.tasks.length - 1;
 
                         return (
-                          <li key={task.id} className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}>
+                          <li key={task.id} ref={task.id === initialTaskId ? initialTask : undefined} className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}>
                             <div className="queue-task-top">
                               <span className={statusBadgeClass(task)}>{taskStatusLabel(task)}</span>
                               <span className="queue-task-agent" title={agentName(task.agent)}>

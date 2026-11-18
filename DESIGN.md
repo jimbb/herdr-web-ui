@@ -2224,6 +2224,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   Devices and PCs keeps its Change PC row. A PC's own app never shows it: its sidebar lists its PCs itself.
 
 ### Inbox mode (`.mode-inbox`, `.inbox-rail`, `.thread-title`, `.thread-top`)
+- **Group by project** is a device choice in the Inbox head. State order is the default, with queued
+  work between working and done. Project sections follow the [Codex app's project thread lists](https://openai.com/index/introducing-the-codex-app/):
+  one heading per workspace, with its linked worktrees folded as in Ovis's sidebar. Agent families
+  keep their urgency order inside a project, followed by its queue tasks. A visible helper uses
+  the sidebar's indented tree treatment and reads as a top-level row if its parent is filtered away.
+  Queue tasks open their entry in the Agent Queue dialog; running ones are marked on their agent rows.
 - The agent inbox is a mode of the app: the list of agents and the thread a row opens, in the
   shell's place, on a phone and on a desktop (lib/inboxMode.ts, InboxList.tsx, InboxRail.tsx,
   InboxMode.tsx, lib/agentInbox.ts, lib/useInbox.ts). Its address says so (`?app=inbox`, a parameter

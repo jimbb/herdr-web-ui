@@ -5,6 +5,9 @@
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const SIDEBAR_JA: Record<string, string> = {
+  "Group by project": "プロジェクトでまとめる",
+  "Agents: {agents} · Tasks: {tasks}": "エージェント：{agents} · タスク：{tasks}",
+  "Queue": "キュー",
   "Pin agent": "エージェントを固定",
   "Unpin agent": "エージェントの固定を解除",
   "Lock agent": "エージェントをロック",
