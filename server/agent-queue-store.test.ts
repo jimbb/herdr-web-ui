@@ -157,6 +157,35 @@ describe("AgentQueueStore", () => {
     expect(store.getDocument().tasks.map((task) => task.id)).toEqual([a1.id, b1.id, a2.id, a3.id]);
   });
 
+  it("reorders queued tasks up and down across non-queued tasks in the same folder", () => {
+    const dir = makeTempDir();
+    const store = new AgentQueueStore(dir, { home: () => "/home/tester" });
+    const done1 = store.createTask({ folder: "/proj/a", prompt: "Done 1", title: "Done 1" });
+    store.markTaskDone(done1.id);
+    const q1 = store.createTask({ folder: "/proj/a", prompt: "Q1", title: "Q1" });
+    const doneBetween = store.createTask({ folder: "/proj/a", prompt: "Done 2", title: "Done 2" });
+    store.markTaskFailed(doneBetween.id, "Exited");
+    const q2 = store.createTask({ folder: "/proj/a", prompt: "Q2", title: "Q2" });
+    const running = store.createTask({ folder: "/proj/a", prompt: "Run", title: "Run" });
+    store.markTaskRunning(running.id, "t1");
+
+    // Moving q1 up at the start of the queued slice is a no-op (does not swap with done1).
+    store.reorder({ id: q1.id, direction: "up" });
+    expect(store.getDocument().tasks.map((task) => task.id)).toEqual([done1.id, q1.id, doneBetween.id, q2.id, running.id]);
+
+    // Moving q2 up swaps directly with q1 across doneBetween.
+    store.reorder({ id: q2.id, direction: "up" });
+    expect(store.getDocument().tasks.map((task) => task.id)).toEqual([done1.id, q2.id, doneBetween.id, q1.id, running.id]);
+
+    // Moving q1 down at the end of the queued slice is a no-op (does not swap with running).
+    store.reorder({ id: q1.id, direction: "down" });
+    expect(store.getDocument().tasks.map((task) => task.id)).toEqual([done1.id, q2.id, doneBetween.id, q1.id, running.id]);
+
+    // Moving q2 down swaps back with q1.
+    store.reorder({ id: q2.id, direction: "down" });
+    expect(store.getDocument().tasks.map((task) => task.id)).toEqual([done1.id, q1.id, doneBetween.id, q2.id, running.id]);
+  });
+
   it("enforces running task edit/delete constraints and supports requeuing finished/failed tasks", () => {
     const dir = makeTempDir();
     const store = new AgentQueueStore(dir, { home: () => "/home/tester" });

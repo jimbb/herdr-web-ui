@@ -45,6 +45,7 @@ import {
   describeQueueGate,
   groupQueueTasksByFolder,
   isQueueGateWaiting,
+  orderQueueGroupsForDisplay,
   parseQueueSettingsDraft,
   queueBadgeCounts,
   queueFolderSuggestions,
@@ -418,7 +419,7 @@ export function AgentQueueDialog({
 
   const gate = snapshot?.gate ?? null;
   const settings = snapshot?.settings ?? DEFAULT_QUEUE_SETTINGS;
-  const groups = groupQueueTasksByFolder(snapshot?.tasks ?? []);
+  const groups = orderQueueGroupsForDisplay(groupQueueTasksByFolder(snapshot?.tasks ?? []));
   const waiting = gate !== null && isQueueGateWaiting(gate.status);
   const pickerAgents = mergeAgentsWithSelected(agents, agent);
 
@@ -789,7 +790,12 @@ export function AgentQueueDialog({
               </div>
             ) : (
               <div className="queue-groups">
-                {groups.map((group) => (
+                {groups.map((group) => {
+                  const queuedTasks = group.tasks.filter((candidate) => candidate.status === "queued");
+                  const firstQueuedId = queuedTasks[0]?.id ?? null;
+                  const lastQueuedId = queuedTasks[queuedTasks.length - 1]?.id ?? null;
+
+                  return (
                   <section key={group.folder} className="queue-project-card">
                     <header className="queue-project-header">
                       <div className="queue-project-title">
@@ -813,12 +819,12 @@ export function AgentQueueDialog({
                     </header>
 
                     <ul className="queue-task-list">
-                      {group.tasks.map((task, index) => {
+                      {group.tasks.map((task) => {
                         const isExpanded = expandedPrompts.has(task.id);
                         const hasLongPrompt = task.prompt.length > 140 || task.prompt.split(/\r?\n/).length > 3;
                         const canStart = task.status === "queued" && !watching && !busy && group.runningTask === null;
-                        const isFirst = index === 0;
-                        const isLast = index === group.tasks.length - 1;
+                        const isFirst = task.id === firstQueuedId;
+                        const isLast = task.id === lastQueuedId;
 
                         return (
                           <li key={task.id} ref={task.id === initialTaskId ? initialTask : undefined} className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}>
@@ -943,7 +949,8 @@ export function AgentQueueDialog({
                       })}
                     </ul>
                   </section>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

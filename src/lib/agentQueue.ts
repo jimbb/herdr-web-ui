@@ -79,6 +79,61 @@ export function groupQueueTasksByFolder(tasks: readonly QueueTask[]): QueueProje
   return [...byFolder.values()];
 }
 
+function queueTaskDisplayRank(task: QueueTask): number {
+  switch (task.status) {
+    case "running":
+      return task.needsInput ? 0 : 1;
+    case "queued":
+      return 2;
+    case "failed":
+      return 3;
+    case "done":
+      return 4;
+  }
+}
+
+function queueGroupDisplayRank(tasks: readonly QueueTask[]): number {
+  let rank = 5;
+  for (const task of tasks) {
+    let taskRank: number;
+    switch (task.status) {
+      case "running":
+        taskRank = task.needsInput ? 0 : 1;
+        break;
+      case "queued":
+        taskRank = task.hold ? 3 : 2;
+        break;
+      case "failed":
+        taskRank = 4;
+        break;
+      case "done":
+        taskRank = 5;
+        break;
+    }
+    if (taskRank < rank) rank = taskRank;
+    if (rank === 0) break;
+  }
+  return rank;
+}
+
+/**
+ * Orders project groups and tasks for Agent Queue display so active and idle/queued work stay at the
+ * top while finished tasks sink below, preserving queue order among queued tasks and first-seen
+ * folder order on ties.
+ */
+export function orderQueueGroupsForDisplay(groups: readonly QueueProjectGroup[]): QueueProjectGroup[] {
+  return groups
+    .map((group) => {
+      const tasks = [...group.tasks].sort((a, b) => queueTaskDisplayRank(a) - queueTaskDisplayRank(b));
+      return {
+        ...group,
+        tasks,
+        runningTask: tasks.find((task) => task.status === "running") ?? null,
+      };
+    })
+    .sort((a, b) => queueGroupDisplayRank(a.tasks) - queueGroupDisplayRank(b.tasks));
+}
+
 export function inboxQueueState(t: Translate, task?: QueueTask): string {
   return task?.status === "failed" ? t("Failed") : task?.hold ? t("Held") : t("Queued");
 }
