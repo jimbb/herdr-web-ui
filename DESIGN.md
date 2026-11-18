@@ -2648,7 +2648,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   buttons, the column's
   resize grip, and the thread. Closing an agent from its row's close button by keyboard moves focus
   to the nearest surviving online row (or the list's section when none remain or when closed by
-  pointer). The rail's Agent inbox gives the focus to the list's section,
+  pointer); closing the open thread from its More menu, command palette, or Close pane shortcut
+  returns to the list (`InboxUnchosen` beside the list on a wide window) with focus on the list's
+  section instead of the closing row. The rail's Agent inbox gives the focus to the list's section,
   as an opening does, and the list of PCs gives it back to its button when it closes. Back to Ovis takes the control that was pressed away with the mode's
   shell: a focus left nowhere goes to the classic header's workspace-list toggle (the drawer's
   on a phone, the sidebar's from 769px), as it does whenever the control that held it is gone
@@ -2658,14 +2660,25 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   Ovis**, **Search panes and actions** (the command palette: the mode's shell has no button for
   it, and a touch screen no shortcut), **Alerts**, **Settings**. In a phone's thread also,
   between the first two and the last two, the next waiting agent, Find, **Browse files**,
-  **Copy link** and what the pane's menu adds for what it shows (Search conversation, the
-  mirror's width, unsent text), under More's header of the pane's title, place and path, whose fixed lines never scroll there:
+  **Copy link**, what the pane's menu adds for what it shows (Search conversation, the
+  mirror's width, unsent text), and **Close pane** last in that thread group (marked danger after
+  a divider, before a divider that separates it from **Alerts** and **Settings** — matching the
+  header More menus in the Claude, ChatGPT/Codex, and T3 Code apps where destructive close lives
+  at the bottom of the menu behind a separator rather than as an inline header button, rebuilt
+  natively), under More's header of the pane's title, place and path, whose fixed lines never
+  scroll there:
   only a path longer than six lines scrolls, in its own lines (`.header-more-crumb.is-inbox`; the
   classic app's header scrolls as a whole). On a
   wide window the column has no More: Back to Ovis, Alerts and Settings are buttons of the rail,
   each in that one place, and the one More, over the pane, holds **Search panes and actions**
-  (the rail draws no magnifier, and a touch screen has no shortcut) and then the thread's items.
-  With the list alone, that More holds **Search panes and actions** alone: the palette's one way
+  (the rail draws no magnifier, and a touch screen has no shortcut) and then the thread's items,
+  ending with **Close pane** (danger, after a divider). Thread More uses **Close pane** (the
+  shared wording in `PaneCanvas`, `PaneCloseConfirm`, and the command palette — matching `Close
+  pane` across Ovis) rather than "Close agent", applies the same eligibility and confirmation rules
+  as the row button (`lib/inboxThreadClose.ts`, `PaneCloseConfirm`; omitted for watching devices,
+  offline PCs, and locked pinned agents), shows immediate close errors in `.thread-close-error`,
+  and returns to the list (`InboxUnchosen` on wide) once closed. With the list alone, that More
+  holds **Search panes and actions** alone: the palette's one way
   there for a pointer or a finger. A More whose button leaves the screen closes with it: the system Back
   from a wide thread takes the pane's More away, and its open menu goes too (lib/moreMenu.ts).
 - What More counts in the mode. Over a phone's thread its dot and its name count the sessions
@@ -6263,9 +6276,12 @@ until then the card's hairline is its edge in light.
   for the pane steps.
   Close pane (a shortcut and a palette row, #3286) follows iTerm2's Close, which ends the current
   split pane, with no default key: that close's ⌘W (Ctrl+W) closes the browser tab and Record
-  refuses it, as its Settings row says. It runs the selected pane's menu Close itself, so a busy
-  pane or a workspace's last one asks first, and a locked one, a watching device and the setup guide
-  have no Close pane at all. One close per press (a held key's repeats close nothing), and none while
+  refuses it, as its Settings row says. In the classic app it runs the selected pane's menu Close
+  itself, and in Inbox mode it closes the open thread via `lib/inboxThreadClose.ts` and returns to
+  the list (while staying withheld when the inbox list is shown): in both places a busy pane or a
+  workspace's last one asks first, and a locked one, a disconnected PC (in Inbox mode), a watching
+  device and the setup guide have no Close pane at all. One close per press (a held key's repeats
+  close nothing), and none while
   a dialog, sheet or menu, its own confirmation included, is open, or while the message box's slash
   or file suggestions are; the palette opened over another dialog lists no Close pane. A second
   close in the same workspace waits until the roster has dropped the first, so it never takes the

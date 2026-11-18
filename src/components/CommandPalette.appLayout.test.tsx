@@ -131,6 +131,17 @@ describe("the command palette on a PC the Herdr app lays out", () => {
     for (const row of SHELL_ROWS) expect(classic).toContain(row);
   });
 
+  it("lists Close pane in inbox mode when App offers it for the open thread, and omits it when closePane is null", async () => {
+    let closes = 0;
+    const offered = actionsOf(TUI, { closePane: () => { closes += 1; } });
+    expect(await rows(TUI, "p1", ">close pane", offered, snapshot, true, true)).toEqual(["Close pane"]);
+    await act(async () => renderer!.root.find((node) => node.props.id === "palette-item-0").props.onClick());
+    expect(closes).toBe(1);
+    expect(await rows(TUI, "p1", ">close pane", actionsOf(TUI, { closePane: null }), snapshot, true, true)).toEqual([]);
+    (document as unknown as { querySelectorAll: () => unknown[] }).querySelectorAll = () => [{}];
+    expect(await rows(TUI, "p1", ">close pane", offered, snapshot, true, true)).toEqual([]);
+  });
+
   it("lists the way into the agent inbox where it is offered, and the way back while in it", async () => {
     const went: string[] = [];
     expect(await rows(TUI, "p1", ">inbox")).toEqual([]);
