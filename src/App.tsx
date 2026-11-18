@@ -966,7 +966,7 @@ export function App() {
     ...(foldFind ? [] : paneMoreItems.filter((item) => item.id === "search-conversation")),
     ...fromMore("files"), ...fromMore("copy-link"),
     ...paneMoreItems.filter((item) => item.id === "mirror-width" || item.id === "recover-unsent"),
-  ], threadClose.offered ? { label: t("Close pane"), run: threadClose.request } : null);
+  ], threadClose.listed ? { label: t("Close pane"), run: threadClose.request, disabled: !threadClose.offered } : null);
   // The way out first on a phone, whose shell has no drawer or sidebar to leave by (a wide window's is the mark at
   // its rail's top, and no More there says it). The app's own mark stands for it wherever it is drawn. Then the
   // palette, as near the top as in the classic More and for its reason: a phone's shell has no palette button, and
