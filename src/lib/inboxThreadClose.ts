@@ -34,11 +34,12 @@ export function canCloseInboxThread(state: ThreadCloseEligibility): boolean {
 
 export function buildModeThreadItems(
   baseItems: readonly RowMenuItem[],
-  close: { label: string; run: () => void } | null,
+  close: { label: string; run: () => void; disabled?: boolean } | null,
 ): RowMenuItem[] {
   const items = baseItems.map((item) => ({ ...item, divider: false }));
   if (close === null) return items;
-  return [...items, { id: "close", label: close.label, icon: X, danger: true, divider: true, run: close.run }];
+  // greyed, not gone, while the machine reconnects: a phone's menu keeps its shape through a dropped socket
+  return [...items, { id: "close", label: close.label, icon: X, danger: true, divider: true, disabled: close.disabled === true, run: close.run }];
 }
 
 export interface ModeMoreSections {
@@ -79,6 +80,8 @@ export interface UseInboxThreadCloseOptions {
 
 export interface InboxThreadCloseController {
   offered: boolean;
+  /** offered but for the connection: the menu lists Close (disabled) while the machine reconnects */
+  listed: boolean;
   closing: ClosingPane | null;
   error: UserError | null;
   clearError: () => void;
@@ -108,7 +111,7 @@ export function useInboxThreadClose({
   const [error, setError] = useState<UserError | null>(null);
   const closedKeyRef = useRef<string | null>(null);
 
-  const offered = canCloseInboxThread({
+  const eligibility = {
     inMode,
     inboxShown,
     guideShown,
@@ -116,7 +119,9 @@ export function useInboxThreadClose({
     machineConnected: selectedMachine?.state === "connected",
     paneLocked: selectedPane !== null && paneLocked(selectedMachineId, selectedPane.pane_id),
     hasPane: selectedPane !== null,
-  });
+  };
+  const offered = canCloseInboxThread(eligibility);
+  const listed = canCloseInboxThread({ ...eligibility, machineConnected: true });
 
   const threadKey = inMode && !inboxShown && selectedPane !== null
     ? sidebarPinKey(selectedMachineId, selectedPane.pane_id)
@@ -205,6 +210,7 @@ export function useInboxThreadClose({
 
   return {
     offered,
+    listed,
     closing,
     error,
     clearError,

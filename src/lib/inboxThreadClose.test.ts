@@ -70,6 +70,9 @@ describe("buildModeThreadItems and buildModeMoreItems", () => {
       ["close", true, true],
     ]);
 
+    const reconnecting = buildModeThreadItems(base, { label: "Close pane", run: () => {}, disabled: true });
+    expect(reconnecting.find((item) => item.id === "close")?.disabled).toBe(true);
+    expect(withClose.find((item) => item.id === "close")?.disabled).toBe(false);
     const withoutClose = buildModeThreadItems(base, null);
     expect(withoutClose.map((item) => [item.id, item.divider === true])).toEqual([
       ["files", false],
@@ -224,6 +227,8 @@ describe("useInboxThreadClose", () => {
 
     await h.update(base({ selectedMachine: offline, machines: [offline] }));
     expect(h.get().offered).toBe(false);
+    // still listed, greyed, while the machine reconnects
+    expect(h.get().listed).toBe(true);
 
     await h.update(base({ inboxShown: true }));
     expect(h.get().offered).toBe(false);

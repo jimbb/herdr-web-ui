@@ -840,7 +840,7 @@ export function App() {
     ...(foldFind ? [] : paneMoreItems.filter((item) => item.id === "search-conversation")),
     ...fromMore("files"), ...fromMore("copy-link"),
     ...paneMoreItems.filter((item) => item.id === "mirror-width" || item.id === "recover-unsent"),
-  ], threadClose.offered ? { label: t("Close pane"), run: threadClose.requestFromMenu } : null);
+  ], threadClose.listed ? { label: t("Close pane"), run: threadClose.requestFromMenu, disabled: !threadClose.offered } : null);
   const modeLeadItems: RowMenuItem[] = [
     // a phone's way to another PC stays first in the inbox mode too
     ...fromMore("add-pc"),
