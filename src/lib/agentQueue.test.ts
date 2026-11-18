@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { DEFAULT_QUEUE_SETTINGS, type QueueGateState, type QueueSnapshot, type QueueTask } from "../../shared/agent-queue.ts";
 import { translate } from "./i18n.ts";
 import {
+  RECENT_DONE_LIMIT,
   describeQueueGate,
   groupQueueTasksByFolder,
   isQueueGateWaiting,
@@ -9,6 +10,8 @@ import {
   parseQueueSettingsDraft,
   queueBadgeCounts,
   queueFolderSuggestions,
+  sortDoneQueueTasks,
+  splitQueueTasksForDisplay,
 } from "./agentQueue.ts";
 
 function makeTask(overrides: Partial<QueueTask> & { id: string }): QueueTask {
@@ -105,6 +108,34 @@ describe("agentQueue UI helpers", () => {
       "run-queued",
       "run-now",
     ]);
+  });
+
+  it("splits active project groups from recent-first done runs", () => {
+    expect(RECENT_DONE_LIMIT).toBe(3);
+    const rawTasks = [
+      makeTask({ id: "done-only-1", folder: "/repo/done-only", status: "done", finishedAt: "2026-11-18T01:00:00.000Z" }),
+      makeTask({ id: "q-failed", folder: "/repo/beta", status: "failed" }),
+      makeTask({ id: "done-tied-older", folder: "/repo/alpha", status: "done", createdAt: "2026-11-18T02:00:00.000Z" }),
+      makeTask({ id: "q-alpha", folder: "/repo/alpha", status: "queued" }),
+      makeTask({ id: "done-tied-newer", folder: "/repo/alpha", status: "done", createdAt: "2026-11-18T02:00:00.000Z" }),
+      makeTask({ id: "done-started-only", folder: "/repo/beta", status: "done", startedAt: "2026-11-18T03:00:00.000Z" }),
+      makeTask({ id: "done-newest", folder: "/repo/alpha", status: "done", finishedAt: "2026-11-18T04:00:00.000Z" }),
+      makeTask({ id: "run-beta", folder: "/repo/beta", status: "running", terminal: "t1" }),
+    ];
+    const { activeGroups, doneTasks } = splitQueueTasksForDisplay(rawTasks);
+
+    expect(activeGroups.map((g) => g.folder)).toEqual(["/repo/beta", "/repo/alpha"]);
+    expect(activeGroups[0]!.tasks.map((t) => t.id)).toEqual(["run-beta", "q-failed"]);
+    expect(activeGroups[1]!.tasks.map((t) => t.id)).toEqual(["q-alpha"]);
+
+    expect(doneTasks.map((t) => t.id)).toEqual([
+      "done-newest",
+      "done-started-only",
+      "done-tied-newer",
+      "done-tied-older",
+      "done-only-1",
+    ]);
+    expect(sortDoneQueueTasks(rawTasks).map((t) => t.id)).toEqual(doneTasks.map((t) => t.id));
   });
 
   it("computes badge counts and paused state", () => {

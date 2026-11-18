@@ -2,6 +2,8 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, ty
 import {
   ArrowDown,
   ArrowUp,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ExternalLink,
   FolderOpen,
@@ -42,13 +44,13 @@ import {
   updateQueueTask,
 } from "../lib/api.ts";
 import {
+  RECENT_DONE_LIMIT,
   describeQueueGate,
-  groupQueueTasksByFolder,
   isQueueGateWaiting,
-  orderQueueGroupsForDisplay,
   parseQueueSettingsDraft,
   queueBadgeCounts,
   queueFolderSuggestions,
+  splitQueueTasksForDisplay,
   type QueueSettingsDraft,
 } from "../lib/agentQueue.ts";
 import { useT } from "../lib/i18n.ts";
@@ -145,6 +147,8 @@ export function AgentQueueDialog({
   const minMemId = useId();
   const maxWorkingId = useId();
   const cooldownId = useId();
+  const doneHeadingId = useId();
+  const doneListId = useId();
   const { fetchAgentKinds } = useMachineApi();
 
   const [loading, setLoading] = useState(false);
@@ -169,13 +173,18 @@ export function AgentQueueDialog({
   const [formError, setFormError] = useState<string | null>(null);
   const [browsing, setBrowsing] = useState(false);
   const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(() => new Set());
+  const [doneExpanded, setDoneExpanded] = useState(false);
 
   const folderInputRef = useRef<HTMLInputElement>(null);
   const promptInputRef = useRef<HTMLTextAreaElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const initialTask = useRef<HTMLLIElement>(null);
+  const autoExpandedTaskRef = useRef<string | null>(null);
+  const scrolledTaskRef = useRef<string | null>(null);
   const inFlight = useRef(false);
   const busy = busyKey !== null;
+
+  const { activeGroups, doneTasks } = splitQueueTasksForDisplay(snapshot?.tasks ?? []);
 
   const showFolderEnd = (): void => {
     const field = folderInputRef.current;
@@ -195,8 +204,25 @@ export function AgentQueueDialog({
 
   const surface = useFocusTrap<HTMLDivElement>(open, { initialFocus: closeButtonRef });
   useEffect(() => {
-    if (open) initialTask.current?.scrollIntoView({ block: "nearest" });
-  }, [open, initialTaskId]);
+    if (!open || !initialTaskId || autoExpandedTaskRef.current === initialTaskId) return;
+    if (doneTasks.slice(RECENT_DONE_LIMIT).some((task) => task.id === initialTaskId)) {
+      autoExpandedTaskRef.current = initialTaskId;
+      setDoneExpanded(true);
+    }
+  }, [open, initialTaskId, doneTasks]);
+
+  useEffect(() => {
+    if (!open) {
+      scrolledTaskRef.current = null;
+      return;
+    }
+    if (!initialTaskId || scrolledTaskRef.current === initialTaskId) return;
+    if (initialTask.current !== null) {
+      scrolledTaskRef.current = initialTaskId;
+      initialTask.current.scrollIntoView({ block: "nearest" });
+    }
+  }, [open, initialTaskId, doneExpanded, snapshot]);
+
   useSheetSwipe(surface, busy ? null : onClose);
   usePhoneSheetBack(() => {
     if (busy) return false;
@@ -224,6 +250,8 @@ export function AgentQueueDialog({
       setEditor(null);
       setBrowsing(false);
       setSettingsOpen(false);
+      setDoneExpanded(false);
+      autoExpandedTaskRef.current = null;
       setFormError(null);
       setSettingsError(null);
       return;
@@ -419,9 +447,10 @@ export function AgentQueueDialog({
 
   const gate = snapshot?.gate ?? null;
   const settings = snapshot?.settings ?? DEFAULT_QUEUE_SETTINGS;
-  const groups = orderQueueGroupsForDisplay(groupQueueTasksByFolder(snapshot?.tasks ?? []));
   const waiting = gate !== null && isQueueGateWaiting(gate.status);
   const pickerAgents = mergeAgentsWithSelected(agents, agent);
+  const visibleDoneTasks = doneExpanded ? doneTasks : doneTasks.slice(0, RECENT_DONE_LIMIT);
+  const hasMoreDone = doneTasks.length > RECENT_DONE_LIMIT;
 
   const taskStatusLabel = (task: QueueTask): string => {
     switch (task.status) {
@@ -430,6 +459,152 @@ export function AgentQueueDialog({
       case "failed": return t("Failed");
       case "queued": return task.hold ? t("On hold") : t("Queued");
     }
+  };
+
+  const renderTaskRow = (
+    task: QueueTask,
+    opts: { inDoneCard: boolean; runningTask: QueueTask | null; firstQueuedId: string | null; lastQueuedId: string | null },
+  ) => {
+    const isExpanded = expandedPrompts.has(task.id);
+    const title = task.title || queueTaskTitleFallback(task.prompt);
+    const hasLongPrompt = task.prompt.length > 140 || task.prompt.split(/\r?\n/).length > 3;
+    const showPrompt = !opts.inDoneCard || hasLongPrompt || task.prompt.trim() !== title.trim();
+    const canStart = task.status === "queued" && !watching && !busy && opts.runningTask === null;
+    const isFirst = task.id === opts.firstQueuedId;
+    const isLast = task.id === opts.lastQueuedId;
+    const folderLabel = queueFolderName(task.folder);
+    const folderPath = normalizeQueueFolder(task.folder);
+
+    return (
+      <li
+        key={task.id}
+        ref={task.id === initialTaskId ? initialTask : undefined}
+        className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}
+      >
+        <div className="queue-task-top">
+          {opts.inDoneCard ? (
+            <span className="pill queue-done-project" title={folderPath}>{folderLabel}</span>
+          ) : (
+            <span className={statusBadgeClass(task)}>{taskStatusLabel(task)}</span>
+          )}
+          <span className="queue-task-agent" title={agentName(task.agent)}>
+            <AgentMark agent={task.agent} size={15} />
+            <span>{agentName(task.agent)}</span>
+          </span>
+          <strong className="queue-task-title">{title}</strong>
+        </div>
+
+        {showPrompt && (
+          <p className={`queue-task-prompt${isExpanded ? " is-expanded" : ""}`}>{task.prompt}</p>
+        )}
+        {hasLongPrompt && (
+          <button
+            type="button"
+            className="queue-prompt-toggle"
+            onClick={() => togglePromptExpanded(task.id)}
+          >
+            {isExpanded ? t("Hide full prompt") : t("Show full prompt")}
+          </button>
+        )}
+
+        {task.error && <p className="queue-task-error" role="status">{task.error}</p>}
+
+        <div className="queue-task-actions">
+          {task.terminal && (
+            <button
+              type="button"
+              className="btn queue-open-tab"
+              disabled={busy}
+              onClick={() => onOpenPane(task.terminal!)}
+            >
+              <ExternalLink aria-hidden="true" />
+              <span>{t("Open tab")}</span>
+            </button>
+          )}
+
+          {!watching && task.status === "queued" && (
+            <>
+              <button
+                type="button"
+                className="btn"
+                disabled={!canStart}
+                title={opts.runningTask !== null ? t("Another task is already running in this project") : t("Start now")}
+                onClick={() => void runMutation(`start:${task.id}`, () => startQueueTask(task.id))}
+              >
+                <Play aria-hidden="true" />
+                <span>{t("Start now")}</span>
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() => void runMutation(`hold:${task.id}`, () => updateQueueTask(task.id, { hold: !task.hold }))}
+              >
+                {task.hold ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+                <span>{task.hold ? t("Unhold") : t("Hold")}</span>
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t("Move up")}
+                title={t("Move up")}
+                disabled={busy || isFirst}
+                onClick={() => void runMutation(`up:${task.id}`, () => reorderQueueTasks({ id: task.id, direction: "up" }))}
+              >
+                <ArrowUp aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t("Move down")}
+                title={t("Move down")}
+                disabled={busy || isLast}
+                onClick={() => void runMutation(`down:${task.id}`, () => reorderQueueTasks({ id: task.id, direction: "down" }))}
+              >
+                <ArrowDown aria-hidden="true" />
+              </button>
+            </>
+          )}
+
+          {!watching && (task.status === "done" || task.status === "failed") && (
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => void runMutation(`requeue:${task.id}`, () => updateQueueTask(task.id, { status: "queued" }))}
+            >
+              <RotateCcw aria-hidden="true" />
+              <span>{t("Requeue")}</span>
+            </button>
+          )}
+
+          {!watching && task.status !== "running" && (
+            <>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t("Edit|queue")}
+                title={t("Edit|queue")}
+                disabled={busy}
+                onClick={() => openEditForm(task)}
+              >
+                <Pencil aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="icon-button queue-delete-btn"
+                aria-label={t("Delete")}
+                title={t("Delete")}
+                disabled={busy}
+                onClick={() => void runMutation(`delete:${task.id}`, () => deleteQueueTask(task.id))}
+              >
+                <Trash2 aria-hidden="true" />
+              </button>
+            </>
+          )}
+        </div>
+      </li>
+    );
   };
 
   return (
@@ -775,7 +950,7 @@ export function AgentQueueDialog({
 
             {snapshot === null && loading ? (
               <p className="queue-empty-note" role="status">{t("Loading…")}</p>
-            ) : groups.length === 0 ? (
+            ) : activeGroups.length === 0 && doneTasks.length === 0 ? (
               <div className="queue-empty">
                 <p className="queue-empty-title">{t("No queued tasks yet")}</p>
                 <p className="queue-empty-note">
@@ -790,167 +965,89 @@ export function AgentQueueDialog({
               </div>
             ) : (
               <div className="queue-groups">
-                {groups.map((group) => {
+                {activeGroups.map((group) => {
                   const queuedTasks = group.tasks.filter((candidate) => candidate.status === "queued");
                   const firstQueuedId = queuedTasks[0]?.id ?? null;
                   const lastQueuedId = queuedTasks[queuedTasks.length - 1]?.id ?? null;
 
                   return (
-                  <section key={group.folder} className="queue-project-card">
-                    <header className="queue-project-header">
+                    <section key={group.folder} className="queue-project-card">
+                      <header className="queue-project-header">
+                        <div className="queue-project-title">
+                          <FolderOpen aria-hidden="true" />
+                          <span className="queue-project-name">{group.name}</span>
+                          <span className="queue-project-path" title={group.folder}><span dir="ltr">{group.folder}</span></span>
+                        </div>
+                        {!watching && (
+                          <button
+                            type="button"
+                            className="btn queue-project-add"
+                            aria-label={t("Add queued task to {folder}", { folder: group.name })}
+                            title={t("Add queued task to {folder}", { folder: group.name })}
+                            disabled={busy}
+                            onClick={() => openCreateForm(group.folder)}
+                          >
+                            <Plus aria-hidden="true" />
+                            <span>{t("Add task")}</span>
+                          </button>
+                        )}
+                      </header>
+
+                      <ul className="queue-task-list">
+                        {group.tasks.map((task) =>
+                          renderTaskRow(task, {
+                            inDoneCard: false,
+                            runningTask: group.runningTask,
+                            firstQueuedId,
+                            lastQueuedId,
+                          }),
+                        )}
+                      </ul>
+                    </section>
+                  );
+                })}
+
+                {doneTasks.length > 0 && (
+                  <section className="queue-project-card queue-done-card" aria-labelledby={doneHeadingId}>
+                    <header className="queue-project-header queue-done-header">
                       <div className="queue-project-title">
-                        <FolderOpen aria-hidden="true" />
-                        <span className="queue-project-name">{group.name}</span>
-                        <span className="queue-project-path" title={group.folder}><span dir="ltr">{group.folder}</span></span>
+                        <Check aria-hidden="true" />
+                        <span id={doneHeadingId} className="queue-project-name">{t("Done")}</span>
+                        <span className="queue-done-count">{doneTasks.length}</span>
+                        {hasMoreDone && !doneExpanded && (
+                          <span className="queue-done-meta">{t("Last {count} runs", { count: RECENT_DONE_LIMIT })}</span>
+                        )}
                       </div>
-                      {!watching && (
+                      {hasMoreDone && (
                         <button
                           type="button"
-                          className="btn queue-project-add"
-                          aria-label={t("Add queued task to {folder}", { folder: group.name })}
-                          title={t("Add queued task to {folder}", { folder: group.name })}
-                          disabled={busy}
-                          onClick={() => openCreateForm(group.folder)}
+                          className="btn queue-done-toggle"
+                          aria-expanded={doneExpanded}
+                          aria-controls={doneListId}
+                          onClick={() => setDoneExpanded((expanded) => !expanded)}
                         >
-                          <Plus aria-hidden="true" />
-                          <span>{t("Add task")}</span>
+                          <span>
+                            {doneExpanded
+                              ? t("Show last {count}", { count: RECENT_DONE_LIMIT })
+                              : t("Show all ({count})", { count: doneTasks.length })}
+                          </span>
+                          <ChevronDown className="queue-done-chevron" aria-hidden="true" />
                         </button>
                       )}
                     </header>
 
-                    <ul className="queue-task-list">
-                      {group.tasks.map((task) => {
-                        const isExpanded = expandedPrompts.has(task.id);
-                        const hasLongPrompt = task.prompt.length > 140 || task.prompt.split(/\r?\n/).length > 3;
-                        const canStart = task.status === "queued" && !watching && !busy && group.runningTask === null;
-                        const isFirst = task.id === firstQueuedId;
-                        const isLast = task.id === lastQueuedId;
-
-                        return (
-                          <li key={task.id} ref={task.id === initialTaskId ? initialTask : undefined} className={`queue-task-row is-${task.status}${task.needsInput ? " is-needs-input" : ""}${task.hold ? " is-hold" : ""}`}>
-                            <div className="queue-task-top">
-                              <span className={statusBadgeClass(task)}>{taskStatusLabel(task)}</span>
-                              <span className="queue-task-agent" title={agentName(task.agent)}>
-                                <AgentMark agent={task.agent} size={15} />
-                                <span>{agentName(task.agent)}</span>
-                              </span>
-                              <strong className="queue-task-title">{task.title || queueTaskTitleFallback(task.prompt)}</strong>
-                            </div>
-
-                            <p className={`queue-task-prompt${isExpanded ? " is-expanded" : ""}`}>{task.prompt}</p>
-                            {hasLongPrompt && (
-                              <button
-                                type="button"
-                                className="queue-prompt-toggle"
-                                onClick={() => togglePromptExpanded(task.id)}
-                              >
-                                {isExpanded ? t("Hide full prompt") : t("Show full prompt")}
-                              </button>
-                            )}
-
-                            {task.error && <p className="queue-task-error" role="status">{task.error}</p>}
-
-                            <div className="queue-task-actions">
-                              {task.terminal && (
-                                <button
-                                  type="button"
-                                  className="btn queue-open-tab"
-                                  disabled={busy}
-                                  onClick={() => onOpenPane(task.terminal!)}
-                                >
-                                  <ExternalLink aria-hidden="true" />
-                                  <span>{t("Open tab")}</span>
-                                </button>
-                              )}
-
-                              {!watching && task.status === "queued" && (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    disabled={!canStart}
-                                    title={group.runningTask !== null ? t("Another task is already running in this project") : t("Start now")}
-                                    onClick={() => void runMutation(`start:${task.id}`, () => startQueueTask(task.id))}
-                                  >
-                                    <Play aria-hidden="true" />
-                                    <span>{t("Start now")}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn"
-                                    disabled={busy}
-                                    onClick={() => void runMutation(`hold:${task.id}`, () => updateQueueTask(task.id, { hold: !task.hold }))}
-                                  >
-                                    {task.hold ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
-                                    <span>{task.hold ? t("Unhold") : t("Hold")}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="icon-button"
-                                    aria-label={t("Move up")}
-                                    title={t("Move up")}
-                                    disabled={busy || isFirst}
-                                    onClick={() => void runMutation(`up:${task.id}`, () => reorderQueueTasks({ id: task.id, direction: "up" }))}
-                                  >
-                                    <ArrowUp aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="icon-button"
-                                    aria-label={t("Move down")}
-                                    title={t("Move down")}
-                                    disabled={busy || isLast}
-                                    onClick={() => void runMutation(`down:${task.id}`, () => reorderQueueTasks({ id: task.id, direction: "down" }))}
-                                  >
-                                    <ArrowDown aria-hidden="true" />
-                                  </button>
-                                </>
-                              )}
-
-                              {!watching && (task.status === "done" || task.status === "failed") && (
-                                <button
-                                  type="button"
-                                  className="btn"
-                                  disabled={busy}
-                                  onClick={() => void runMutation(`requeue:${task.id}`, () => updateQueueTask(task.id, { status: "queued" }))}
-                                >
-                                  <RotateCcw aria-hidden="true" />
-                                  <span>{t("Requeue")}</span>
-                                </button>
-                              )}
-
-                              {!watching && task.status !== "running" && (
-                                <>
-                                  <button
-                                    type="button"
-                                    className="icon-button"
-                                    aria-label={t("Edit|queue")}
-                                    title={t("Edit|queue")}
-                                    disabled={busy}
-                                    onClick={() => openEditForm(task)}
-                                  >
-                                    <Pencil aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="icon-button queue-delete-btn"
-                                    aria-label={t("Delete")}
-                                    title={t("Delete")}
-                                    disabled={busy}
-                                    onClick={() => void runMutation(`delete:${task.id}`, () => deleteQueueTask(task.id))}
-                                  >
-                                    <Trash2 aria-hidden="true" />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </li>
-                        );
-                      })}
+                    <ul id={doneListId} className="queue-task-list queue-done-list">
+                      {visibleDoneTasks.map((task) =>
+                        renderTaskRow(task, {
+                          inDoneCard: true,
+                          runningTask: null,
+                          firstQueuedId: null,
+                          lastQueuedId: null,
+                        }),
+                      )}
                     </ul>
                   </section>
-                  );
-                })}
+                )}
               </div>
             )}
           </div>

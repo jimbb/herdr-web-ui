@@ -191,6 +191,7 @@ describe("AgentQueueDialog", () => {
   async function renderDialog(opts: {
     open?: boolean;
     snapshot: QueueSnapshot | null;
+    initialTaskId?: string;
     watching?: boolean;
     defaultFolder?: string | null;
     onClose?: () => void;
@@ -208,6 +209,7 @@ describe("AgentQueueDialog", () => {
             createElement(AgentQueueDialog, {
               open: opts.open ?? true,
               snapshot: opts.snapshot,
+              initialTaskId: opts.initialTaskId,
               watching: opts.watching ?? false,
               defaultFolder: opts.defaultFolder ?? null,
               onClose: opts.onClose ?? (() => {}),
@@ -509,14 +511,14 @@ describe("AgentQueueDialog", () => {
     }
   });
 
-  it("places running and queued projects and tasks at the top above failed and done items", async () => {
+  it("places running and queued projects and tasks at the top and moves done items into the Done view", async () => {
     const snapshot = makeSnapshot({
       tasks: [
-        makeTask({ id: "t-done-1", folder: "/repo/done-only", title: "Finished work", prompt: "Done 1", status: "done", terminal: "p1" }),
+        makeTask({ id: "t-done-1", folder: "/repo/done-only", title: "Finished work", prompt: "Done 1", status: "done", terminal: "p1", finishedAt: "2026-11-18T01:00:00.000Z" }),
         makeTask({ id: "t-fail-1", folder: "/repo/failed-only", title: "Broken work", prompt: "Fail 1", status: "failed" }),
-        makeTask({ id: "t-wait-done", folder: "/repo/queued-proj", title: "Old queued done", prompt: "Done 2", status: "done" }),
+        makeTask({ id: "t-wait-done", folder: "/repo/queued-proj", title: "Old queued done", prompt: "Done 2", status: "done", finishedAt: "2026-11-18T02:00:00.000Z" }),
         makeTask({ id: "t-wait-q", folder: "/repo/queued-proj", title: "Next idle task", prompt: "Queued 1", status: "queued" }),
-        makeTask({ id: "t-run-done", folder: "/repo/active-proj", title: "Earlier done", prompt: "Done 3", status: "done" }),
+        makeTask({ id: "t-run-done", folder: "/repo/active-proj", title: "Earlier done", prompt: "Done 3", status: "done", finishedAt: "2026-11-18T03:00:00.000Z" }),
         makeTask({ id: "t-run-q", folder: "/repo/active-proj", title: "Waiting after run", prompt: "Queued 2", status: "queued" }),
         makeTask({ id: "t-run-live", folder: "/repo/active-proj", title: "Live running", prompt: "Run 1", status: "running", terminal: "p2" }),
       ],
@@ -529,15 +531,114 @@ describe("AgentQueueDialog", () => {
         "active-proj",
         "queued-proj",
         "failed-only",
-        "done-only",
       ]);
 
       expect(
         cards[0]!.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
-      ).toEqual(["Live running", "Waiting after run", "Earlier done"]);
+      ).toEqual(["Live running", "Waiting after run"]);
       expect(
         cards[1]!.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
-      ).toEqual(["Next idle task", "Old queued done"]);
+      ).toEqual(["Next idle task"]);
+
+      const doneCard = renderer!.root.findByProps({ className: "queue-project-card queue-done-card" });
+      expect(textOf(doneCard.findByProps({ className: "queue-project-name" }))).toBe("Done");
+      expect(textOf(doneCard.findByProps({ className: "queue-done-count" }))).toBe("3");
+      expect(doneCard.findAllByProps({ className: "btn queue-done-toggle" })).toHaveLength(0);
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Earlier done", "Old queued done", "Finished work"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("shows only the 3 most recent done runs unless expanded, even when only done tasks exist", async () => {
+    const snapshot = makeSnapshot({
+      tasks: [
+        makeTask({ id: "d1", folder: "/repo/alpha", title: "Run 1", prompt: "Prompt 1", status: "done", finishedAt: "2026-11-18T01:00:00.000Z" }),
+        makeTask({ id: "d2", folder: "/repo/beta", title: "Run 2", prompt: "Prompt 2", status: "done", finishedAt: "2026-11-18T02:00:00.000Z" }),
+        makeTask({ id: "d3", folder: "/repo/alpha", title: "Run 3", prompt: "Prompt 3", status: "done", terminal: "pane-3", finishedAt: "2026-11-18T03:00:00.000Z" }),
+        makeTask({ id: "d4", folder: "/repo/gamma", title: "Run 4", prompt: "Prompt 4", status: "done", finishedAt: "2026-11-18T04:00:00.000Z" }),
+        makeTask({ id: "d5", folder: "/repo/alpha", title: "Run 5", prompt: "Run 5", status: "done", finishedAt: "2026-11-18T05:00:00.000Z" }),
+      ],
+    });
+    const openedPanes: string[] = [];
+    const { spy, requests } = mockQueueFetch(snapshot, (url, init) => {
+      if (url.includes("/api/queue/tasks/") && init?.method === "PATCH") {
+        return Response.json({ task: snapshot.tasks[4], queue: snapshot });
+      }
+      return Response.json(snapshot);
+    });
+    try {
+      await renderDialog({
+        snapshot,
+        onOpenPane: (paneId) => openedPanes.push(paneId),
+      });
+
+      expect(renderer!.root.findAllByProps({ className: "queue-empty" })).toHaveLength(0);
+      expect(renderer!.root.findAllByProps({ className: "queue-project-card" })).toHaveLength(0);
+
+      const doneCard = renderer!.root.findByProps({ className: "queue-project-card queue-done-card" });
+      expect(textOf(doneCard.findByProps({ className: "queue-done-count" }))).toBe("5");
+      expect(textOf(doneCard.findByProps({ className: "queue-done-meta" }))).toBe("Last 3 runs");
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Run 5", "Run 4", "Run 3"]);
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "pill queue-done-project" }))),
+      ).toEqual(["alpha", "gamma", "alpha"]);
+
+      // Identical single-line title + prompt in Done view is not repeated as a duplicate prompt block.
+      expect(doneCard.findAllByProps({ className: "queue-task-prompt" })).toHaveLength(2);
+
+      // Requeue and Open tab work inside the collapsed Done card.
+      await act(async () => { doneCard.findByProps({ className: "btn queue-open-tab" }).props.onClick(); });
+      expect(openedPanes).toEqual(["pane-3"]);
+      const requeueButtons = doneCard.findAll((node) => node.type === "button" && textOf(node) === "Requeue");
+      await act(async () => { await requeueButtons[0]!.props.onClick(); });
+      expect(requests.some((req) => req.method === "PATCH" && req.url.endsWith("/api/queue/tasks/d5"))).toBe(true);
+
+      // Expand reveals all 5 runs, collapse returns to the 3 most recent.
+      const toggle = doneCard.findByProps({ className: "btn queue-done-toggle" });
+      expect(toggle.props["aria-expanded"]).toBe(false);
+      expect(textOf(toggle)).toBe("Show all (5)");
+      await act(async () => { toggle.props.onClick(); });
+
+      expect(toggle.props["aria-expanded"]).toBe(true);
+      expect(textOf(toggle)).toBe("Show last 3");
+      expect(doneCard.findAllByProps({ className: "queue-done-meta" })).toHaveLength(0);
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Run 5", "Run 4", "Run 3", "Run 2", "Run 1"]);
+
+      await act(async () => { toggle.props.onClick(); });
+      expect(toggle.props["aria-expanded"]).toBe(false);
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Run 5", "Run 4", "Run 3"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("auto-expands the Done view when opening an older finished task via initialTaskId", async () => {
+    const snapshot = makeSnapshot({
+      tasks: [
+        makeTask({ id: "d1", folder: "/repo/alpha", title: "Oldest run", prompt: "Prompt 1", status: "done", finishedAt: "2026-11-18T01:00:00.000Z" }),
+        makeTask({ id: "d2", folder: "/repo/alpha", title: "Run 2", prompt: "Prompt 2", status: "done", finishedAt: "2026-11-18T02:00:00.000Z" }),
+        makeTask({ id: "d3", folder: "/repo/alpha", title: "Run 3", prompt: "Prompt 3", status: "done", finishedAt: "2026-11-18T03:00:00.000Z" }),
+        makeTask({ id: "d4", folder: "/repo/alpha", title: "Run 4", prompt: "Prompt 4", status: "done", finishedAt: "2026-11-18T04:00:00.000Z" }),
+      ],
+    });
+    const { spy } = mockQueueFetch(snapshot);
+    try {
+      await renderDialog({ snapshot, initialTaskId: "d1" });
+      const doneCard = renderer!.root.findByProps({ className: "queue-project-card queue-done-card" });
+      const toggle = doneCard.findByProps({ className: "btn queue-done-toggle" });
+      expect(toggle.props["aria-expanded"]).toBe(true);
+      expect(
+        doneCard.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Run 4", "Run 3", "Run 2", "Oldest run"]);
     } finally {
       spy.mockRestore();
     }
