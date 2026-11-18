@@ -37,6 +37,14 @@ export interface ThreadProps {
   severalPcs: boolean;
 }
 
+const EMPTY_SEQS = () => new Map<string, number>();
+
+export function threadDisplayName(machines: readonly Machine[], machineId: string, pane: HerdrPane, activity?: Pick<SidebarActivity, "seqs">): string {
+  const row = agentRoster(machines, { byActivity: false, seqs: activity?.seqs ?? EMPTY_SEQS, pinned: [] }).rest
+    .find((candidate) => candidate.machine.id === machineId && candidate.entry.pane.pane_id === pane.pane_id);
+  return row ? agentRowTitle(row, false).title : displayPaneTitle(pane);
+}
+
 /** What a thread says of its agent: the mark and the name its row in the list draws, and its state in words. */
 function threadFacts({ machines, activity, machineId, pane, connection, watching, severalPcs }: ThreadProps, t: Translate) {
   const machine = machines.find((candidate) => candidate.id === machineId);
