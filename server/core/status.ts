@@ -216,7 +216,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (pane.parent_pane_id && pane.parent_pane_id !== pane.pane_id) parentOf.set(pane.pane_id, pane.parent_pane_id);
       const status = restingClaude(pane.pane_id, pane.agent, pane.agent_status);
       snapPane.set(pane.pane_id, { status, agent: pane.agent ?? null });
-      if (!wasTold.has(pane.pane_id) || (resyncNewer !== undefined && !resyncNewer.has(pane.pane_id))) {
+      // every snapshot is fresh word on who is busy (a stale one moves a hold by one read at most; the grace covers the rest)
+      if (resyncNewer === undefined || !resyncNewer.has(pane.pane_id)) {
         if (status === "working" || status === "blocked" || waits.waiting(pane.pane_id)) busyFrame.add(pane.pane_id);
         else busyFrame.delete(pane.pane_id);
       }
@@ -225,11 +226,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     for (const state of [childGrace, toldHold, snapPane] as Map<string, unknown>[]) for (const paneId of [...state.keys()]) if (!live.has(paneId)) state.delete(paneId);
     const now = statusNow();
     const propagate = (): void => {
-      for (const [paneId, until] of childGrace) if (until > now && (!wasTold.has(paneId) || (resyncNewer !== undefined && !resyncNewer.has(paneId)))) busyFrame.add(paneId);
+      for (const [paneId, until] of childGrace) if (until > now && !resyncNewer?.has(paneId)) busyFrame.add(paneId);
       for (let added = true; added;) {
         added = false;
         for (const [child, parent] of parentOf) {
-          if (busyFrame.has(parent) || !busyFrame.has(child) || (wasTold.has(parent) && !(resyncNewer !== undefined && !resyncNewer.has(parent)))) continue;
+          if (busyFrame.has(parent) || !busyFrame.has(child) || resyncNewer?.has(parent)) continue;
           busyFrame.add(parent);
           added = true;
         }
