@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
+import type { QueueTask } from "../../shared/agent-queue.ts";
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane } from "../../shared/protocol.ts";
 import machinesFixture from "../../site/demo/fixtures/machines.json";
-import { heldOrder, inboxEmpty, inboxFiltered, inboxOrder, inboxSearched, inboxSinceAt, inboxStartsOpen, inboxStatus, inboxWords, questionWords } from "./agentInbox.ts";
+import { heldOrder, inboxEmpty, inboxFiltered, inboxHeldEntries, inboxKey, inboxNesting, inboxOrder, inboxQueue, inboxQueueSearched, inboxSearched, inboxSections, inboxSinceAt, inboxStartsOpen, inboxStatus, inboxWords, questionWords } from "./agentInbox.ts";
 import type { AgentRow } from "./agentRoster.ts";
 import type { SidebarActivity } from "./sidebarActivity.tsx";
 
@@ -16,11 +17,73 @@ function activity(states: Record<string, AgentStatus> = {}, seqs: ReadonlyMap<st
 
 const ids = (rows: readonly AgentRow[]): string[] => rows.map(({ entry }) => entry.pane.pane_id);
 const label = (rows: readonly AgentRow[]): string[] => rows.map(({ entry }) => (entry.pane as HerdrPane & { label?: string }).label ?? "");
+const task = (id: string, folder: string, patch: Partial<QueueTask> = {}): QueueTask => ({
+  id, folder, title: id, prompt: "Run the checks", agent: "codex", hold: false, status: "queued", terminal: null,
+  createdAt: "", startedAt: null, finishedAt: null, error: null, ...patch,
+});
 
 describe("agent inbox", () => {
   it("orders the rows needs you, working, done, then resting", () => {
     const states = { "w1E:p1": "blocked", "w1F:p1": "working", "w1C:p1": "done" } as const;
     expect(ids(inboxOrder(fixture, activity(states)))).toEqual(["w1E:p1", "w1F:p1", "w1C:p1", "w1D:p1"]);
+  });
+
+  it("puts queued, held and failed tasks between working and done; only local running panes get a tag", () => {
+    const shown = activity({ "w1E:p1": "blocked", "w1F:p1": "working", "w1C:p1": "done" });
+    const machines = [fixture[0]!, { ...fixture[0]!, id: "lab" }];
+    const rows = inboxOrder(machines, shown);
+    const { entries, running } = inboxQueue([
+      task("running", "/repo", { status: "running", terminal: "w1F:p1" }),
+      task("held", "/repo/", { hold: true }), task("next", "/repo"),
+      task("failed", "/other", { status: "failed" }), task("other", "/other"),
+      task("done", "/repo", { status: "done" }), task("launching", "/later", { status: "running", terminal: "not-yet" }),
+    ], rows);
+    expect([...running]).toEqual(["local:w1F:p1"]);
+    expect(entries.map(({ task, position, canStart }) => [task.id, position, canStart])).toEqual([
+      ["held", 1, false], ["next", 2, false], ["failed", null, false], ["other", 1, true],
+    ]);
+    expect(inboxQueueSearched(entries, "queued", " NEXT  ").map(({ position }) => position)).toEqual([2]);
+    expect(inboxQueueSearched(entries, "all", "THE CHECKS").length).toBe(4);
+    expect(inboxQueueSearched(entries, "done", "")).toEqual([]);
+    const [state] = inboxSections(rows, entries, machines, shown, "state");
+    expect(state!.entries.map(({ key }) => key)).toEqual([
+      "local:w1E:p1", "lab:w1E:p1", "local:w1F:p1", "lab:w1F:p1", "queue:held", "queue:next", "queue:failed", "queue:other", "local:w1C:p1", "lab:w1C:p1", "local:w1D:p1", "lab:w1D:p1",
+    ]);
+  });
+
+  it("matches local project folders, folds worktrees, and leaves same-named folders and remote projects separate", () => {
+    const local = structuredClone(fixture[0]!);
+    const snapshot = local.snapshot!;
+    const repo = { repo_key: "repo", repo_name: "api", repo_root: "/repos/api" };
+    snapshot.workspaces.find(({ workspace_id }) => workspace_id === "w1C")!.worktree = { ...repo, checkout_path: "/repos/api", is_linked_worktree: false };
+    snapshot.workspaces.find(({ workspace_id }) => workspace_id === "w1F")!.worktree = { ...repo, checkout_path: "/worktrees/branch", is_linked_worktree: true };
+    snapshot.panes.find(({ pane_id }) => pane_id === "w1D:p1")!.cwd = undefined;
+    const machines = [local, { ...local, id: "lab" }];
+    const shown = activity({ "w1F:p1": "blocked", "w1C:p1": "done" });
+    const rows = inboxOrder(machines, shown);
+    const { entries } = inboxQueue([task("branch", "/worktrees/branch/"), task("api", "/repos/api"), task("same-name", "/other/checkout-api"), task("by-name", "/other/web-dashboard")], rows);
+    const sections = inboxSections(rows, entries, machines, shown, "project");
+    const keys = (sectionKey: string) => sections.find(({ key }) => key === sectionKey)?.entries.map(({ key }) => key);
+    expect(keys("local:w1C")).toEqual(["local:w1F:p1", "local:w1C:p1", "queue:branch", "queue:api"]);
+    expect(keys("lab:w1C")).toEqual(["lab:w1F:p1", "lab:w1C:p1"]);
+    expect(keys("folder:/other/checkout-api")).toEqual(["queue:same-name"]);
+    expect(keys("local:w1D")).toEqual(["local:w1D:p1", "queue:by-name"]);
+  });
+
+  it("keeps a visible helper family together and re-roots it when a parent is filtered out", () => {
+    const local = structuredClone(fixture[0]!);
+    const panes = local.snapshot!.panes;
+    panes.find(({ pane_id }) => pane_id === "w1D:p1")!.parent_pane_id = "w1C:p1";
+    panes.find(({ pane_id }) => pane_id === "w1E:p1")!.parent_pane_id = "w1D:p1";
+    const shown = activity({ "w1D:p1": "working", "w1E:p1": "working", "w1F:p1": "blocked" });
+    const rows = inboxOrder([local], shown);
+    const levels = (rows: AgentRow[]) => [...inboxNesting(rows)].map(([key, { depth }]) => [key, depth]);
+    expect(levels(rows)).toEqual([["local:w1F:p1", 0], ["local:w1C:p1", 0], ["local:w1D:p1", 1], ["local:w1E:p1", 2]]);
+    const filtered = inboxFiltered(rows, "working", shown);
+    expect(levels(filtered)).toEqual([["local:w1D:p1", 0], ["local:w1E:p1", 1]]);
+    const [state] = inboxSections(rows, [], [local], shown, "state");
+    expect(inboxHeldEntries(state!.entries, rows.filter((row) => row.entry.pane.pane_id !== "w1D:p1").map(inboxKey)).map(({ key }) => key))
+      .toEqual(["local:w1F:p1", "local:w1C:p1", "local:w1D:p1", "local:w1E:p1"]);
   });
 
   describe("within a state, the Agents list's order (Settings → Within a state)", () => {

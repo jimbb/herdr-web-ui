@@ -34,7 +34,7 @@ export function nestHelpers(entries: readonly SidebarAgent[]): SidebarAgent[] {
 }
 
 /** nestHelpers for rows of any shape, told apart by `idOf` and naming their agent's row by `parentIdOf` */
-function nestRows<T>(entries: readonly T[], idOf: (entry: T) => string, parentIdOf: (entry: T) => string | undefined): T[] {
+export function nestRows<T>(entries: readonly T[], idOf: (entry: T) => string, parentIdOf: (entry: T) => string | undefined): T[] {
   const byId = new Map(entries.map((entry) => [idOf(entry), entry]));
   const parentOf = (entry: T): T | undefined => {
     const parent = parentIdOf(entry);
