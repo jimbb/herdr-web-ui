@@ -5,16 +5,21 @@ import { Ellipsis, ListFilter, Monitor, Plus, Search, Terminal, TriangleAlert, X
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus } from "../../shared/protocol.ts";
 import { heldOrder, INBOX_FILTERS, inboxEmpty, inboxFiltered, inboxKey, inboxOrder, inboxSearched, inboxSinceAt, inboxStatus, inboxWords, plainWords, type InboxFilter } from "../lib/agentInbox.ts";
+import { closePane as closeMachinePane, routeMissing } from "../lib/api.ts";
 import { agentGroup, type AgentRow } from "../lib/agentRoster.ts";
 import { stateSince } from "../lib/agentStateSince.ts";
 import type { HeaderConnection } from "../lib/headerConnection.ts";
 import { useT, type Translate } from "../lib/i18n.ts";
 import { inboxAsks, inboxRowLine, inboxStateWord } from "../lib/inboxRow.ts";
+import { paneCloseNeedsConfirm, usePaneClose } from "../lib/paneClose.ts";
+import { usePaneLockChecker } from "../lib/paneLocks.ts";
 import { PanePressContext } from "../lib/paneSubmitContext.ts";
 import { agentName } from "../lib/runtimeMove.ts";
 import { useSettings } from "../lib/settings.ts";
+import { sidebarPinKey } from "../lib/sidebarPins.ts";
 import { knownStatus } from "../lib/status.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
+import { userErrorMessage, type UserError } from "../lib/userError.ts";
 import { SHEET_QUERY } from "../lib/sheets.ts";
 import type { SidebarActivity } from "../lib/sidebarActivity.tsx";
 import { agentContext, agentTabName, paneMark } from "../lib/sidebarAgents.ts";
@@ -25,6 +30,7 @@ import { summaryTargets, useInboxSummaries, type RowSummary, type SummaryReads }
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { agentRowTitle, blockedNote, stateAge } from "./AgentSidebar.tsx";
+import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { compactWorktreeName, StatusBadge } from "./Sidebar.tsx";
 import "./InboxList.css";
@@ -52,6 +58,7 @@ export interface InboxListProps {
   current?: string | null;
   onOpen(machineId: string, paneId: string): void;
   onNew(machineId: string): void;
+  onClosed?(machineId: string, paneId: string): void;
   questionReads: QuestionReads;
   summaryReads: SummaryReads;
   more?: InboxMore;
@@ -80,9 +87,11 @@ export function InboxAvatar({ mark }: { mark: string | null }) {
   );
 }
 
-export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, onNew, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
+export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, onNew, onClosed, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
   const t = useT();
   const pressPane = useContext(PanePressContext);
+  const paneLocked = usePaneLockChecker();
+  const [closeError, setCloseError] = useState<UserError | null>(null);
   const root = useRef<HTMLElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
@@ -144,11 +153,69 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   }, [questions, summaries]);
   const { opening, taken, row: returnTo = null } = focus;
   const rowNodes = useRef(new Map<string, HTMLButtonElement>());
+  const itemNodes = useRef(new Map<string, HTMLLIElement>());
+  const closedKeys = useRef(new Set<string>());
+  const pendingFocus = useRef(new Map<string, { neighbors: readonly string[]; viaKeyboard: boolean }>());
+  useEffect(() => {
+    const live = new Set(all.map(inboxKey));
+    for (const key of closedKeys.current) if (!live.has(key) && key !== returnTo) closedKeys.current.delete(key);
+  }, [all, returnTo]);
   useLayoutEffect(() => {
     if (taken.current === opening) return;
     taken.current = opening;
+    // When closing the open wide thread brings the list back, focus already moved off that doomed row.
+    if (returnTo !== null && closedKeys.current.has(returnTo)) return;
     ((returnTo === null ? undefined : rowNodes.current.get(returnTo)) ?? root.current)?.focus({ preventScroll: true });
   }, [opening, taken]);
+
+  const { closing, clearClosing, requestClose, confirmClosing } = usePaneClose({
+    closePane: closeMachinePane,
+    roster: machines,
+    isLive: (machineId, paneId) => {
+      const machine = machines.find((candidate) => candidate.id === machineId);
+      return machine?.state === "connected" && machine.snapshot?.panes.some((pane) => pane.pane_id === paneId) === true;
+    },
+    isLocked: paneLocked,
+    watching,
+    onBeforeImmediate: () => setCloseError(null),
+    onSuccess: (machineId, paneId) => {
+      const key = sidebarPinKey(machineId, paneId);
+      closedKeys.current.add(key);
+      const focusPlan = pendingFocus.current.get(key);
+      pendingFocus.current.delete(key);
+      onClosed?.(machineId, paneId);
+      const active = typeof document === "undefined" ? null : document.activeElement;
+      const itemNode = itemNodes.current.get(key);
+      const inClosingItem = itemNode !== undefined && active !== null && active !== undefined
+        && (active === itemNode || (typeof itemNode.contains === "function" && itemNode.contains(active as Node)));
+      const inConfirmDialog = active !== null && active !== undefined
+        && typeof (active as Element).closest === "function"
+        && (active as Element).closest(".confirm-dialog") !== null;
+      const dropped = active === null || active === undefined || active === document.body;
+      if (focusPlan && (inClosingItem || inConfirmDialog || dropped)) {
+        if (focusPlan.viaKeyboard) {
+          const nextKey = focusPlan.neighbors.find((candidate) => candidate !== key && rowNodes.current.has(candidate));
+          const target = (nextKey ? rowNodes.current.get(nextKey) : undefined) ?? root.current;
+          target?.focus({ preventScroll: true });
+        } else {
+          root.current?.focus({ preventScroll: true });
+        }
+      }
+    },
+    onError: (reason, machineId, paneId) => {
+      pendingFocus.current.delete(sidebarPinKey(machineId, paneId));
+      if (routeMissing(reason)) {
+        setCloseError({ message: t("This PC's bridge does not offer this yet"), detail: null });
+        return;
+      }
+      const err = userErrorMessage(reason);
+      setCloseError({ message: t("Close failed: {reason}", { reason: err.message }), detail: err.detail });
+    },
+  });
+  const cancelClosing = (): void => {
+    if (closing) pendingFocus.current.delete(sidebarPinKey(closing.machineId, closing.pane.pane_id));
+    clearClosing();
+  };
 
   const [pcMenu, setPcMenu] = useState<HTMLElement | null>(null);
   const [filterMenu, setFilterMenu] = useState<HTMLElement | null>(null);
@@ -288,6 +355,14 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
         </>}
       </div>
       <div className="inbox-scroll" ref={scroller} onScroll={(event) => { if (restoring.current === null) scroll.current = event.currentTarget.scrollTop; }}>
+        {closeError && (
+          <div className="inbox-close-error" role="alert">
+            <span className="inbox-close-error-text">{closeError.message}{closeError.detail !== null && <><br /><code>{closeError.detail}</code></>}</span>
+            <button type="button" className="icon-button inbox-close-error-dismiss" aria-label={t("Dismiss")} onClick={() => setCloseError(null)}>
+              <X aria-hidden="true" />
+            </button>
+          </div>
+        )}
         {failed !== null ? (
           <div className="inbox-failed">
             {retrying ? (
@@ -311,15 +386,16 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
           </div>
         ) : empty !== null ? <p className="inbox-empty" role="status">{empty.flatMap((line, at) => [...(at > 0 ? [" "] : []), <span key={line}>{line}</span>])}</p> : (
           <ul className="inbox-rows" onPointerDown={holdAfterPress} onTouchEnd={holdAfterPress}
-            onFocus={(event) => setFocusIn(event.target.matches(":focus-visible"))} onBlur={(event) => { if (!(typeof Node === "function" && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocusIn(false); }}>
-            {rows.map((row) => {
+            onFocus={(event) => setFocusIn(event.target.matches?.(":focus-visible") ?? false)} onBlur={(event) => { if (!(typeof Node === "function" && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocusIn(false); }}>
+            {rows.map((row, rowIndex) => {
               const open = wide && row.key === current;
+              const closeOffered = !watching && row.online && !paneLocked(row.machine.id, row.pane.pane_id);
               const words = <span className="inbox-words" dir="auto">{row.line}</span>;
               const age = row.since === null ? null : stateAge(now - row.since);
               const at = row.since === null ? null : new Date(row.since);
               const spoken = [row.kind ? agentName(row.kind) : null, row.title, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
               return (
-                <li key={row.key} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group}>
+                <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group}>
                   <button type="button" className="inbox-row" disabled={!row.online} aria-label={spoken} aria-current={open ? "true" : undefined}
                     ref={(node) => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
                     title={wide ? [row.title, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
@@ -335,6 +411,26 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
                     </span>
                     {wide && stateMark(row.status, row.failed, row.state)}
                   </button>
+                  {closeOffered && (
+                    <button type="button" className="icon-button inbox-close"
+                      aria-label={t("Close {agent}", { agent: row.title })}
+                      title={t("Close {agent}", { agent: row.title })}
+                      onClick={(event) => {
+                        if (event.detail > 1) return;
+                        const after = rows.slice(rowIndex + 1).filter((candidate) => candidate.online).map((candidate) => candidate.key);
+                        const before = rows.slice(0, rowIndex).reverse().filter((candidate) => candidate.online).map((candidate) => candidate.key);
+                        const viaKeyboard = event.detail === 0 || (typeof event.currentTarget?.matches === "function" && event.currentTarget.matches(":focus-visible"));
+                        // Focus the Close button before opening ConfirmDialog so Safari hands focus back on Cancel/Escape.
+                        if (paneCloseNeedsConfirm(row.pane, row.machine.snapshot?.panes) && typeof event.currentTarget?.focus === "function") {
+                          event.currentTarget.focus({ preventScroll: true });
+                        }
+                        pendingFocus.current.set(row.key, { neighbors: [...after, ...before], viaKeyboard });
+                        tally(() => usageCounters.paneUse("close_pane_by_button", row.machine.id));
+                        requestClose({ machineId: row.machine.id, pane: row.pane, panes: row.machine.snapshot?.panes, label: row.title });
+                      }}>
+                      <X aria-hidden="true" />
+                    </button>
+                  )}
                 </li>
               );
             })}
@@ -352,6 +448,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
           id: value, label: filterWord(value), icon: ListFilter, checked: filter === value, run: () => onFilter(value),
           ...(value === "all" ? {} : { glyph: <span className="inbox-filter-mark" aria-hidden="true"><StatusBadge compact status={value} label={filterWord(value)} /></span> }),
         }))} />}
+      <PaneCloseConfirm closing={closing} onClose={cancelClosing} onConfirm={confirmClosing} />
     </section>
   );
 }

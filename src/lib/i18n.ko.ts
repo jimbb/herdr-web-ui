@@ -617,6 +617,9 @@ const BASE: Record<string, string> = {
   "Pick a folder to start in.": "시작할 폴더를 골라요.",
   "Show QR code": "QR 코드 보기",
   "Agent Queue": "에이전트 대기열",
+  "Close failed: {reason}": "닫기 실패: {reason}",
+  "Close pane {name}?": "{name} 패널을 닫을까요?",
+  "The pane's running processes will stop. Closing its last pane also closes the workspace.": "패널에서 실행 중인 프로세스가 종료됩니다. 마지막 패널을 닫으면 워크스페이스도 닫힙니다.",
 };
 
 export const KO_PARTS: Record<string, Record<string, string>> = {

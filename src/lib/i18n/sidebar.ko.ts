@@ -44,6 +44,7 @@ export const SIDEBAR_KO: Record<string, string> = {
   "Filter by state": "상태로 거르기",
   "Search agents": "에이전트 검색",
   "Filter by state: {state}": "상태로 거르기: {state}",
+  "Close {agent}": "{agent} 닫기",
   "Expand worktrees of {name}": "{name}의 워크트리 펼치기",
   "Collapse worktrees of {name}": "{name}의 워크트리 접기",
   "Agents: {names}": "에이전트: {names}",

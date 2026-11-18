@@ -619,6 +619,9 @@ const BASE: Record<string, string> = {
   "Pick a folder to start in.": "始めるフォルダーを選びます。",
   "Show QR code": "QR コードを表示",
   "Agent Queue": "エージェントキュー",
+  "Close failed: {reason}": "閉じられませんでした: {reason}",
+  "Close pane {name}?": "ペイン{name}を閉じますか？",
+  "The pane's running processes will stop. Closing its last pane also closes the workspace.": "ペインで実行中のプロセスが停止します。最後のペインを閉じるとワークスペースも閉じます。",
 };
 
 export const JA_PARTS: Record<string, Record<string, string>> = {

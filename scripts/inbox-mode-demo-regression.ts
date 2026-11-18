@@ -233,7 +233,7 @@ const failures: string[] = [];
 
 type Settings = Record<string, unknown>;
 interface Box { x: number; y: number; w: number; h: number; right: number; bottom: number }
-interface Row { pane: string | null; machine: string | null; state: string | null; name: string; words: string | null; mark: string | null; markLabel: string | null; asking: boolean; time: string | null; datetime: string | null; buttons: number; current: string | null }
+interface Row { pane: string | null; machine: string | null; state: string | null; name: string; words: string | null; mark: string | null; markLabel: string | null; asking: boolean; time: string | null; datetime: string | null; buttons: number; nestedButtons: number; current: string | null }
 interface Address { app: string | null; pane: string | null; machine: string | null }
 
 const rows = (page: Page): Promise<Row[]> => page.locator(".mode-inbox .inbox-item").evaluateAll((items) => items.map((item) => {
@@ -243,7 +243,7 @@ const rows = (page: Page): Promise<Row[]> => page.locator(".mode-inbox .inbox-it
     name: item.querySelector(".inbox-name")?.textContent ?? "", words: item.querySelector(".inbox-words")?.textContent ?? null,
     mark: mark?.getAttribute("data-status") ?? null, markLabel: mark?.getAttribute("aria-label") ?? null, asking: item.classList.contains("is-asking"),
     time: item.querySelector("time.inbox-time")?.textContent ?? null, datetime: item.querySelector("time.inbox-time")?.getAttribute("datetime") ?? null,
-    buttons: item.querySelectorAll("button").length, current: item.querySelector(".inbox-row")?.getAttribute("aria-current") ?? null,
+    buttons: item.querySelectorAll(":scope > button").length, nestedButtons: item.querySelectorAll(".inbox-row button").length, current: item.querySelector(".inbox-row")?.getAttribute("aria-current") ?? null,
   };
 }));
 const box = (page: Page, selector: string): Promise<Box> => page.locator(selector).first().evaluate((node) => {
@@ -522,7 +522,8 @@ try {
           assert.deepEqual(drawn.map((item) => item.mark), ["blocked", "working", "done", null, null, null], "each state its own mark, none for a ready agent");
           assert.deepEqual(drawn.slice(0, 3).map((item) => item.markLabel), ["Needs you", "Working", "Done"], "a state's mark is named in the words its chip and the filters use");
           assert.deepEqual(drawn.map((item) => item.asking), [true, false, true, false, false, false], "the rows that ask for a look draw their words stronger");
-          assert.deepEqual(drawn.map((item) => item.buttons), [1, 1, 1, 1, 1, 1], "a row is one button and holds no other");
+          assert.deepEqual(drawn.map((item) => item.nestedButtons), [0, 0, 0, 0, 0, 0], "a row holds no nested button inside it");
+          assert.deepEqual(drawn.map((item) => item.buttons), [2, 2, 2, 2, 2, 2], "each inbox item has its row button and sibling close button");
           assert.match(drawn[0]!.words ?? "", /Allow command\?/);
           assert.ok((drawn[2]!.words ?? "").trim() !== "", "the done row says what its agent last said");
           assert.match(drawn[2]!.time ?? "", /^(<1m|\d+[mhd])$/, "the done row says how long it has been done");
@@ -1971,6 +1972,110 @@ try {
           console.log("PASS the system Back from a wide thread with the pane's More open closes the menu with its button, and shows the list with no agent chosen");
         }, desktop);
 
+        await withPage(browser, base, light, "/?app=inbox", "closing an agent from its inbox row on desktop, touch, watching, and locked", async (page) => {
+          await page.locator(".inbox-column .mode-inbox").waitFor();
+          await rowCount(page, 6);
+          const item = (pane: string) => page.locator(`.mode-inbox .inbox-item[data-machine="local"][data-pane="${pane}"]`);
+          const closeOf = (pane: string) => item(pane).locator(".inbox-close");
+
+          await row(page, WORKING).click();
+          await page.locator(".thread-chip").waitFor();
+          await addressIs(page, { app: "inbox", pane: WORKING }, "the working agent's thread is open");
+          const otherHidden = await closeOf(BLOCKED).evaluate((node) => {
+            const style = getComputedStyle(node);
+            return { opacity: style.opacity, pointerEvents: style.pointerEvents, title: node.getAttribute("aria-label") };
+          });
+          assert.deepEqual(otherHidden, { opacity: "0", pointerEvents: "none", title: `Close ${BLOCKED_TITLE}` }, "on desktop, an unhovered row's close button is hidden");
+          await page.mouse.move(700, 450);
+          await page.waitForFunction((pane) => {
+            const node = document.querySelector(`.mode-inbox .inbox-item[data-pane="${pane}"] .inbox-close`);
+            return node !== null && getComputedStyle(node).opacity === "0" && getComputedStyle(node).pointerEvents === "none";
+          }, WORKING, { timeout: 5_000 });
+          assert.equal(await closeOf(WORKING).getAttribute("aria-label"), `Close ${WORKING_TITLE}`);
+
+          await item(WORKING).hover();
+          await page.waitForFunction((pane) => {
+            const node = document.querySelector(`.mode-inbox .inbox-item[data-pane="${pane}"] .inbox-close`);
+            return node !== null && getComputedStyle(node).opacity === "1" && getComputedStyle(node).pointerEvents === "auto";
+          }, WORKING, { timeout: 5_000 });
+          await closeOf(WORKING).click();
+          const dialog = page.locator(".confirm-dialog");
+          await dialog.waitFor();
+          assert.match((await dialog.textContent()) ?? "", new RegExp(`Close pane ${WORKING_TITLE}\\?`));
+          await dialog.getByRole("button", { name: "Cancel" }).click();
+          await dialog.waitFor({ state: "detached" });
+          assert.equal(await item(WORKING).count(), 1, "cancelling keeps the row");
+          assert.equal(await page.locator(".thread-chip").count(), 1, "and keeps its open thread");
+
+          await item(WORKING).hover();
+          await closeOf(WORKING).click();
+          await dialog.waitFor();
+          await dialog.getByRole("button", { name: "Close pane" }).click();
+          await dialog.waitFor({ state: "detached" });
+          await rowCount(page, 5);
+          assert.equal(await item(WORKING).count(), 0, "confirming removes the closed agent's row");
+          await page.locator(".inbox-unchosen").waitFor();
+          assert.equal(await page.locator('.mode-inbox .inbox-row[aria-current="true"]').count(), 0, "no row stays marked current");
+          await addressIs(page, { app: "inbox", pane: null }, "closing the open wide thread returns the address to the list");
+
+          const made = await page.evaluate(async (pane) => {
+            const response = await fetch("/api/pane/split", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pane_id: pane, direction: "right" }) });
+            return (await response.json() as { pane?: { pane_id?: string } }).pane?.pane_id ?? "";
+          }, DONE);
+          assert.ok(made !== "", "split a second pane into Done's workspace so Done is no longer the last pane");
+          await item(DONE).hover();
+          await page.waitForFunction((pane) => {
+            const node = document.querySelector(`.mode-inbox .inbox-item[data-pane="${pane}"] .inbox-close`);
+            return node !== null && getComputedStyle(node).opacity === "1" && getComputedStyle(node).pointerEvents === "auto";
+          }, DONE, { timeout: 5_000 });
+          await closeOf(DONE).click();
+          await rowCount(page, 4);
+          assert.equal(await page.locator(".confirm-dialog").count(), 0, "closing a non-last non-working agent closes at once without confirmation");
+
+          const lockedKey = `local:${BLOCKED}`;
+          await page.evaluate(async (key) => {
+            const current = await (await fetch("/api/preferences")).json() as { revision?: number; settings?: Record<string, unknown> };
+            await fetch("/api/preferences", {
+              method: "PUT",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ revision: current.revision ?? 0, settings: { ...(current.settings ?? {}), agentLocks: true, lockedAgents: [key] }, pins: [key] }),
+            });
+          }, lockedKey);
+          await closeOf(BLOCKED).waitFor({ state: "detached" });
+
+          await page.locator(".inbox-rail .inbox-rail-exit").click();
+          await page.locator(".app-header.is-zoned").waitFor();
+          const classicPane = (await address(page)).pane;
+          assert.ok(classicPane !== null && classicPane !== WORKING && classicPane !== DONE, "leaving inbox after closing its thread lands on a live classic pane");
+          console.log("PASS desktop close-agent: hidden at rest, hover reveals, current working pane asks confirm and clears to unchosen, split non-working pane closes immediately, locked pinned agent hides close, Back to Ovis opens a live pane");
+        }, desktop);
+
+        await withPage(browser, base, light, "/?app=inbox&demo_devices=watch", "a watching device sees no inbox row close buttons", async (page) => {
+          await page.locator(".inbox-column .mode-inbox").waitFor();
+          await rowCount(page, 6);
+          assert.equal(await page.locator(".mode-inbox .inbox-close").count(), 0);
+          console.log("PASS a watching device is offered no close buttons in the agent inbox");
+        }, desktop);
+
+        await withPage(browser, base, light, "/?app=inbox", "tapping close on a phone confirms without opening the thread", async (page) => {
+          await listScreen(page);
+          await rowCount(page, 6);
+          const close = page.locator(`.mode-inbox .inbox-item[data-pane="${DONE}"] .inbox-close`);
+          const shown = await close.evaluate((node) => {
+            const style = getComputedStyle(node);
+            const r = node.getBoundingClientRect();
+            return { opacity: style.opacity, pointerEvents: style.pointerEvents, w: Math.round(r.width), h: Math.round(r.height) };
+          });
+          assert.deepEqual(shown, { opacity: "1", pointerEvents: "auto", w: 44, h: 44 }, "on a phone, the close button is an always-visible 44px touch target");
+          await close.tap();
+          await page.locator(".confirm-dialog").waitFor();
+          await listScreen(page);
+          await addressIs(page, { app: "inbox", pane: null }, "tapping close does not open the row's thread");
+          await page.locator(".confirm-dialog").getByRole("button", { name: "Close pane" }).tap();
+          await rowCount(page, 5);
+          console.log("PASS phone close-agent: always-visible 44px close button opens ConfirmDialog on tap without opening the thread and removes the row on confirm");
+        });
+
       }
       if (part === "rail") {
         for (const gone of [
@@ -2513,7 +2618,7 @@ try {
             const own = (prefix: string, shared: string): string | undefined => [...at.classList].find((name) => name.startsWith(prefix) && name !== shared);
             if (at.closest(".inbox-rail")) return own("inbox-rail-", "inbox-rail-item") ?? "the rail";
             const item = at.closest(".mode-inbox .inbox-item");
-            if (item) return `row ${item.getAttribute("data-pane")}`;
+            if (item) return at.classList.contains("inbox-close") ? `close ${item.getAttribute("data-pane")}` : `row ${item.getAttribute("data-pane")}`;
             if (at.closest(".mode-inbox")) return own("inbox-", "inbox-round") ?? "the list";
             if (at.classList.contains("sidebar-resizer")) return "the resize grip";
             return at.closest(".pane-column") ? "the thread" : `elsewhere (${at.className})`;
@@ -2524,15 +2629,16 @@ try {
           };
           await page.locator(".inbox-rail .inbox-rail-exit").focus();
           const stops = [await stop()];
-          while (stops.length < 40 && /^(inbox-|row |the resize grip$)/.test(stops.at(-1)!)) {
+          while (stops.length < 40 && /^(inbox-|row |close |the resize grip$)/.test(stops.at(-1)!)) {
             await page.keyboard.press("Tab");
             stops.push(await stop());
           }
-          const listed = (await rows(page)).map((item) => `row ${item.pane}`);
-          assert.equal(listed.length, 6);
+          const drawnRows = await rows(page);
+          assert.equal(drawnRows.length, 6);
+          const listed = drawnRows.flatMap((item) => [`row ${item.pane}`, `close ${item.pane}`]);
           assert.deepEqual(stops, ["inbox-rail-exit", "inbox-rail-place", "inbox-rail-waiting", "inbox-rail-alerts", "inbox-rail-settings", "inbox-rail-pcs",
             "inbox-search-input", "inbox-filter-toggle", "inbox-add", ...listed, "the resize grip", "the thread"],
-            "Tab goes down the rail from the Ovis mark to the PC, then to the list's top row and its rows, the column's resize grip, and the thread");
+            "Tab goes down the rail from the Ovis mark to the PC, then to the list's top row and its rows with their close buttons, the column's resize grip, and the thread");
           await page.locator(".inbox-rail .inbox-rail-place").focus();
           await page.keyboard.press("Shift+Tab");
           assert.equal(await stop(), "inbox-rail-exit", "Shift+Tab goes back up the rail");
@@ -2565,7 +2671,7 @@ try {
           await page.keyboard.press("Escape");
           await page.locator(".settings-dialog").waitFor({ state: "detached" });
           await focused("inbox-rail-settings", "Settings closed gives the focus back to the rail's gear");
-          console.log(`PASS the keyboard's order is the rail's six buttons from the Ovis mark down to the PC, the list's search field, filter and New workspace, its ${listed.length} rows, the column's resize grip, then the thread, and Shift+Tab goes back; Enter and Space press a rail button; Settings and the list of PCs give the focus back to their buttons; Enter on the Ovis mark leaves the mode by one entry that Back undoes`);
+          console.log(`PASS the keyboard's order is the rail's six buttons from the Ovis mark down to the PC, the list's search field, filter and New workspace, its ${drawnRows.length} rows and their close buttons, the column's resize grip, then the thread, and Shift+Tab goes back; Enter and Space press a rail button; Settings and the list of PCs give the focus back to their buttons; Enter on the Ovis mark leaves the mode by one entry that Back undoes`);
         }, desktop);
         await withPage(browser, base, light, "/?app=inbox", "the palette from the pane's More with the list alone", async (page) => {
           await page.locator(".inbox-column .mode-inbox").waitFor();

@@ -2404,6 +2404,17 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
     time.
   A PC that is away draws its rows disabled and faded to 0.55, with no mark, saying **Offline**
   after the PC's name.
+  - A sibling close button (`.inbox-item > .inbox-close`, never nested inside `.inbox-row`; lucide `X`,
+    named and titled **Close {agent}**): omitted for watching devices, offline PCs, and locked
+    pinned agents (lib/paneLocks.ts). On a phone (and on a wide window under a coarse pointer) it
+    stays visible at `--touch-target` and closable rows reserve end padding so it stays clear of the
+    time and state mark; on a wide window under a fine pointer it is `--pointer-target`
+    (`--icon-size-sm`) at `--space-2`, hidden until the row is hovered or focused. Following the
+    hover/focus row-close affordances in Codex and T3 Code (rebuilt natively with no shared code or
+    assets) and the resting-calm rule above, it stays neutral until `ConfirmDialog` (reused for
+    working, blocked, or last-in-workspace panes) asks to confirm; an immediate close failure
+    raises a dismissible inline alert (`.inbox-close-error`) at the top of the list, and closing
+    the thread currently open beside the list returns the right-hand view to the empty chooser.
 - Order: needs you first, then working, done and ready, by the same displayed state the Agents
   list draws (a finish that was read is ready), and inside a state in the order the Agents list
   grouped by state uses: this device's Settings → Within a state (the longest in the state
@@ -2633,8 +2644,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   focus in the thread's composer. The column's search field, put away by Escape in a list too
   narrow to show it always, gives the focus to the round Search button that opened it. On a wide window the keyboard's order is the drawn
   one, which is the document's: the rail's buttons from the Ovis mark down to the PC, each a
-  plain Tab stop that Enter and Space press, then the list's top row, its rows, the column's
-  resize grip, and the thread. The rail's Agent inbox gives the focus to the list's section,
+  plain Tab stop that Enter and Space press, then the list's top row, its rows with their close
+  buttons, the column's
+  resize grip, and the thread. Closing an agent from its row's close button by keyboard moves focus
+  to the nearest surviving online row (or the list's section when none remain or when closed by
+  pointer). The rail's Agent inbox gives the focus to the list's section,
   as an opening does, and the list of PCs gives it back to its button when it closes. Back to Ovis takes the control that was pressed away with the mode's
   shell: a focus left nowhere goes to the classic header's workspace-list toggle (the drawer's
   on a phone, the sidebar's from 769px), as it does whenever the control that held it is gone

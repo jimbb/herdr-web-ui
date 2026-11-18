@@ -31,9 +31,14 @@ export function locksAfterPinToggle(locks: readonly string[], pins: readonly str
   return locks.filter((held) => held !== key && pinned.has(held));
 }
 
-export function usePaneLocked(machineId: string): (paneId: string) => boolean {
+export function usePaneLockChecker(): (machineId: string, paneId: string) => boolean {
   const pins = useSyncExternalStore(subscribeSidebarPins, currentSidebarPins, currentSidebarPins);
   const { settings } = useSettings();
   const locked = useMemo(() => lockedPinKeys(settings.lockedAgents, pins, settings.agentLocks), [settings.lockedAgents, pins, settings.agentLocks]);
-  return useCallback((paneId: string) => locked.has(sidebarPinKey(machineId, paneId)), [locked, machineId]);
+  return useCallback((machineId: string, paneId: string) => locked.has(sidebarPinKey(machineId, paneId)), [locked]);
+}
+
+export function usePaneLocked(machineId: string): (paneId: string) => boolean {
+  const locked = usePaneLockChecker();
+  return useCallback((paneId: string) => locked(machineId, paneId), [locked, machineId]);
 }

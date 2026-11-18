@@ -624,6 +624,9 @@ const BASE: Record<string, string> = {
   "Pick a folder to start in.": "选择要启动的文件夹。",
   "Show QR code": "显示二维码",
   "Agent Queue": "Agent 队列",
+  "Close failed: {reason}": "关闭失败：{reason}",
+  "Close pane {name}?": "关闭面板 {name}？",
+  "The pane's running processes will stop. Closing its last pane also closes the workspace.": "面板中运行的进程将停止。关闭最后一个面板也会关闭工作区。",
 };
 
 export const ZH_PARTS: Record<string, Record<string, string>> = {

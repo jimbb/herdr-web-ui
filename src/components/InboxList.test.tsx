@@ -11,6 +11,7 @@ import * as api from "../lib/api.ts";
 import type { HeaderConnection } from "../lib/headerConnection.ts";
 import { PanePressContext } from "../lib/paneSubmitContext.ts";
 import { SettingsProvider } from "../lib/settings.ts";
+import { setSidebarPins } from "../lib/sidebarPins.ts";
 import { usageCounters } from "../lib/usageCounters.ts";
 import type { SidebarActivity } from "../lib/sidebarActivity.tsx";
 
@@ -68,6 +69,7 @@ const byClass = (root: ReactTestInstance, name: string): ReactTestInstance[] =>
 
 describe("InboxList", () => {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
+  const stored = new Map<string, string>();
   let renderer: ReactTestRenderer | undefined;
   let questionReads: ReturnType<typeof newQuestionReads>;
   let summaryReads: InstanceType<typeof SummaryReads>;
@@ -79,16 +81,22 @@ describe("InboxList", () => {
     promptReads = 0;
     phone = true;
     frames = [];
+    stored.clear();
     const never = () => () => {};
     questionReads = newQuestionReads(never);
     summaryCalls = [];
     summaryReads = new SummaryReads((machineId, paneIds) => new Promise((resolve) => { summaryCalls.push({ machineId, paneIds, resolve }); }), never);
     presses = [];
-    for (const key of ["window", "document", "navigator", "getComputedStyle", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    setSidebarPins([]);
+    for (const key of ["window", "document", "navigator", "getComputedStyle", "localStorage", "HTMLElement", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     const events = new EventTarget();
-    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
-    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en-US"] } });
-    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+    const storage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); }, removeItem: (key: string) => { stored.delete(key); } };
+    Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
+    Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: class {} });
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: storage });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: { languages: ["en-US"] } });
+    Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: {
+      localStorage: storage,
       matchMedia: () => ({ matches: phone, addEventListener() {}, removeEventListener() {} }),
       addEventListener: events.addEventListener.bind(events),
       removeEventListener: events.removeEventListener.bind(events),
@@ -97,18 +105,24 @@ describe("InboxList", () => {
       cancelAnimationFrame() {},
       location: { href: "http://localhost/", search: "" },
     } });
-    Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: () => ({ getPropertyValue: () => "" }) });
-    Object.defineProperty(globalThis, "document", { configurable: true, value: {
+    Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, writable: true, value: () => ({ getPropertyValue: () => "" }) });
+    Object.defineProperty(globalThis, "document", { configurable: true, writable: true, value: {
       body: { nodeType: 1, children: [] },
+      activeElement: null,
       documentElement: { dataset: {}, style: { setProperty() {}, removeProperty() {} } },
       querySelector: () => null,
+      querySelectorAll: () => [],
       addEventListener: events.addEventListener.bind(events),
       removeEventListener: events.removeEventListener.bind(events),
     } });
   });
 
   afterEach(async () => {
-    await act(async () => { renderer?.unmount(); });
+    setSidebarPins([]);
+    await act(async () => {
+      renderer?.unmount();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     renderer = undefined;
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -130,6 +144,7 @@ describe("InboxList", () => {
     handle?: { current: InboxListHandle | null };
     onFilter?: (filter: InboxFilter) => void; onQuery?: (query: string) => void;
     onOpen?: (machineId: string, paneId: string) => void; onNew?: (machineId: string) => void;
+    onClosed?: (machineId: string, paneId: string) => void;
   }
   let nodes = new Map<string, { scrollTop: number; focus(options?: FocusOptions): void }>();
   let focused: { node: string; options?: FocusOptions; label?: string }[] = [];
@@ -141,7 +156,7 @@ describe("InboxList", () => {
     <Stamping machines={machines} activity={options.activity ?? activity} />
     <InboxList ref={options.handle} machines={machines} activity={options.activity ?? activity} watching={options.watching ?? false} wide={options.wide ?? false} current={options.current ?? null}
       filter={options.filter ?? "all"} onFilter={options.onFilter ?? (() => {})} query={options.query ?? ""} onQuery={options.onQuery ?? (() => {})} scroll={scroll} focus={{ opening: options.opening ?? 1, taken, row: options.returnTo ?? null }}
-      onOpen={options.onOpen ?? (() => {})} onNew={options.onNew ?? (() => {})} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
+      onOpen={options.onOpen ?? (() => {})} onNew={options.onNew ?? (() => {})} onClosed={options.onClosed} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
   </PanePressContext.Provider></SettingsProvider>;
   const draw = async (machines: Machine[], options: DrawOptions = {}) => {
     nodes = new Map();
@@ -152,15 +167,21 @@ describe("InboxList", () => {
     drawn = { machines, options };
     await act(async () => {
       renderer = create(view(machines, options), { createNodeMock: (element) => {
-        const classes = String((element.props as { className?: string }).className ?? element.type).split(" ");
+        const props = element.props as { className?: string; "aria-label"?: string; "data-machine"?: string; "data-pane"?: string };
+        const classes = String(props.className ?? element.type).split(" ");
         const name = element.type === "section" ? "section" : classes[0] === "icon-button" ? classes.find((part) => part.startsWith("inbox-") && part !== "inbox-round") ?? classes[0] : classes[0]!;
-        const label = (element.props as { "aria-label"?: string })["aria-label"];
+        const label = props["aria-label"];
+        const itemKey = classes.includes("inbox-item") && props["data-machine"] && props["data-pane"] ? `${props["data-machine"]}:${props["data-pane"]}` : null;
         let top = 0;
         const node = {
           get scrollTop() { return top; },
           set scrollTop(value: number) { top = Math.min(value, scrollMax); },
-          focus(focusOptions?: FocusOptions) { focused.push({ node: name, options: focusOptions, ...(name === "inbox-row" ? { label } : {}) }); },
+          focus(focusOptions?: FocusOptions) { focused.push({ node: name, options: focusOptions, ...(name === "inbox-row" || name === "inbox-close" ? { label } : {}) }); },
           getClientRects: () => (name === "inbox-search-toggle" && options.searchToggleHidden ? [] : [{}]),
+          contains: (other: unknown) => other === node || (itemKey !== null && (other as { insideItem?: string } | null)?.insideItem === itemKey),
+          querySelectorAll: () => [],
+          closest: () => null,
+          matches: () => false,
         };
         nodes.set(name, node);
         return node;
@@ -213,7 +234,10 @@ describe("InboxList", () => {
     for (const node of byClass(root, "inbox-item")) {
       expect([byClass(node, "inbox-name").length, byClass(node, "inbox-words").length]).toEqual([1, 1]);
       expect([byClass(node, "inbox-chip").length, byClass(node, "inbox-place").length, byClass(node, "inbox-dot").length]).toEqual([0, 0, 0]);
-      expect(node.findAll((inner) => inner.type === "button").length).toBe(1);
+      const row = byClass(node, "inbox-row");
+      expect(row).toHaveLength(1);
+      expect(row[0]!.findAll((inner) => inner !== row[0] && inner.type === "button")).toEqual([]);
+      expect(node.findAll((inner) => inner.type === "button").map((button) => button.props.className)).toEqual(["inbox-row", "icon-button inbox-close"]);
     }
   });
 
@@ -615,7 +639,7 @@ describe("InboxList", () => {
   it("gives the focus to the row whose thread a Back just left, and to its own section when that row is not drawn", async () => {
     const root = await draw(roster(), { opening: 2, focusTaken: 1, returnTo: "local:w1C:p1" });
 
-    const spoken = item(root, "w1C:p1").findByType("button").props["aria-label"] as string;
+    const spoken = byClass(item(root, "w1C:p1"), "inbox-row")[0]!.props["aria-label"] as string;
     expect(focused).toEqual([{ node: "inbox-row", options: { preventScroll: true }, label: spoken }]);
     await act(async () => { renderer?.unmount(); });
 
@@ -955,6 +979,265 @@ describe("InboxList", () => {
       expect(opened()).toBe(true);
       await act(async () => { byClass(root, "inbox-search-toggle")[0]!.props.onClick(); });
       expect(opened()).toBe(true);
+    });
+  });
+
+  describe("closing an agent from its row", () => {
+    const closeButton = (root: ReactTestInstance, paneId: string, machineId = "local") =>
+      byClass(item(root, paneId, machineId), "inbox-close")[0];
+    const confirmDialogs = (root: ReactTestInstance) =>
+      root.findAll((node) => typeof node.type === "string" && String(node.props.className).includes("confirm-dialog"));
+    const dialogAction = (dialog: ReactTestInstance, kind: "confirm" | "cancel") =>
+      dialog.findAll((node) => node.type === "button").find((node) => String(node.props.className).includes("btn-danger") === (kind === "confirm"))!;
+    const withSiblingInWorkspace = (pane: HerdrPane): Machine[] => roster().map((machine) => {
+      if (machine.id !== "local" || machine.snapshot === null) return machine;
+      return { ...machine, snapshot: { ...machine.snapshot, panes: [...machine.snapshot.panes, pane] } };
+    });
+    const spyCloseFetch = (responder?: (url: string, body: { pane_id: string }) => Response | Promise<Response>) => {
+      const calls: { url: string; body: { pane_id: string } }[] = [];
+      const spy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) as { pane_id: string } : { pane_id: "" };
+        if (url.endsWith("/pane/close")) calls.push({ url, body });
+        return responder ? await responder(url, body) : Response.json({});
+      }, { preconnect: globalThis.fetch.preconnect }));
+      return { calls, spy };
+    };
+
+    it("names each close button for its agent, and omits it for watching devices, offline PCs and locked pinned agents", async () => {
+      stored.set("ovis:settings", JSON.stringify({ agentLocks: true, lockedAgents: ["local:w1E:p1"] }));
+      setSidebarPins(["local:w1E:p1", "laptop:w1F:p1"]);
+      const machines = twoPcs("connected");
+      const root = await draw(machines);
+
+      expect(closeButton(root, "w1C:p1", "local")?.props["aria-label"]).toBe("Close Idempotent payments");
+      expect(closeButton(root, "w1C:p1", "local")?.props.title).toBe("Close Idempotent payments");
+      expect(closeButton(root, "w1E:p1", "local")).toBeUndefined();
+      // Same pane ID on another PC without its own lock stays closable.
+      expect(closeButton(root, "w1E:p1", "laptop")?.props["aria-label"]).toBe("Close Why did the backup fail?");
+      // Unpinned or unlocked rows stay closable.
+      expect(closeButton(root, "w1F:p1", "laptop")).toBeDefined();
+
+      // Watching device gets no close buttons.
+      await redraw({ watching: true });
+      expect(byClass(root, "inbox-close")).toHaveLength(0);
+
+      // Offline PC rows get no close buttons while connected PC rows keep theirs.
+      await redraw({ watching: false, machines: twoPcs("disconnected") });
+      expect(closeButton(root, "w1C:p1", "local")).toBeDefined();
+      expect(closeButton(root, "w1C:p1", "laptop")).toBeUndefined();
+
+      // Unpinning releases the lock so Close returns.
+      await act(async () => { setSidebarPins([]); });
+      expect(closeButton(root, "w1E:p1", "local")).toBeDefined();
+    });
+
+    it("never fires row press or onOpen when Close is clicked, and ignores double-click's second press", async () => {
+      const opened: string[] = [];
+      const sibling = { ...structuredClone(fixture[0]!.snapshot!.panes[2]!), pane_id: "w1E:p2", label: "Helper" } as HerdrPane;
+      const root = await draw(withSiblingInWorkspace(sibling), { onOpen: (m, p) => opened.push(`${m}:${p}`) });
+      const { calls, spy } = spyCloseFetch();
+      try {
+        const btn = closeButton(root, "w1E:p1")!;
+        await act(async () => { btn.props.onClick({ detail: 2, currentTarget: {} }); });
+        expect(calls).toEqual([]);
+        await act(async () => { btn.props.onClick({ detail: 1, currentTarget: {} }); });
+        expect(calls).toEqual([{ url: "/api/pane/close", body: { pane_id: "w1E:p1" } }]);
+        expect(presses).toEqual([]);
+        expect(opened).toEqual([]);
+      } finally { spy.mockRestore(); }
+    });
+
+    it("closes an idle or done non-last agent at once on its PC, records usage and notifies onClosed", async () => {
+      const closed: string[] = [];
+      const told: string[] = [];
+      const sibling = { ...structuredClone(fixture[0]!.snapshot!.panes[2]!), pane_id: "w1E:p2", label: "Helper" } as HerdrPane;
+      const [localMulti] = withSiblingInWorkspace(sibling);
+      const laptopMulti = { ...structuredClone(localMulti!), id: "laptop", name: "Laptop" };
+      const { calls, spy } = spyCloseFetch();
+      const counting = spyOn(usageCounters, "paneUse").mockImplementation((name, machineId) => { told.push(`${name}@${machineId}`); });
+      try {
+        const root = await draw([localMulti!, laptopMulti], {
+          activity: statusOf({ "w1E:p1": "done" }),
+          onClosed: (machineId, paneId) => closed.push(`${machineId}:${paneId}`),
+        });
+        await act(async () => { closeButton(root, "w1E:p1", "laptop")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        expect(confirmDialogs(root)).toHaveLength(0);
+        expect(calls).toEqual([{ url: "/api/machines/laptop/pane/close", body: { pane_id: "w1E:p1" } }]);
+        expect(told).toEqual(["close_pane_by_button@laptop"]);
+        expect(closed).toEqual(["laptop:w1E:p1"]);
+      } finally {
+        spy.mockRestore();
+        counting.mockRestore();
+      }
+    });
+
+    it("asks confirmation for a last-in-workspace, working, or blocked agent, and cancels or confirms via ConfirmDialog", async () => {
+      const sibling = { ...structuredClone(fixture[0]!.snapshot!.panes[0]!), pane_id: "w1C:p2", agent_status: "idle" as const } as HerdrPane;
+      const closed: string[] = [];
+      let failOnce = true;
+      const { calls, spy } = spyCloseFetch(() => {
+        if (failOnce) {
+          failOnce = false;
+          return Response.json({ error: { message: "busy right now" } }, { status: 500 });
+        }
+        return Response.json({});
+      });
+      try {
+        // 1) Last pane in workspace even when another PC has the same workspace_id (w1E).
+        const root = await draw(twoPcs("connected"), { onClosed: (m, p) => closed.push(`${m}:${p}`) });
+        let buttonFocused = 0;
+        await act(async () => {
+          closeButton(root, "w1E:p1", "laptop")!.props.onClick({ detail: 1, currentTarget: { focus: () => { buttonFocused++; } } });
+        });
+        expect(buttonFocused).toBe(1);
+        expect(calls).toEqual([]);
+        expect(confirmDialogs(root)).toHaveLength(1);
+        expect(text(confirmDialogs(root)[0]!.findByProps({ className: "modal-title" }))).toBe("Close pane Why did the backup fail??");
+
+        // Cancel leaves it open.
+        await act(async () => { dialogAction(confirmDialogs(root)[0]!, "cancel").props.onClick(); });
+        expect(confirmDialogs(root)).toHaveLength(0);
+        expect(calls).toEqual([]);
+
+        // 2) Working agent with a sibling in the same workspace still confirms; failure keeps dialog open and retry closes.
+        await redraw({ machines: withSiblingInWorkspace(sibling) });
+        await act(async () => { closeButton(root, "w1C:p1")!.props.onClick({ detail: 1, currentTarget: { focus: () => {} } }); });
+        expect(confirmDialogs(root)).toHaveLength(1);
+        await act(async () => {
+          dialogAction(confirmDialogs(root)[0]!, "confirm").props.onClick();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(confirmDialogs(root)).toHaveLength(1);
+        expect(text(byClass(confirmDialogs(root)[0]!, "confirm-error")[0]!)).toBe("busy right now");
+        expect(closed).toEqual([]);
+
+        await act(async () => {
+          dialogAction(confirmDialogs(root)[0]!, "confirm").props.onClick();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(confirmDialogs(root)).toHaveLength(0);
+        expect(calls).toEqual([
+          { url: "/api/pane/close", body: { pane_id: "w1C:p1" } },
+          { url: "/api/pane/close", body: { pane_id: "w1C:p1" } },
+        ]);
+        expect(closed).toEqual(["local:w1C:p1"]);
+      } finally { spy.mockRestore(); }
+    });
+
+    it("closes the confirmation automatically if the row becomes locked, offline, watching or gone", async () => {
+      stored.set("ovis:settings", JSON.stringify({ agentLocks: true, lockedAgents: ["local:w1D:p1"] }));
+      const root = await draw(roster());
+      const openBlocked = async () => {
+        await act(async () => { closeButton(root, "w1D:p1")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        expect(confirmDialogs(root)).toHaveLength(1);
+      };
+
+      await openBlocked();
+      await redraw({ watching: true });
+      expect(confirmDialogs(root)).toHaveLength(0);
+      await redraw({ watching: false });
+
+      await openBlocked();
+      await redraw({ machines: roster(undefined, "disconnected") });
+      expect(confirmDialogs(root)).toHaveLength(0);
+      await redraw({ machines: roster() });
+
+      await openBlocked();
+      await redraw({ machines: roster().map((m) => ({ ...m, snapshot: m.snapshot && { ...m.snapshot, panes: m.snapshot.panes.filter((p) => p.pane_id !== "w1D:p1") } })) });
+      expect(confirmDialogs(root)).toHaveLength(0);
+      await redraw({ machines: roster() });
+
+      await openBlocked();
+      await act(async () => { setSidebarPins(["local:w1D:p1"]); });
+      expect(confirmDialogs(root)).toHaveLength(0);
+    });
+
+    it("closes no second pane in the same workspace until the snapshot drops the first, while another PC stays free (#3286)", async () => {
+      const p2 = { ...structuredClone(fixture[0]!.snapshot!.panes[2]!), pane_id: "w1E:p2", label: "Second in infra" } as HerdrPane;
+      const [localMulti] = withSiblingInWorkspace(p2);
+      const laptopMulti = { ...structuredClone(localMulti!), id: "laptop", name: "Laptop" };
+      const { calls, spy } = spyCloseFetch();
+      try {
+        const root = await draw([localMulti!, laptopMulti]);
+        await act(async () => { closeButton(root, "w1E:p2", "local")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        await act(async () => { closeButton(root, "w1E:p1", "local")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        await act(async () => { closeButton(root, "w1E:p2", "laptop")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        expect(calls).toEqual([
+          { url: "/api/pane/close", body: { pane_id: "w1E:p2" } },
+          { url: "/api/machines/laptop/pane/close", body: { pane_id: "w1E:p2" } },
+        ]);
+        expect(confirmDialogs(root)).toHaveLength(0);
+
+        // Once the snapshot drops w1E:p2 on local, closing w1E:p1 now sees it is the last pane in w1E.
+        await redraw({ machines: [roster()[0]!, laptopMulti] });
+        await act(async () => { closeButton(root, "w1E:p1", "local")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        expect(confirmDialogs(root)).toHaveLength(1);
+      } finally { spy.mockRestore(); }
+    });
+
+    it("shows a dismissible alert when an immediate close fails", async () => {
+      const sibling = { ...structuredClone(fixture[0]!.snapshot!.panes[2]!), pane_id: "w1E:p2", label: "Helper" } as HerdrPane;
+      let status = 404;
+      const { spy } = spyCloseFetch(() => status === 404
+        ? Response.json({ error: { code: "not_found", message: "Not found" } }, { status: 404 })
+        : Response.json({ error: { message: "bridge refused" } }, { status: 500 }));
+      try {
+        const root = await draw(withSiblingInWorkspace(sibling));
+        await act(async () => { closeButton(root, "w1E:p1")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        const alert = byClass(root, "inbox-close-error")[0]!;
+        expect(alert.props.role).toBe("alert");
+        expect(text(byClass(alert, "inbox-close-error-text")[0]!)).toBe("This PC's bridge does not offer this yet");
+        await act(async () => { byClass(alert, "inbox-close-error-dismiss")[0]!.props.onClick(); });
+        expect(byClass(root, "inbox-close-error")).toHaveLength(0);
+
+        status = 500;
+        await act(async () => { closeButton(root, "w1E:p1")!.props.onClick({ detail: 1, currentTarget: {} }); });
+        const second = byClass(root, "inbox-close-error")[0]!;
+        expect(text(byClass(second, "inbox-close-error-text")[0]!)).toContain("Close failed: ");
+      } finally { spy.mockRestore(); }
+    });
+
+    it("restores focus cleanly after closing without jumping back to a closed current thread", async () => {
+      const p2 = { ...structuredClone(fixture[0]!.snapshot!.panes[2]!), pane_id: "w1E:p2", label: "After Infra" } as HerdrPane;
+      const multi = withSiblingInWorkspace(p2);
+      const { spy } = spyCloseFetch();
+      try {
+        // Keyboard close with focus inside the closing item moves focus to the surviving neighbor,
+        // and ignores returnTo for that closed key even if onClosed triggers inbox.show().
+        phone = false;
+        const root = await draw(multi, {
+          wide: true,
+          current: "local:w1E:p1",
+          opening: 1,
+          focusTaken: 1,
+          onClosed: (_machineId, paneId) => {
+            if (paneId === "w1E:p1") void redraw({ current: null, opening: 2, returnTo: "local:w1E:p1" });
+          },
+        });
+        Object.defineProperty(document, "activeElement", { configurable: true, writable: true, value: { insideItem: "local:w1E:p1" } });
+        focused.length = 0;
+        await act(async () => { closeButton(root, "w1E:p1")!.props.onClick({ detail: 0, currentTarget: {} }); });
+        expect(focused).toEqual([{ node: "inbox-row", options: { preventScroll: true }, label: expect.stringContaining("After Infra") }]);
+
+        // Focus held outside the closed item (e.g. search field) is left alone.
+        await act(async () => { renderer?.unmount(); });
+        const second = await draw(multi, { wide: true });
+        Object.defineProperty(document, "activeElement", { configurable: true, writable: true, value: { nodeName: "INPUT" } });
+        focused.length = 0;
+        await act(async () => { closeButton(second, "w1E:p1")!.props.onClick({ detail: 0, currentTarget: {} }); });
+        expect(focused).toEqual([]);
+
+        // Pointer close from ConfirmDialog returns focus to the list section, not a neighbor row.
+        Object.defineProperty(document, "activeElement", { configurable: true, writable: true, value: { closest: (sel: string) => sel === ".confirm-dialog" ? {} : null } });
+        await act(async () => { closeButton(second, "w1D:p1")!.props.onClick({ detail: 1, currentTarget: { focus: () => {} } }); });
+        focused.length = 0;
+        await act(async () => {
+          dialogAction(confirmDialogs(second)[0]!, "confirm").props.onClick();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(focused.filter((call) => call.node !== "modal")).toEqual([{ node: "section", options: { preventScroll: true } }]);
+      } finally { spy.mockRestore(); }
     });
   });
 });
