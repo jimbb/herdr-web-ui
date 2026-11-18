@@ -18,6 +18,7 @@ import { connectionData, type Client } from "./connections.ts";
 import { createPendingDelivery } from "./pending.ts";
 import { at, claude, collectorSnapshot, handlers, hub, line, opencode, originalCollector, root, workingClaude } from "./status.fake.ts";
 import { notePaneFolders, otherHostsShare } from "../windows-share.ts";
+import { WAIT_GRACE_MS, WAIT_LIMIT_MS } from "../background-wait.ts";
 
 describe.each(["baseline", "gap", "resync", "newer-event"] as const)("native OpenCode ownership reconciliation (%s)", (mode) => {
   it.each([
@@ -2934,5 +2935,193 @@ describe("the read of herdr's snapshot", () => {
     expect(otherHostsShare("\\\\nas\\work\\proj\\a.md", [])).toBe(false);
     await answerOlder();
     expect(otherHostsShare("\\\\nas\\work\\proj\\a.md", [])).toBe(false);
+  });
+});
+
+describe("a head pane held while its hc child terminals work", () => {
+  const CLEAN_CLAUDE = "77777777-7777-4777-8777-777777777777";
+  const cleanTranscript = join(root, `${CLEAN_CLAUDE}.jsonl`);
+  writeFileSync(cleanTranscript, line({ type: "user", origin: { kind: "human" }, timestamp: new Date(at - 1000).toISOString(), permissionMode: "default", message: { role: "user", content: "ready" } }));
+
+  const makePane = (paneId: string, overrides: Partial<HerdrPane> = {}): HerdrPane => ({
+    pane_id: paneId, terminal_id: paneId, workspace_id: "w1", tab_id: "w1:t1", agent_status: "idle", agent: null, focused: false, revision: 0, ...overrides,
+  });
+
+  afterEach(() => {
+    setSystemTime();
+    jest.useRealTimers();
+  });
+
+  it("holds a resting head across agents while a child works or is blocked, and emits the parent frame immediately", async () => {
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "codex", agent_status: "done" });
+    const child = makePane("child", { agent: "agy", agent_status: "idle", parent_pane_id: "head" });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    // At rest without any working child, neither holds.
+    expect((await h.snapshot()).panes.map((p) => [p.pane_id, Boolean(p.background_wait)])).toEqual([["head", false], ["child", false]]);
+    expect(h.lastFor("head")).toBeNull();
+
+    // Child begins working: head emits pane-status with bg: true and tells push/queue right away.
+    const alertFrom = h.paneAlerts.length;
+    const queueFrom = h.queueStatuses.length;
+    h.herdrSays(head, { ...child, agent_status: "working" });
+    handlers.onStatus("child", "working", "agy");
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: true });
+    expect(h.paneAlerts.slice(alertFrom)).toContainEqual({ paneId: "head", status: "working" });
+    expect(h.queueStatuses.slice(queueFrom)).toContainEqual({ paneId: "head", status: "working", agent: "codex" });
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+
+    // Child becomes blocked: still holds head.
+    h.herdrSays(head, { ...child, agent_status: "blocked" });
+    handlers.onStatus("child", "blocked", "agy");
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+  });
+
+  it("holds a chain of heads recursively when a grandchild works (including non-Claude heads)", async () => {
+    const h = hub(cleanTranscript);
+    const rootHead = makePane("gp", { agent: "agy", agent_status: "done" });
+    const midHead = makePane("p", { agent: "claude", agent_status: "idle", parent_pane_id: "gp", agent_session: { agent: "claude", source: "hook", kind: "id", value: CLEAN_CLAUDE } });
+    const worker = makePane("c", { agent: "codex", agent_status: "idle", parent_pane_id: "p" });
+    h.herdrSays(rootHead, midHead, worker);
+    handlers.onBaseline([rootHead, midHead, worker]);
+    await h.snapshot();
+
+    h.herdrSays(rootHead, midHead, { ...worker, agent_status: "working" });
+    handlers.onStatus("c", "working", "codex");
+    expect(h.lastFor("p")).toEqual({ status: "idle", tasks: 0, bg: true });
+    expect(h.lastFor("gp")).toEqual({ status: "done", tasks: 0, bg: true });
+    const snap = await h.snapshot();
+    expect(snap.panes.map((p) => [p.pane_id, Boolean(p.background_wait)])).toEqual([["gp", true], ["p", true], ["c", false]]);
+  });
+
+  it("holds a head through its own finish and releases after WAIT_GRACE_MS once the last child finishes", async () => {
+    jest.useFakeTimers();
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "claude", agent_status: "working", agent_session: { agent: "claude", source: "hook", kind: "id", value: CLEAN_CLAUDE } });
+    const c1 = makePane("c1", { agent: "agy", agent_status: "working", parent_pane_id: "head" });
+    const c2 = makePane("c2", { agent: "agy", agent_status: "working", parent_pane_id: "head" });
+    h.herdrSays(head, c1, c2);
+    handlers.onBaseline([head, c1, c2]);
+    await h.snapshot();
+
+    // Head finishes its own turn while both children still work: held immediately, alerts working (not done).
+    h.herdrSays({ ...head, agent_status: "idle" }, c1, c2);
+    handlers.onStatus("head", "idle", "claude");
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: true });
+    expect(h.paneAlerts.filter((a) => a.paneId === "head").at(-1)?.status).toBe("working");
+
+    // First child finishes, second still works: even past grace, head stays held.
+    h.herdrSays({ ...head, agent_status: "idle" }, { ...c1, agent_status: "idle" }, c2);
+    handlers.onStatus("c1", "idle", "agy");
+    jest.advanceTimersByTime(WAIT_GRACE_MS + 1000);
+    expect(h.lastFor("head")?.bg).toBe(true);
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+
+    // Last child finishes: held for WAIT_GRACE_MS without firing a premature done alert.
+    h.herdrSays({ ...head, agent_status: "idle" }, { ...c1, agent_status: "idle" }, { ...c2, agent_status: "idle" });
+    handlers.onStatus("c2", "idle", "agy");
+    jest.advanceTimersByTime(WAIT_GRACE_MS - 1000);
+    expect(h.lastFor("head")?.bg).toBe(true);
+    expect(h.paneAlerts.filter((a) => a.paneId === "head").some((a) => a.status === "done")).toBe(false);
+
+    // Once grace expires, waitTimer releases the head and fires its done alert.
+    jest.advanceTimersByTime(2000);
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: false });
+    expect(h.paneAlerts.filter((a) => a.paneId === "head").at(-1)).toEqual({ paneId: "head", status: "done" });
+    expect(h.queueStatuses.filter((q) => q.paneId === "head").at(-1)?.status).toBe("done");
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBeUndefined();
+  });
+
+  it("does not apply a 30-min WAIT_LIMIT_MS cap to child holds", async () => {
+    jest.useFakeTimers();
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "agy", agent_status: "done" });
+    const child = makePane("child", { agent: "codex", agent_status: "working", parent_pane_id: "head" });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    await h.snapshot();
+
+    // Advance wall clock past WAIT_LIMIT_MS and run waitTimer tick: head must remain held.
+    setSystemTime(Date.now() + WAIT_LIMIT_MS + 60_000);
+    jest.advanceTimersByTime(1000);
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+    expect(h.paneAlerts.filter((a) => a.paneId === "head").some((a) => a.status === "done")).toBe(false);
+
+    // Once the child stops working after 30+ minutes, head holds for WAIT_GRACE_MS then releases.
+    h.herdrSays(head, { ...child, agent_status: "idle" });
+    handlers.onStatus("child", "idle", "codex");
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+    setSystemTime(Date.now() + WAIT_GRACE_MS + 1000);
+    jest.advanceTimersByTime(1000);
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: false });
+    expect(h.paneAlerts.filter((a) => a.paneId === "head").at(-1)).toEqual({ paneId: "head", status: "done" });
+  });
+
+  it.each(["closed", "ended", "unlinked"] as const)("releases a held head after grace when its working child is %s", async (mode) => {
+    jest.useFakeTimers();
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "claude", agent_status: "done", agent_session: { agent: "claude", source: "hook", kind: "id", value: CLEAN_CLAUDE } });
+    const child = makePane("child", { agent: "agy", agent_status: "working", parent_pane_id: "head" });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    await h.snapshot();
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+
+    if (mode === "closed") {
+      h.herdrSays(head);
+      handlers.onPaneClosed("child");
+    } else if (mode === "ended") {
+      h.herdrSays(head);
+      handlers.onPaneEnded("child");
+    } else {
+      const reparented = { ...child, parent_pane_id: undefined };
+      h.herdrSays(head, reparented);
+      await h.snapshot();
+    }
+    // Held through grace immediately after detach.
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+    jest.advanceTimersByTime(WAIT_GRACE_MS - 1000);
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+    // Released once grace expires.
+    jest.advanceTimersByTime(2000);
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: false });
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBeUndefined();
+  });
+
+  it("updates an already-known head when a working child arrives in a baseline snapshot", () => {
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "codex", agent_status: "idle" });
+    h.herdrSays(head);
+    handlers.onBaseline([head]);
+    expect(h.lastFor("head")).toBeNull();
+
+    const child = makePane("child", { agent: "claude", agent_status: "working", parent_pane_id: "head", agent_session: { agent: "claude", source: "hook", kind: "id", value: CLEAN_CLAUDE } });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    expect(h.lastFor("head")).toEqual({ status: "idle", tasks: 0, bg: true });
+    expect(h.paneAlerts.at(-1)).toEqual({ paneId: "head", status: "working" });
+  });
+
+  it("holds a head across onPaneMoved and onResync", async () => {
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "codex", agent_status: "done" });
+    const child = makePane("child", { agent: "agy", agent_status: "idle", parent_pane_id: "head" });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    await h.snapshot();
+
+    // Resync finds the child working: head becomes held immediately and queue hears working.
+    const workingChild = { ...child, agent_status: "working" as const };
+    h.herdrSays(head, workingChild);
+    handlers.onResync([head, workingChild], new Set());
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: true });
+    expect(h.queueStatuses.filter((q) => q.paneId === "head").at(-1)?.status).toBe("working");
+
+    // Child moves across workspaces under a new pane ID: head remains held.
+    handlers.onPaneMoved?.("child", "child-moved");
+    const movedChild = makePane("child-moved", { agent: "agy", agent_status: "working", parent_pane_id: "head" });
+    h.herdrSays(head, movedChild);
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
   });
 });
