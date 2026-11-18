@@ -61,4 +61,7 @@ export const QUEUE_KO: Record<string, string> = {
   "All queued projects busy": "대기 중인 프로젝트가 모두 작업 중입니다",
   "Ready to launch": "시작 준비 완료",
   "Idle — no runnable tasks": "유휴 — 실행할 수 있는 작업 없음",
+  "Last {count} runs": "최근 {count}개",
+  "Show all ({count})": "모두 보기 ({count})",
+  "Show last {count}": "최근 {count}개만 보기",
 };

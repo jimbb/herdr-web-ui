@@ -61,4 +61,7 @@ export const QUEUE_ZH: Record<string, string> = {
   "All queued projects busy": "所有排队的项目都在忙碌中",
   "Ready to launch": "可以启动",
   "Idle — no runnable tasks": "空闲 — 没有可运行的任务",
+  "Last {count} runs": "最近 {count} 次",
+  "Show all ({count})": "显示全部 ({count})",
+  "Show last {count}": "仅显示最近 {count} 次",
 };

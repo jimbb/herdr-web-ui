@@ -116,6 +116,56 @@ function queueGroupDisplayRank(tasks: readonly QueueTask[]): number {
   return rank;
 }
 
+export const RECENT_DONE_LIMIT = 3;
+
+export interface QueueDisplaySections {
+  activeGroups: QueueProjectGroup[];
+  doneTasks: QueueTask[];
+}
+
+function parseIsoMs(iso: string | null): number {
+  if (!iso) return 0;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Returns `done` tasks ordered most-recent first (preferring `finishedAt`, then `startedAt`, then
+ * `createdAt`, and reverse insertion order when timestamps tie).
+ */
+export function sortDoneQueueTasks(tasks: readonly QueueTask[]): QueueTask[] {
+  return tasks
+    .map((task, index) => ({
+      task,
+      index,
+      finished: parseIsoMs(task.finishedAt),
+      started: parseIsoMs(task.startedAt),
+      created: parseIsoMs(task.createdAt),
+    }))
+    .filter(({ task }) => task.status === "done")
+    .sort((a, b) => {
+      const aPrimary = a.finished || a.started || a.created;
+      const bPrimary = b.finished || b.started || b.created;
+      if (bPrimary !== aPrimary) return bPrimary - aPrimary;
+      if (b.started !== a.started) return b.started - a.started;
+      if (b.created !== a.created) return b.created - a.created;
+      return b.index - a.index;
+    })
+    .map(({ task }) => task);
+}
+
+/**
+ * Splits tasks for Agent Queue display into ordered active project cards (`running`, `queued`,
+ * `failed`) and a combined `done` list ordered most-recent first.
+ */
+export function splitQueueTasksForDisplay(tasks: readonly QueueTask[]): QueueDisplaySections {
+  const active = tasks.filter((task) => task.status !== "done");
+  return {
+    activeGroups: orderQueueGroupsForDisplay(groupQueueTasksByFolder(active)),
+    doneTasks: sortDoneQueueTasks(tasks),
+  };
+}
+
 /**
  * Orders project groups and tasks for Agent Queue display so active and idle/queued work stay at the
  * top while finished tasks sink below, preserving queue order among queued tasks and first-seen

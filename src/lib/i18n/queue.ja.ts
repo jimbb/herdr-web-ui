@@ -61,4 +61,7 @@ export const QUEUE_JA: Record<string, string> = {
   "All queued projects busy": "待機中のプロジェクトはすべて実行中です",
   "Ready to launch": "起動可能",
   "Idle — no runnable tasks": "アイドル — 実行可能なタスクなし",
+  "Last {count} runs": "直近 {count} 件",
+  "Show all ({count})": "すべて表示 ({count})",
+  "Show last {count}": "直近 {count} 件のみ",
 };
