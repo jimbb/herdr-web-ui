@@ -82,13 +82,11 @@ type EditorState =
 export function QueueFootEntry({ snapshot, onOpen }: { snapshot: QueueSnapshot | null; onOpen(): void }) {
   const t = useT();
   const { running, queued, active, paused } = queueBadgeCounts(snapshot);
-  const meta = paused
-    ? t("Paused")
-    : running > 0
-      ? t("{count} running", { count: running })
-      : queued > 0
-        ? t("{count} queued", { count: queued })
-        : null;
+  const parts = [
+    paused ? t("Paused") : running > 0 ? t("{count} running", { count: running }) : null,
+    queued > 0 ? t("{count} queued", { count: queued }) : null,
+  ].filter((part) => part !== null);
+  const meta = parts.length > 0 ? parts.join(" · ") : null;
   return (
     <button
       type="button"
