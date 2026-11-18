@@ -3072,6 +3072,9 @@ describe("claudeSubagents, background commands", () => {
     s.parent({ type: "user", timestamp: at(33), message: { role: "user", content: "Another Claude session sent a message: <teammate-message>hi</teammate-message>" } });
     s.parent({ type: "user", timestamp: at(34), message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } });
     expect(claudeSubagentState(s.path, true, NOW)).toMatchObject({ running: 4, turnRunning: 1 });
+    // nor an hc note typed in for a child terminal, which Claude records as the person's
+    s.parent({ type: "user", timestamp: at(35), origin: { kind: "human" }, permissionMode: "bypassPermissions", message: { role: "user", content: '<hc from="t79 worker">Green commit, moving on.</hc>' } });
+    expect(claudeSubagentState(s.path, true, NOW)).toMatchObject({ running: 4, turnRunning: 1 });
   });
 
   it("tells the pane's running count and what of it is the turn's when either changes", async () => {
