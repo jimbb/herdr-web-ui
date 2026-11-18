@@ -1,9 +1,11 @@
 import { useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from "react";
-import { Ellipsis, ListFilter, Monitor, Plus, Search, Terminal, TriangleAlert, X } from "lucide-react";
+import { Ellipsis, FolderOpen, ListFilter, ListOrdered, Monitor, Plus, Search, Terminal, TriangleAlert, X } from "lucide-react";
 
+import type { QueueSnapshot } from "../../shared/agent-queue.ts";
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus } from "../../shared/protocol.ts";
-import { heldOrder, INBOX_FILTERS, inboxEmpty, inboxFiltered, inboxKey, inboxOrder, inboxSearched, inboxSinceAt, inboxStatus, inboxWords, plainWords, type InboxFilter } from "../lib/agentInbox.ts";
+import { INBOX_FILTERS, inboxEmpty, inboxFiltered, inboxHeldEntries, inboxKey, inboxNesting, inboxQueue, inboxQueueSearched, inboxRoster, inboxSearched, inboxSections, inboxSinceAt, inboxStatus, inboxWords, plainWords, type InboxFilter } from "../lib/agentInbox.ts";
+import { inboxQueueState } from "../lib/agentQueue.ts";
 import { closePane as closeMachinePane, routeMissing } from "../lib/api.ts";
 import { agentGroup, type AgentRow } from "../lib/agentRoster.ts";
 import { stateSince } from "../lib/agentStateSince.ts";
@@ -29,6 +31,7 @@ import { summaryTargets, useInboxSummaries, type RowSummary, type SummaryReads }
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { agentRowTitle, blockedNote, stateAge } from "./AgentSidebar.tsx";
+import { InboxQueueRow } from "./InboxQueueRow.tsx";
 import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { compactWorktreeName, StatusBadge } from "./Sidebar.tsx";
@@ -65,6 +68,7 @@ export interface InboxListProps {
   /** the row (inboxKey) whose thread shows beside the list */
   current?: string | null;
   onOpen(machineId: string, paneId: string): void;
+  queue?: { snapshot: QueueSnapshot; onOpen(taskId: string): void; onChange(next: QueueSnapshot): void };
   onNew(machineId: string): void;
   onClosed?(machineId: string, paneId: string): void;
   /** the page's reader of the waiting agents' questions (lib/useInbox.ts), which outlives this list */
@@ -112,23 +116,43 @@ export function InboxAvatar({ mark }: { mark: string | null }) {
 
 /**
  * The inbox mode's list: every shown PC's agents, the ones that need the reader first, each a row of two lines.
- * A row opens its agent's chat; nothing is answered or typed from here.
+ * Agent rows open chat; queue rows open the task in Agent Queue.
  */
-export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, onNew, onClosed, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
+export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, queue, onNew, onClosed, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
   const t = useT();
   const pressPane = useContext(PanePressContext);
   const paneLocked = usePaneLockChecker();
-  const [closeError, setCloseError] = useState<UserError | null>(null);
+  const [rowError, setRowError] = useState<UserError | null>(null);
+  const [queueBusy, setQueueBusy] = useState(false);
+  const queueInFlight = useRef(false);
+  const runQueueAction = async (mutation: () => Promise<QueueSnapshot>, restoreFocus?: () => void): Promise<void> => {
+    if (!queue || watching || queueInFlight.current) return;
+    queueInFlight.current = true;
+    setQueueBusy(true);
+    setRowError(null);
+    try {
+      const next = await mutation();
+      restoreFocus?.();
+      queue.onChange(next);
+    } catch (reason) {
+      setRowError(userErrorMessage(reason));
+    } finally {
+      queueInFlight.current = false;
+      setQueueBusy(false);
+    }
+  };
   const root = useRef<HTMLElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const searchToggle = useRef<HTMLButtonElement>(null);
-  const { settings, resolvedLanguage } = useSettings();
+  const { settings, resolvedLanguage, update } = useSettings();
   // at a phone's width a menu of the list's is a sheet, a dialog (RowMenu): its button says which
   const popup = useMediaQuery(SHEET_QUERY) ? "dialog" : "menu";
   // within a state, the Agents list's own order (Settings → Within a state), names as its rows draw them
-  const { agentGroupSort: sort, sidebarRows, statusIndicators } = settings;
-  const all = useMemo(() => inboxOrder(machines, activity, { sort, name: (row) => agentRowTitle(row, sidebarRows === "one").drawn }), [machines, activity, sort, sidebarRows]);
+  const { agentGroupSort: sort, inboxGrouping, sidebarRows, statusIndicators } = settings;
+  const all = useMemo(() => inboxRoster(machines, activity), [machines, activity]);
+  const tasks = queue?.snapshot.tasks;
+  const queued = useMemo(() => inboxQueue(tasks ?? [], all), [tasks, all]);
   const questions = useInboxQuestions(questionReads, questionTargets(all, activity));
   const summaries = useInboxSummaries(summaryReads, summaryTargets(all, activity));
   // when this device saw each agent's state begin: App stamps the changes for as long as the page lives, the Agents
@@ -147,6 +171,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     });
   };
   const found = inboxSearched(inboxFiltered(all, filter, activity), query, machines, t, wordsOf);
+  const queueFound = inboxQueueSearched(queued.entries, filter, query);
 
   // a state change never moves a row under a finger or the keyboard's focus (AgentSidebar.tsx): while either is in
   // the list, rows keep the order last drawn; the reader's own doing (a filter, a query) draws them as they are at
@@ -161,12 +186,16 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     pressTimer.current = setTimeout(() => { pressTimer.current = null; setPressHeld(false); }, PRESS_HOLD_MS);
   };
   useEffect(() => () => { if (pressTimer.current !== null) clearTimeout(pressTimer.current); }, []);
-  const readerKey = `${filter}\n${query}`;
+  const readerKey = `${inboxGrouping}\n${filter}\n${query}`;
   const kept = useRef<{ readerKey: string; order: readonly string[] } | null>(null);
   const holding = (focusIn || pressHeld) && kept.current?.readerKey === readerKey;
-  const shown = holding ? heldOrder(found, inboxKey, kept.current?.order ?? []) : found;
+  const sections = inboxSections(found, queueFound, machines, activity, inboxGrouping, { sort, name: (row) => agentRowTitle(row, sidebarRows === "one").drawn });
+  if (holding && kept.current) for (const section of sections) section.entries = inboxHeldEntries(section.entries, kept.current.order);
+  const displayed = sections.flatMap(({ entries }) => entries);
+  const shown = displayed.flatMap((entry) => entry.kind === "agent" ? [entry.row] : []);
+  const nesting = inboxNesting(shown);
   useEffect(() => {
-    if (!holding) kept.current = { readerKey, order: shown.map(inboxKey) };
+    if (!holding) kept.current = { readerKey, order: displayed.map(({ key }) => key) };
   });
 
   // the place the list had is reached again once its rows are back: a waiting row's question and each row's last words come after the mount,
@@ -189,7 +218,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     if (node === null || restoring.current === null) return;
     node.scrollTop = restoring.current;
     if (node.scrollTop === restoring.current) restoring.current = null;
-  }, [questions, summaries]);
+  }, [questions, summaries, tasks]);
   // The list takes the focus once for each time it opens. One only drawn again for another width finds its opening's
   // focus taken, and leaves the focus where it is: in the composer of the thread it now stands beside. Opened by
   // Back from a thread, it gives the focus to that thread's row while it still draws it: the reader's place.
@@ -220,7 +249,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     },
     isLocked: paneLocked,
     watching,
-    onBeforeImmediate: () => setCloseError(null),
+    onBeforeImmediate: () => setRowError(null),
     onSuccess: (machineId, paneId) => {
       const key = sidebarPinKey(machineId, paneId);
       closedKeys.current.add(key);
@@ -248,11 +277,11 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     onError: (reason, machineId, paneId) => {
       pendingFocus.current.delete(sidebarPinKey(machineId, paneId));
       if (routeMissing(reason)) {
-        setCloseError({ message: t("This PC's bridge does not offer this yet"), detail: null });
+        setRowError({ message: t("This PC's bridge does not offer this yet"), detail: null });
         return;
       }
       const err = userErrorMessage(reason);
-      setCloseError({ message: t("Close failed: {reason}", { reason: err.message }), detail: err.detail });
+      setRowError({ message: t("Close failed: {reason}", { reason: err.message }), detail: err.detail });
     },
   });
   const cancelClosing = (): void => {
@@ -308,13 +337,14 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   const offerNew = !watching && connected.length > 0;
   // the sheet of PCs is for a choice among two or more: it closes when that choice goes, and stays closed if it comes back
   useEffect(() => { if (connected.length < 2) setPcMenu(null); }, [connected.length]);
-  const emptyWhy = inboxEmpty(machines, all.length, rows.length);
+  const total = all.length + queued.entries.length;
+  const emptyWhy = inboxEmpty(machines, total, displayed.length);
   // The mode's own three empty states, each saying what happened and, where there is something to do, what, on a
   // line of its own: the round plus starts a workspace, and is named only where it is drawn. None says what the
   // rows are: the mode's chrome does not.
   // a load that failed with no row to show says so, with its cause and a way to try again, where a load in flight
   // says Loading… and a roster with nothing running says so: a failure is never taken for either
-  const failed = failure !== null && all.length === 0 ? failure : null;
+  const failed = failure !== null && total === 0 ? failure : null;
   // a Retry's read on its way, from the press until that read ends: Retry takes no other press meanwhile
   const [retrying, setRetrying] = useState(false);
   const retry = (): void => {
@@ -383,12 +413,21 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
       <Plus aria-hidden="true" />
     </button>
   );
-  const filterWord = (value: InboxFilter): string => value === "all" ? t("All") : inboxStateWord(value, t);
+  const filterWord = (value: InboxFilter): string => value === "all" ? t("All") : value === "queued" ? inboxQueueState(t) : inboxStateWord(value, t);
   const filterLabel = filter === "all" ? t("Filter by state") : t("Filter by state: {state}", { state: filterWord(filter) });
   const filterButton = (
     <button type="button" className={`icon-button inbox-round inbox-filter-toggle${filter === "all" ? "" : " is-on"}`} aria-label={filterLabel} title={filterLabel}
       aria-haspopup={popup} aria-expanded={filterMenu !== null} onClick={(event) => setFilterMenu(filterMenu === null ? event.currentTarget : null)}>
       <ListFilter aria-hidden="true" />
+    </button>
+  );
+  const byProject = inboxGrouping === "project";
+  const groupLabel = t("Group by project");
+  const groupButton = (
+    <button type="button" className={`${wide ? "btn btn-ghost" : "icon-button inbox-round"} inbox-group-toggle`} aria-label={groupLabel} title={groupLabel} aria-pressed={byProject}
+      onClick={() => update({ inboxGrouping: byProject ? "state" : "project" })}>
+      <FolderOpen aria-hidden="true" />
+      {wide && <span>{groupLabel}</span>}
     </button>
   );
   // The connection's word, in the document before its words (lib/useAnnouncedText.ts) and drawn by nothing while there
@@ -401,6 +440,8 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
       <Ellipsis aria-hidden="true" />
     </button>
   );
+
+  const rowIndexes = new Map(rows.map((row, index) => [row.key, index]));
 
   return (
     <section className={`mode-inbox${wide ? " is-wide" : ""}`} aria-label={t("Agent inbox")} tabIndex={-1} ref={root}
@@ -421,14 +462,16 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
           {moreButton}
           {note}
           {connectionLine}
+          {groupButton}
           {newButton}
         </>}
       </div>
+      {wide && <div className="inbox-group-head">{groupButton}</div>}
       <div className="inbox-scroll" ref={scroller} onScroll={(event) => { if (restoring.current === null) scroll.current = event.currentTarget.scrollTop; }}>
-        {closeError && (
+        {rowError && (
           <div className="inbox-close-error" role="alert">
-            <span className="inbox-close-error-text">{closeError.message}{closeError.detail !== null && <><br /><code>{closeError.detail}</code></>}</span>
-            <button type="button" className="icon-button inbox-close-error-dismiss" aria-label={t("Dismiss")} onClick={() => setCloseError(null)}>
+            <span className="inbox-close-error-text">{rowError.message}{rowError.detail !== null && <><br /><code>{rowError.detail}</code></>}</span>
+            <button type="button" className="icon-button inbox-close-error-dismiss" aria-label={t("Dismiss")} onClick={() => setRowError(null)}>
               <X aria-hidden="true" />
             </button>
           </div>
@@ -460,7 +503,16 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
         ) : empty !== null ? <p className="inbox-empty" role="status">{empty.flatMap((line, at) => [...(at > 0 ? [" "] : []), <span key={line}>{line}</span>])}</p> : (
           <ul className="inbox-rows" onPointerDown={holdAfterPress} onTouchEnd={holdAfterPress}
             onFocus={(event) => setFocusIn(event.target.matches?.(":focus-visible") ?? false)} onBlur={(event) => { if (!(typeof Node === "function" && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocusIn(false); }}>
-            {rows.map((row, rowIndex) => {
+            {sections.flatMap(({ key, name, entries }) => [
+              ...(name === null ? [] : [
+                <li className="inbox-project" key={`project:${key}`}><h2 dir="auto">{name}</h2>
+                  <span>{t("Agents: {agents} · Tasks: {tasks}", { agents: entries.filter((entry) => entry.kind === "agent").length, tasks: entries.filter((entry) => entry.kind === "queue").length })}</span>
+                </li>,
+              ]),
+              ...entries.map((entry) => {
+              if (entry.kind === "queue") return queue && <InboxQueueRow key={entry.key} entry={entry} popup={popup} watching={watching} busy={queueBusy} onOpen={queue.onOpen} onAction={runQueueAction} list={root} />;
+              const rowIndex = rowIndexes.get(entry.key)!;
+              const row = rows[rowIndex]!;
               const open = wide && row.key === current;
               const closeOffered = !watching && row.online && !paneLocked(row.machine.id, row.pane.pane_id);
               const words = <span className="inbox-words" dir="auto">{row.line}</span>;
@@ -468,10 +520,13 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
               // name and tooltip in the column, which draws no time
               const age = row.since === null ? null : stateAge(now - row.since);
               const at = row.since === null ? null : new Date(row.since);
+              const { depth = 0, parent } = nesting.get(row.key) ?? {};
+              const queueTag = queued.running.has(row.key) ? t("Queue") : null;
+              const startedBy = parent ? t("Started by {name}", { name: agentRowTitle(parent, false).title }) : null;
               // what a screen reader hears for the row: who it is, how it is, what it says, then for how long
-              const spoken = [row.kind ? agentName(row.kind) : null, row.title, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
+              const spoken = [row.kind ? agentName(row.kind) : null, row.title, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
               return (
-                <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group}>
+                <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group} data-depth={Math.min(depth, 2) || undefined}>
                   <button type="button" className="inbox-row" disabled={!row.online} aria-label={spoken} aria-current={open ? "true" : undefined}
                     ref={(node) => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
                     title={wide ? [row.title, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
@@ -481,6 +536,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
                     <span className="inbox-body">
                       <span className="inbox-line">
                         <span className="inbox-name">{row.title}</span>
+                        {queueTag !== null && <span className="inbox-queue-tag">{queueTag}</span>}
                         {!wide && at !== null && <time className="inbox-time" dateTime={at.toISOString()} title={at.toLocaleString(resolvedLanguage)}>{age}</time>}
                       </span>
                       {wide ? words : <span className="inbox-sub">{words}{stateMark(row.status, row.failed, row.state)}</span>}
@@ -508,7 +564,8 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
                   )}
                 </li>
               );
-            })}
+              }),
+            ])}
           </ul>
         )}
       </div>
@@ -522,7 +579,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
       {filterMenu !== null && <RowMenu anchor={filterMenu} title={t("Filter by state")} choice onClose={() => setFilterMenu(null)}
         items={INBOX_FILTERS.map((value) => ({
           id: value, label: filterWord(value), icon: ListFilter, checked: filter === value, run: () => onFilter(value),
-          ...(value === "all" ? {} : { glyph: <span className="inbox-filter-mark" aria-hidden="true"><StatusBadge compact status={value} label={filterWord(value)} /></span> }),
+          ...(value === "queued" ? { icon: ListOrdered } : value === "all" ? {} : { glyph: <span className="inbox-filter-mark" aria-hidden="true"><StatusBadge compact status={value} label={filterWord(value)} /></span> }),
         }))} />}
       <PaneCloseConfirm closing={closing} onClose={cancelClosing} onConfirm={confirmClosing} />
     </section>

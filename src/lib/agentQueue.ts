@@ -16,7 +16,7 @@ import type { Translate } from "./i18n.ts";
 /** Manages the local agent-queue snapshot and dialog open state synchronized with server capability and auth. */
 export function useAgentQueue(locked: boolean | null, queueEnabled: boolean | null) {
   const [queueSnapshot, setQueueSnapshot] = useState<QueueSnapshot | null>(null);
-  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState<boolean | string>(false);
   const queueSupported = queueEnabled === true || queueSnapshot !== null;
   useEffect(() => {
     if (locked !== false || queueEnabled === false) {
@@ -77,6 +77,10 @@ export function groupQueueTasksByFolder(tasks: readonly QueueTask[]): QueueProje
     if (task.status === "queued") group.queuedCount += 1;
   }
   return [...byFolder.values()];
+}
+
+export function inboxQueueState(t: Translate, task?: QueueTask): string {
+  return task?.status === "failed" ? t("Failed") : task?.hold ? t("Held") : t("Queued");
 }
 
 /** Counts running and queued tasks plus pause state for sidebar badges and header hints. */

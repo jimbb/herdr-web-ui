@@ -1064,6 +1064,7 @@ export function App() {
     <InboxList ref={inbox.list} machines={sidebarMachines} activity={activity} watching={auth?.role === "watch"} wide={column} filter={inbox.filter} onFilter={inbox.setFilter} query={inbox.query} onQuery={inbox.setQuery} scroll={inbox.scroll} focus={{ ...inbox.focus, row: threadClose.suppressedReturnRow(returnTo) }}
       current={column && !inbox.shown && selectedPaneId !== null ? sidebarPinKey(selectedMachineId, selectedPaneId) : null}
       onOpen={openThread}
+      queue={queueSnapshot === null ? undefined : { snapshot: queueSnapshot, onOpen: setQueueOpen, onChange: setQueueSnapshot }}
       onNew={openNewOn} onClosed={handleInboxClosed} questionReads={inbox.questionReads} summaryReads={inbox.summaryReads}
       more={column ? undefined : { label: moreBase, expanded: more !== null && moreOnList, popup: isSheetWidth ? "dialog" : "menu", onPress: (anchor) => setMore((open) => (open ? null : { anchor })) }}
       note={column ? undefined : <HeaderNote note={listNote} />} connection={!column && listNote === null ? rosterConnection : null} failure={error === null ? null : { error, retry: load }} />
@@ -1681,8 +1682,9 @@ export function App() {
       {unsentFor && <UnsentTextDialog machines={machines} target={unsentFor} canRecover={unsentFor.pane.agent != null} onClose={closeUnsent} onRecover={recover} />}
       <MachineContext.Provider value="local">
         <AgentQueueDialog
-          open={queueOpen}
+          open={queueOpen !== false}
           snapshot={queueSnapshot}
+          initialTaskId={typeof queueOpen === "string" ? queueOpen : undefined}
           watching={auth?.role === "watch"}
           defaultFolder={selectedMachineId === "local" ? (selectedPane?.foreground_cwd ?? selectedPane?.cwd ?? null) : null}
           onClose={() => setQueueOpen(false)}

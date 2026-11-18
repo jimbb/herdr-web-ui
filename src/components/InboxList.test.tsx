@@ -3,6 +3,7 @@ import * as ReactDom from "react-dom";
 import { act, type ReactElement, type ReactNode } from "react";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
+import { DEFAULT_QUEUE_SETTINGS, type QueueSnapshot } from "../../shared/agent-queue.ts";
 import type { Machine } from "../../shared/machines.ts";
 import type { AgentStatus, HerdrPane, InteractivePrompt, PaneSummaries, PaneSummary } from "../../shared/protocol.ts";
 import machinesFixture from "../../site/demo/fixtures/machines.json";
@@ -128,10 +129,9 @@ describe("InboxList", () => {
 
   afterEach(async () => {
     setSidebarPins([]);
-    await act(async () => {
-      renderer?.unmount();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await act(async () => { renderer?.unmount(); });
+    // Sheet cleanup schedules its history step after React commits the unmount.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     renderer = undefined;
     for (const [key, descriptor] of descriptors) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -157,6 +157,7 @@ describe("InboxList", () => {
     handle?: { current: InboxListHandle | null };
     onFilter?: (filter: InboxFilter) => void; onQuery?: (query: string) => void;
     onOpen?: (machineId: string, paneId: string) => void; onNew?: (machineId: string) => void;
+    queue?: Parameters<typeof InboxList>[0]["queue"];
     onClosed?: (machineId: string, paneId: string) => void;
   }
   // each drawn host node's stand-in, by its class (the section by its tag), and every focus call made on them
@@ -170,7 +171,7 @@ describe("InboxList", () => {
     <Stamping machines={machines} activity={options.activity ?? activity} />
     <InboxList ref={options.handle} machines={machines} activity={options.activity ?? activity} watching={options.watching ?? false} wide={options.wide ?? false} current={options.current ?? null}
       filter={options.filter ?? "all"} onFilter={options.onFilter ?? (() => {})} query={options.query ?? ""} onQuery={options.onQuery ?? (() => {})} scroll={scroll} focus={{ opening: options.opening ?? 1, taken, row: options.returnTo ?? null }}
-      onOpen={options.onOpen ?? (() => {})} onNew={options.onNew ?? (() => {})} onClosed={options.onClosed} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
+      onOpen={options.onOpen ?? (() => {})} queue={options.queue} onNew={options.onNew ?? (() => {})} onClosed={options.onClosed} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
   </PanePressContext.Provider></SettingsProvider>;
   const draw = async (machines: Machine[], options: DrawOptions = {}) => {
     nodes = new Map();
@@ -371,7 +372,7 @@ describe("InboxList", () => {
     expect(opened).toEqual(["local/w1C:p1"]);
   });
 
-  it("offers the four state filters as one choice behind its round button, and tells the chosen one", async () => {
+  it("offers the state filters as one choice behind its round button, and tells the chosen one", async () => {
     const asked: InboxFilter[] = [];
     const root = await draw(roster(), { onFilter: (filter) => asked.push(filter) });
     const button = () => byClass(root, "inbox-filter-toggle")[0]!;
@@ -383,7 +384,7 @@ describe("InboxList", () => {
     const [menu] = menus(root);
     expect(menu!.props.choice).toBe(true);
     expect(menu!.props.title).toBe("Filter by state");
-    expect(menu!.props.items.map((entry: { id: string; label: string; checked: boolean }) => `${entry.id}:${entry.label}:${entry.checked}`)).toEqual(["all:All:true", "blocked:Needs you:false", "working:Working:false", "done:Done:false"]);
+    expect(menu!.props.items.map((entry: { id: string; label: string; checked: boolean }) => `${entry.id}:${entry.label}:${entry.checked}`)).toEqual(["all:All:true", "blocked:Needs you:false", "working:Working:false", "queued:Queued:false", "done:Done:false"]);
     await act(async () => { menu!.props.items[2].run(); });
     expect(asked).toEqual(["working"]);
 
@@ -391,6 +392,36 @@ describe("InboxList", () => {
     expect(button().props["aria-label"]).toBe("Filter by state: Working");
     expect(String(button().props.className).split(" ")).toContain("is-on");
     expect(byClass(root, "inbox-item").map((node) => node.props["data-state"])).toEqual(["working"]);
+  });
+
+  it("opens the selected queue task and offers only the actions available for its state and role", async () => {
+    const task = { id: "fix", folder: "/tmp/herdr-demo/checkout-api", title: "Fix login", prompt: "Cover expired tokens", agent: "codex", hold: true, status: "queued" as const, terminal: null, createdAt: "", startedAt: null, finishedAt: null, error: null };
+    const snapshot: QueueSnapshot = { version: 1, tasks: [task], settings: DEFAULT_QUEUE_SETTINGS, gate: { status: "idle", summary: "", memAvailableMb: null, workingCount: 0, cooldownLeftSec: 0 }, lastLaunchAt: null };
+    const opened: string[] = [];
+    const root = await draw(roster(), { queue: { snapshot, onOpen: (id) => opened.push(id), onChange() {} }, filter: "queued", query: "expired TOKENS" });
+    const [row] = byClass(root, "inbox-row");
+    expect(row!.props["aria-label"]).toBe("Fix login, checkout-api · Held #1");
+    await act(async () => row!.props.onClick());
+    expect(opened).toEqual(["fix"]);
+    await act(async () => byClass(root, "inbox-queue-menu")[0]!.props.onClick({ currentTarget: anchor }));
+    expect(menus(root)[0]!.props.items.map(({ label }: { label: string }) => label)).toEqual(["Start now", "Unhold", "Remove"]);
+    await redraw({ watching: true });
+    expect(byClass(root, "inbox-queue-menu")).toHaveLength(0);
+    expect(menus(root)).toHaveLength(0);
+  });
+
+  it("groups by project and only indents a helper when its parent is visible", async () => {
+    const machines = roster((pane) => pane.pane_id === "w1D:p1" ? { ...pane, parent_pane_id: "w1C:p1" } : pane);
+    const root = await draw(machines, { activity: statusOf({ "w1C:p1": "working", "w1D:p1": "blocked" }) });
+    expect(item(root, "w1D:p1").props["data-depth"]).toBe(1);
+    const group = () => byClass(root, "inbox-group-toggle")[0]!;
+    expect(group().props["aria-pressed"]).toBe(false);
+    await act(async () => group().props.onClick());
+    expect(group().props["aria-pressed"]).toBe(true);
+    expect(byClass(root, "inbox-project").map(text)).toContain("checkout-apiAgents: 2 · Tasks: 0");
+    await redraw({ filter: "blocked" });
+    expect(item(root, "w1D:p1").props["data-depth"]).toBeUndefined();
+    expect(byClass(root, "inbox-project").map(text)).toContain("web-dashboardAgents: 1 · Tasks: 0");
   });
 
   it("says its menus are sheets at a phone's width and popovers beyond it", async () => {
@@ -900,13 +931,13 @@ describe("InboxList", () => {
     expect(nodes.get("inbox-scroll")!.scrollTop).toBe(167);
   });
 
-  it("on a phone draws More and New workspace at its top with the shell's note between them, and the filter and the search at its foot", async () => {
+  it("on a phone draws More, project grouping and New workspace at its top, and the filter and search at its foot", async () => {
     const pressed: unknown[] = [];
     const root = await draw(roster(), { more: { label: "More", expanded: false, popup: "dialog", onPress: (node) => pressed.push(node) }, note: <span className="test-note">Link copied</span> });
     const top = byClass(root, "inbox-top")[0]!;
     const classes = (node: ReactTestInstance) => node.findAll((inner) => typeof inner.type === "string" && inner.parent === node).map((inner) => String(inner.props.className).split(" ").find((name) => name.startsWith("inbox-") && name !== "inbox-round") ?? String(inner.props.className));
     // the connection's status line is in the document from the first render, drawn by nothing while it has no word
-    expect(classes(top)).toEqual(["inbox-more", "test-note", "visually-hidden", "inbox-add"]);
+    expect(classes(top)).toEqual(["inbox-more", "test-note", "visually-hidden", "inbox-group-toggle", "inbox-add"]);
     expect(classes(byClass(root, "inbox-foot")[0]!)).toEqual(["inbox-filter-toggle", "inbox-search"]);
     const more = byClass(root, "inbox-more")[0]!;
     expect([more.props["aria-label"], more.props["aria-haspopup"], more.props["aria-expanded"]]).toEqual(["More", "dialog", false]);

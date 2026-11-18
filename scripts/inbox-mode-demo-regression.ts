@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type Locator, type Page } from "playwright-core";
 import { appFaces } from "./app-faces.ts";
 import { buildDemoApp } from "./demo-build.ts";
 import { chromePath } from "./chrome-path.ts";
@@ -65,6 +65,7 @@ function installInboxFixture(): void {
   };
   const save = (): void => sessionStorage.setItem(key, JSON.stringify(state));
   save();
+  const showQueue = new URLSearchParams(location.search).has("inbox_queue");
   const patch = (machines: Machine[]): Machine[] => {
     const offline = new Set(state.offline ?? []);
     for (const machine of machines) {
@@ -73,6 +74,7 @@ function installInboxFixture(): void {
       if (!snapshot) continue;
       snapshot.finish_epoch = `${state.epoch}:${machine.id}`;
       for (const pane of snapshot.panes) {
+        if (showQueue && machine.id === "local" && pane.pane_id === "w1L:p1") pane.parent_pane_id = "w1C:p1";
         const forced = state.forced[pane.pane_id];
         if (forced) { pane.agent_status = forced.status; pane.finish_id = forced.finish; }
       }
@@ -93,6 +95,9 @@ function installInboxFixture(): void {
     if (url.pathname === "/api/machines" && rosterHeld !== null) await new Promise<void>((go) => rosterHeld!.push(go));
     if (rosterFails && url.pathname === "/api/machines") return Response.json({ error: { code: "internal", message: "The roster could not be read" } }, { status: 500 });
     const response = await fetchDemo(input, init);
+    if (!showQueue && url.pathname === "/api/queue" && response.ok) {
+      return Response.json({ ...await response.json(), tasks: [] });
+    }
     if (url.pathname !== "/api/machines" || !response.ok) return response;
     const body = await response.json();
     return Response.json({ ...body, machines: patch(body.machines) });
@@ -106,6 +111,7 @@ function installInboxFixture(): void {
       Object.defineProperty(this, "onmessage", {
         get: () => (event: MessageEvent<string>) => {
           const body = JSON.parse(event.data);
+          if (body.type === "agent-queue" && !showQueue) return;
           if (body.type === "machines" && rosterFails) return;
           if (body.type === "machines") { body.machines = patch(body.machines); window.inboxFixture.rosters++; }
           if (body.type === "machine-message" && body.message.type === "pane-status") {
@@ -209,7 +215,7 @@ const evidence = process.env["UI_EVIDENCE_DIR"];
  * (scripts/inbox-mode-rail-demo-regression.ts), each from its own browser and app.
  */
 const part = process.env["INBOX_MODE_PART"] ?? "themes";
-if (!["themes", "panes", "rail"].includes(part)) throw new Error(`INBOX_MODE_PART is themes, panes or rail, not ${part}`);
+if (!["themes", "panes", "rail", "queue"].includes(part)) throw new Error(`INBOX_MODE_PART is themes, panes, rail or queue, not ${part}`);
 const errors: string[] = [];
 /** the blocks that failed: each is reported where it fails, and the blocks after it still run */
 const failures: string[] = [];
@@ -348,7 +354,7 @@ async function sheetClosed(page: Page): Promise<void> {
   await page.locator(".row-sheet").waitFor({ state: "detached" });
   await page.waitForFunction((key) => (history.state as Record<string, unknown> | null)?.[key] === undefined, SHEET_HISTORY_KEY, { timeout: 5_000 });
 }
-/** picks one of the state filter's four choices from its sheet */
+/** picks a state filter from its sheet */
 async function pickFilter(page: Page, choice: "all" | "blocked" | "working" | "done"): Promise<void> {
   await openSheet(page, ".inbox-filter-toggle");
   await page.locator(`.row-sheet [data-item="${choice}"]`).tap();
@@ -433,11 +439,54 @@ try {
     const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
     try {
       if (evidence) mkdirSync(evidence, { recursive: true });
-      for (const theme of part === "themes" ? ["light", "dark"] : []) {
+      for (const theme of part === "themes" ? ["light", "dark"] : part === "queue" ? ["light"] : []) {
         const off: Settings = { language: "en", theme };
         const on: Settings = { language: "en", theme, phoneInbox: true };
         const pass = (step: number, what: string) => console.log(`PASS ${theme} (${step}) ${what}`);
         const block = (what: string): string => `${theme}: ${what}`;
+
+        if (theme === "light") for (const viewport of [PHONE, { width: 1440, height: 900 }]) {
+          await withPage(browser, base, off, "/?app=inbox&inbox_queue=1", block(`queue rows at ${viewport.width}px`), async (page) => {
+            const task = page.locator('[data-queue-task="demo-queue-3"]');
+            const openActions = async (item: Locator): Promise<void> => {
+              if (viewport.width >= 769) await item.hover();
+              await item.getByRole("button", { name: /Actions for/ }).click();
+            };
+            const row = task.getByRole("button", { name: /Validate config schema on startup.*Held #1/ });
+            await row.waitFor();
+            const parent = page.locator('.inbox-item[data-pane="w1C:p1"]');
+            await parent.getByText("Queue", { exact: true }).waitFor();
+            const helper = page.locator('.inbox-item[data-pane="w1L:p1"][data-depth="1"]');
+            await helper.waitFor();
+            assert.ok((await box(page, '.inbox-item[data-pane="w1L:p1"] .inbox-avatar')).x > (await box(page, '.inbox-item[data-pane="w1C:p1"] .inbox-avatar')).x, "the sub-agent avatar is indented");
+            await page.locator(".inbox-filter-toggle").click();
+            await page.locator('[data-item="queued"]').click();
+            assert.equal(await page.locator(".inbox-item[data-pane]").count(), 0, "Queued keeps the tasks only");
+            await row.click();
+            const dialog = page.getByRole("dialog", { name: "Agent Queue", exact: true });
+            await dialog.getByText("Validate config schema on startup", { exact: true }).waitFor();
+            await dialog.getByRole("button", { name: "Close agent queue" }).click();
+            await openActions(task);
+            await page.locator('[data-item="hold"]').click();
+            await task.getByRole("button", { name: /Validate config schema on startup.*Queued #1/ }).waitFor();
+            const grouping = page.getByRole("button", { name: "Group by project" });
+            await grouping.click();
+            await page.getByRole("heading", { name: "cli-tools" }).waitFor();
+            await shot(page, `inbox-queue-projects-${viewport.width}.png`);
+            await page.reload();
+            await page.getByRole("button", { name: "Group by project", pressed: true }).waitFor();
+            await page.getByRole("heading", { name: "cli-tools" }).waitFor();
+            await openActions(task);
+            await page.locator('[data-item="start"]').click();
+            await task.waitFor({ state: "detached" });
+            const other = page.locator('[data-queue-task="demo-queue-2"]');
+            await openActions(other);
+            await page.locator('[data-item="remove"]').click();
+            await other.waitFor({ state: "detached" });
+            console.log(`PASS queue filter, task dialog, queue actions, nested helpers and persisted project grouping at ${viewport.width}px`);
+          }, viewport);
+        }
+        if (part === "queue") continue;
 
         // ---- a phone: the entry, the list, a thread ----
         await withPage(browser, base, off, "/", block("the entry in More, the list, a thread, the way out"), async (page) => {
@@ -467,7 +516,7 @@ try {
           for (const selector of ABSENT) assert.equal(await page.locator(selector).filter({ visible: true }).count(), 0, `the mode draws no ${selector}`);
           assert.equal(await page.locator(".mode-inbox :is(h1, h2, h3, h4, h5, h6, [role='heading'])").count(), 0, "the list has no heading");
           assert.equal(await page.locator(".mode-inbox").getAttribute("aria-label"), "Agent inbox");
-          assert.equal(await page.locator(".mode-inbox .inbox-top button").count(), 2, "exactly two controls at the top");
+          assert.equal(await page.locator(".mode-inbox .inbox-top button").count(), 3, "More, project grouping and New workspace are at the top");
           const { width, height } = page.viewportSize()!;
           const [more, add, filter, search] = await Promise.all([box(page, ".inbox-more"), box(page, ".inbox-add"), box(page, ".inbox-filter-toggle"), box(page, ".inbox-search-input")]);
           for (const [name, control] of [["More", more], ["New workspace", add], ["the filter", filter]] as const) assert.deepEqual([control.w, control.h], [44, 44], `${name} is 44 by 44`);
@@ -507,12 +556,13 @@ try {
           assert.match(drawn[2]!.time ?? "", /^(<1m|\d+[mhd])$/, "the done row says how long it has been done");
           assert.ok(drawn[2]!.datetime !== null && !Number.isNaN(Date.parse(drawn[2]!.datetime)), "the done row's time carries a datetime");
           await shot(page, `inbox-mode-list-390-${theme}.png`);
-          pass(2, "the list: no title and nothing the mode leaves out, two 44px round controls at the top and a round filter and a search pill at the foot on their insets, six 80px rows with a 44px mark, a 16px name and one 15px line, the waiting row first with its question, each state's own mark and none on the ready rows");
+          pass(2, "the list: no title and nothing the mode leaves out, three round controls at the top and a round filter and a search pill at the foot on their insets, six 80px rows with a 44px mark, a 16px name and one 15px line, the waiting row first with its question, each state's own mark and none on the ready rows");
 
           await openSheet(page, ".inbox-filter-toggle");
-          assert.equal(await page.locator('.row-sheet [role="menu"] [role="menuitemradio"]').count(), 4, "the four filters are one menu of radio items");
+          assert.deepEqual(await page.locator('.row-sheet [role="menu"] [role="menuitemradio"]').evaluateAll((items) => items.map((item) => item.getAttribute("data-item"))),
+            ["all", "blocked", "working", "queued", "done"], "the five filters are one menu of radio items");
           assert.equal(await page.locator('.row-sheet [role="menuitemradio"][aria-checked="true"]').getAttribute("data-item"), "all");
-          // the keyboard as a menu's radio items take it: the focus starts on the chosen one, the arrows walk the four and
+          // the keyboard as a menu's radio items take it: the focus starts on the chosen one, the arrows walk the choices and
           // choose nothing, Tab takes them as one stop before Cancel, from any of them, and comes back to the chosen one
           const focusedItem = (want: string | null, why: string): Promise<unknown> => page.waitForFunction((item) => {
             const at = document.activeElement;
@@ -526,13 +576,13 @@ try {
           await focusedItem("done", "ArrowUp from the first filter goes round to the last");
           assert.equal(await page.locator('.row-sheet [role="menuitemradio"][aria-checked="true"]').getAttribute("data-item"), "all", "the arrows choose nothing");
           await page.keyboard.press("ArrowUp");
-          await focusedItem("working", "ArrowUp moves to the filter before");
+          await focusedItem("queued", "ArrowUp moves back from Done to Queued");
           await page.keyboard.press("Tab");
-          await focusedItem(null, "Tab from a middle filter leaves the four for Cancel");
+          await focusedItem(null, "Tab from a middle filter leaves the filter group for Cancel");
           await page.keyboard.press("Tab");
           await focusedItem("all", "Tab comes back to the filters on the chosen one");
           await page.keyboard.press("Shift+Tab");
-          await focusedItem(null, "Shift+Tab leaves the four filters for Cancel");
+          await focusedItem(null, "Shift+Tab leaves the filter group for Cancel");
           await page.keyboard.press("Shift+Tab");
           await focusedItem("all", "Shift+Tab from Cancel comes back to the chosen filter, not the last one");
           await page.locator('.row-sheet [data-item="working"]').tap();
@@ -547,7 +597,7 @@ try {
           await sheetClosed(page);
           await rowCount(page, 6);
           assert.equal(await page.locator(".inbox-filter-toggle").getAttribute("aria-label"), "Filter by state");
-          pass(3, "the filter's button opens All, Needs you, Working and Done as a menu of radio items that the arrows walk and Tab takes as one stop; Working narrows the list to its row and fills the button, All draws the six again");
+          pass(3, "the filter's button opens All, Needs you, Working, Queued and Done as a menu of radio items that the arrows walk and Tab takes as one stop; Working narrows the list to its row and fills the button, All draws the six again");
 
           const field = page.locator(".inbox-search-input");
           await field.fill("export");
@@ -627,7 +677,7 @@ try {
 
           await page.setViewportSize(PHONE);
           await openSheet(page, ".inbox-more");
-          assert.deepEqual(await page.locator(".row-sheet .row-sheet-item").evaluateAll((items) => items.map((item) => item.getAttribute("data-item"))), ["exit-inbox", "palette", "alerts", "settings"], "the list's More begins with the way out and the palette, and holds the app's items");
+          assert.deepEqual(await page.locator(".row-sheet .row-sheet-item").evaluateAll((items) => items.map((item) => item.getAttribute("data-item"))), ["exit-inbox", "palette", "agent-queue", "alerts", "settings"], "the list's More begins with the way out and the palette, and holds the app's items");
           assert.equal((await page.locator('.row-sheet [data-item="exit-inbox"] .row-sheet-label').textContent())?.trim(), "Back to Ovis");
           assert.equal(await page.locator('.row-sheet [data-item="exit-inbox"] img.ovis-mark').count(), 1, "Back to Ovis is drawn with the app's own mark, as at the column's foot");
           await shot(page, `inbox-mode-more-390-${theme}.png`);
@@ -790,7 +840,7 @@ try {
         await withPage(browser, base, off, "/?demo_devices=watch&app=inbox", block("a watching device"), async (page) => {
           await rowCount(page, 6);
           assert.equal(await page.locator(".inbox-add").count(), 0);
-          assert.equal(await page.locator(".mode-inbox .inbox-top button").count(), 1, "a watching device keeps More alone at the top");
+          assert.equal(await page.locator(".mode-inbox .inbox-top button").count(), 2, "a watching device keeps More and project grouping at the top");
           pass(15, "a device that only watches may use the mode and is offered no New workspace");
         });
 
@@ -1006,7 +1056,8 @@ try {
               const a = item.querySelector(".inbox-avatar")!.getBoundingClientRect();
               return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, radius: getComputedStyle(item.querySelector(".inbox-row")!).borderRadius, avatar: [a.width, a.height, a.left - r.left], nameSize: getComputedStyle(item.querySelector(".inbox-name")!).fontSize, wordsSize: getComputedStyle(item.querySelector(".inbox-words")!).fontSize };
             }));
-            near(wideRows[0]!.top - add.bottom, 16, 2, "the first row under the top controls");
+            const grouping = await box(page, ".inbox-group-head");
+            near(wideRows[0]!.top - grouping.bottom, 4, 2, "the first row under the grouping control");
             wideRows.forEach((item, index) => {
               near(item.bottom - item.top, 56, 2, "a wide row's height");
               near(item.left - list.x, 12, 1, "a row's inset at the list's start, after the rail"); near(column.right - item.right, 12, 1, "a row's inset at the column's end");
@@ -3055,7 +3106,7 @@ try {
           assert.equal(drawnRows.length, 6);
           const listed = drawnRows.flatMap((item) => [`row ${item.pane}`, `close ${item.pane}`]);
           assert.deepEqual(stops, ["inbox-rail-exit", "inbox-rail-place", "inbox-rail-waiting", "inbox-rail-alerts", "inbox-rail-settings", "inbox-rail-pcs",
-            "inbox-search-input", "inbox-filter-toggle", "inbox-add", ...listed, "the resize grip", "the thread"],
+            "inbox-search-input", "inbox-filter-toggle", "inbox-add", "inbox-group-toggle", ...listed, "the resize grip", "the thread"],
             "Tab goes down the rail from the Ovis mark to the PC, then to the list's top row and its rows with their close buttons, the column's resize grip, and the thread");
           await page.locator(".inbox-rail .inbox-rail-place").focus();
           await page.keyboard.press("Shift+Tab");
@@ -3093,7 +3144,7 @@ try {
           await page.keyboard.press("Escape");
           await page.locator(".settings-dialog").waitFor({ state: "detached" });
           await focused("inbox-rail-settings", "Settings closed gives the focus back to the rail's gear");
-          console.log(`PASS the keyboard's order is the rail's six buttons from the Ovis mark down to the PC, the list's search field, filter and New workspace, its ${drawnRows.length} rows and their close buttons, the column's resize grip, then the thread, and Shift+Tab goes back; Enter and Space press a rail button; Settings and the list of PCs give the focus back to their buttons; Enter on the Ovis mark leaves the mode by one entry that Back undoes`);
+          console.log(`PASS the keyboard's order is the rail's six buttons from the Ovis mark down to the PC, the list's search field, filter, New workspace and project grouping, its ${drawnRows.length} rows and their close buttons, the column's resize grip, then the thread, and Shift+Tab goes back; Enter and Space press a rail button; Settings and the list of PCs give the focus back to their buttons; Enter on the Ovis mark leaves the mode by one entry that Back undoes`);
         }, desktop);
         // ---- each press of the rail ----
         // with the list alone beside an empty pane, the pane's More holds the palette alone: its one way there for a
