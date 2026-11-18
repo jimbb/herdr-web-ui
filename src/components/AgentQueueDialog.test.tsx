@@ -94,19 +94,22 @@ describe("QueueFootEntry", () => {
         onOpen: () => {},
       }),
     );
-    expect(runningMarkup).toContain("1 running");
+    expect(runningMarkup).toContain("1 running · 1 queued");
     expect(runningMarkup).toContain("is-active");
 
     const pausedMarkup = renderStatic(
       createElement(QueueFootEntry, {
         snapshot: makeSnapshot({
           settings: { ...DEFAULT_QUEUE_SETTINGS, paused: true },
-          tasks: [makeTask({ id: "t1", folder: "/proj/a", prompt: "Run", status: "running", terminal: "p1" })],
+          tasks: [
+            makeTask({ id: "t1", folder: "/proj/a", prompt: "Run", status: "running", terminal: "p1" }),
+            makeTask({ id: "t2", folder: "/proj/a", prompt: "Next" }),
+          ],
         }),
         onOpen: () => {},
       }),
     );
-    expect(pausedMarkup).toContain("Paused");
+    expect(pausedMarkup).toContain("Paused · 1 queued");
     expect(pausedMarkup).toContain("is-paused");
   });
 });
