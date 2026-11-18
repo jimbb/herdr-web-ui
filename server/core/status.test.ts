@@ -2978,6 +2978,20 @@ describe("a head pane held while its hc child terminals work", () => {
     expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
   });
 
+  it("takes a child's busy word from the snapshot too, after a frame told it at rest", async () => {
+    const h = hub(cleanTranscript);
+    const head = makePane("head", { agent: "claude", agent_status: "done" });
+    const child = makePane("child", { agent: "agy", agent_status: "idle", parent_pane_id: "head" });
+    h.herdrSays(head, child);
+    handlers.onBaseline([head, child]);
+    handlers.onStatus("child", "idle", "agy");
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBeUndefined();
+    // herdr now reads the child working, with no status event of it here
+    h.herdrSays(head, { ...child, agent_status: "working" });
+    expect((await h.snapshot()).panes.find((p) => p.pane_id === "head")?.background_wait).toBe(true);
+    expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: true });
+  });
+
   it("holds a chain of heads recursively when a grandchild works (including non-Claude heads)", async () => {
     const h = hub(cleanTranscript);
     const rootHead = makePane("gp", { agent: "agy", agent_status: "done" });
