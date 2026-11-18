@@ -538,10 +538,14 @@ export class AgentQueueStore {
       if (input.direction !== "up" && input.direction !== "down") {
         throw new QueueValidationError("invalid_direction", "direction must be up or down");
       }
-      const targetKey = canonicalProjectKey(this.doc.tasks[targetIndex]!.folder, resolveReal);
+      const target = this.doc.tasks[targetIndex]!;
+      const targetKey = canonicalProjectKey(target.folder, resolveReal);
+      const onlyQueued = target.status === "queued";
       const folderIndices: number[] = [];
       this.doc.tasks.forEach((task, idx) => {
-        if (canonicalProjectKey(task.folder, resolveReal) === targetKey) folderIndices.push(idx);
+        if (canonicalProjectKey(task.folder, resolveReal) !== targetKey) return;
+        if (onlyQueued && task.status !== "queued") return;
+        folderIndices.push(idx);
       });
       const pos = folderIndices.indexOf(targetIndex);
       const swapPos = input.direction === "up" ? pos - 1 : pos + 1;

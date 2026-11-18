@@ -5,6 +5,7 @@ import {
   describeQueueGate,
   groupQueueTasksByFolder,
   isQueueGateWaiting,
+  orderQueueGroupsForDisplay,
   parseQueueSettingsDraft,
   queueBadgeCounts,
   queueFolderSuggestions,
@@ -55,6 +56,55 @@ describe("agentQueue UI helpers", () => {
     expect(groups[1]!.runningTask).toBeNull();
     expect(groups[1]!.queuedCount).toBe(1);
     expect(groups[1]!.tasks.map((t) => t.id)).toEqual(["b1", "b2"]);
+  });
+
+  it("orders project cards and tasks for display with running and queued at the top", () => {
+    const raw = groupQueueTasksByFolder([
+      makeTask({ id: "done-only-1", folder: "/repo/done-a", status: "done" }),
+      makeTask({ id: "fail-only", folder: "/repo/failed-only", status: "failed" }),
+      makeTask({ id: "held-only", folder: "/repo/held-only", status: "queued", hold: true }),
+      makeTask({ id: "q-done-older", folder: "/repo/waiting", status: "done" }),
+      makeTask({ id: "q-hold-first", folder: "/repo/waiting", status: "queued", hold: true }),
+      makeTask({ id: "q-runnable-second", folder: "/repo/waiting", status: "queued", hold: false }),
+      makeTask({ id: "q-failed", folder: "/repo/waiting", status: "failed" }),
+      makeTask({ id: "run-done", folder: "/repo/active", status: "done" }),
+      makeTask({ id: "run-queued", folder: "/repo/active", status: "queued" }),
+      makeTask({ id: "run-now", folder: "/repo/active", status: "running", terminal: "t2" }),
+      makeTask({ id: "done-only-2", folder: "/repo/done-b", status: "done" }),
+      makeTask({ id: "urgent-done", folder: "/repo/urgent", status: "done" }),
+      makeTask({ id: "urgent-needs", folder: "/repo/urgent", status: "running", needsInput: true, terminal: "t1" }),
+    ]);
+
+    const ordered = orderQueueGroupsForDisplay(raw);
+    expect(ordered.map((g) => g.folder)).toEqual([
+      "/repo/urgent",
+      "/repo/active",
+      "/repo/waiting",
+      "/repo/held-only",
+      "/repo/failed-only",
+      "/repo/done-a",
+      "/repo/done-b",
+    ]);
+
+    expect(ordered.find((g) => g.folder === "/repo/active")!.tasks.map((t) => t.id)).toEqual([
+      "run-now",
+      "run-queued",
+      "run-done",
+    ]);
+    // Queued tasks keep their relative queue execution order even when an earlier item is on hold.
+    expect(ordered.find((g) => g.folder === "/repo/waiting")!.tasks.map((t) => t.id)).toEqual([
+      "q-hold-first",
+      "q-runnable-second",
+      "q-failed",
+      "q-done-older",
+    ]);
+    // Original grouped arrays remain untouched.
+    expect(raw.map((g) => g.folder)[0]).toBe("/repo/done-a");
+    expect(raw.find((g) => g.folder === "/repo/active")!.tasks.map((t) => t.id)).toEqual([
+      "run-done",
+      "run-queued",
+      "run-now",
+    ]);
   });
 
   it("computes badge counts and paused state", () => {

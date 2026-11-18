@@ -2301,9 +2301,15 @@ async function queueRoute(path: string, method: string, init: RequestInit | unde
       if (targetIndex < 0) return error("task_not_found", `Queue task ${String(body["id"])} not found`, 404);
       const direction = body["direction"];
       if (direction !== "up" && direction !== "down") return error("invalid_direction", "direction must be up or down", 400);
-      const key = normalizeQueueFolder(demoQueueTasks[targetIndex]!.folder);
+      const target = demoQueueTasks[targetIndex]!;
+      const key = normalizeQueueFolder(target.folder);
+      const onlyQueued = target.status === "queued";
       const folderIndices: number[] = [];
-      demoQueueTasks.forEach((task, index) => { if (normalizeQueueFolder(task.folder) === key) folderIndices.push(index); });
+      demoQueueTasks.forEach((task, index) => {
+        if (normalizeQueueFolder(task.folder) !== key) return;
+        if (onlyQueued && task.status !== "queued") return;
+        folderIndices.push(index);
+      });
       const pos = folderIndices.indexOf(targetIndex);
       const swapPos = direction === "up" ? pos - 1 : pos + 1;
       if (swapPos >= 0 && swapPos < folderIndices.length) {

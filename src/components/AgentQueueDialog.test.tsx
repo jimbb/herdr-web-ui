@@ -298,6 +298,7 @@ describe("AgentQueueDialog", () => {
         makeTask({ id: "t-run", folder: "/repo/alpha", title: "Running job", prompt: "Fix build", status: "running", terminal: "pane-alpha" }),
         makeTask({ id: "t-queued", folder: "/repo/alpha", title: "Queued long", prompt: longPrompt, status: "queued" }),
         makeTask({ id: "t-failed", folder: "/repo/beta", title: "Failed job", prompt: "Run lint", status: "failed", error: "Exit code 1" }),
+        makeTask({ id: "t-beta-first", folder: "/repo/beta", title: "First beta job", prompt: "Check types", agent: "codex", status: "queued" }),
         makeTask({ id: "t-ready", folder: "/repo/beta", title: "Ready job", prompt: "Add docs", agent: "codex", status: "queued" }),
       ],
       gate: { status: "cooldown", summary: "Cooldown 45s", memAvailableMb: 8_192, workingCount: 1, cooldownLeftSec: 45 },
@@ -310,13 +311,13 @@ describe("AgentQueueDialog", () => {
         return Response.json({ settings: { ...snapshot.settings, minMemMb: 4096 }, queue: snapshot });
       }
       if (url.endsWith("/api/queue/tasks/t-ready/start") && init?.method === "POST") {
-        return Response.json({ task: snapshot.tasks[3], queue: snapshot });
+        return Response.json({ task: snapshot.tasks.find((t) => t.id === "t-ready")!, queue: snapshot });
       }
       if (url.endsWith("/api/queue/reorder") && init?.method === "POST") {
         return Response.json({ tasks: snapshot.tasks, queue: snapshot });
       }
       if (url.includes("/api/queue/tasks/") && init?.method === "PATCH") {
-        return Response.json({ task: snapshot.tasks[1], queue: snapshot });
+        return Response.json({ task: snapshot.tasks.find((t) => t.id === "t-queued")!, queue: snapshot });
       }
       if (url.includes("/api/queue/tasks/") && init?.method === "DELETE") {
         return Response.json({ ok: true, queue: snapshot });
@@ -335,6 +336,11 @@ describe("AgentQueueDialog", () => {
       expect(projectCards).toHaveLength(2);
       expect(textOf(projectCards[0]!.findByProps({ className: "queue-project-name" }))).toBe("alpha");
       expect(textOf(projectCards[1]!.findByProps({ className: "queue-project-name" }))).toBe("beta");
+
+      // Inside beta, queued tasks sort ahead of the failed task.
+      expect(
+        projectCards[1]!.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["First beta job", "Ready job", "Failed job"]);
 
       // Gate summary and pills
       expect(textOf(renderer!.root.findByProps({ className: "queue-gate-summary" }))).toBe("Cooldown 45s");
@@ -358,18 +364,21 @@ describe("AgentQueueDialog", () => {
 
       // Start now is disabled in alpha (sibling running), enabled in beta (failed sibling only)
       const startButtons = renderer!.root.findAll((node) => node.type === "button" && textOf(node) === "Start now");
-      expect(startButtons).toHaveLength(2);
+      expect(startButtons).toHaveLength(3);
       expect(startButtons[0]!.props.disabled).toBe(true);
       expect(startButtons[0]!.props.title).toBe("Another task is already running in this project");
       expect(startButtons[1]!.props.disabled).toBe(false);
+      expect(startButtons[2]!.props.disabled).toBe(false);
 
-      await act(async () => { await startButtons[1]!.props.onClick(); });
+      await act(async () => { await startButtons[2]!.props.onClick(); });
       expect(requests.some((req) => req.method === "POST" && req.url.endsWith("/api/queue/tasks/t-ready/start"))).toBe(true);
 
-      // Reorder up on t-ready in beta
+      // Reorder up/down bounds ignore non-queued siblings (running above in alpha, failed below in beta)
       const moveUpButtons = renderer!.root.findAll((node) => node.type === "button" && node.props["aria-label"] === "Move up");
-      expect(moveUpButtons[1]!.props.disabled).toBe(false);
-      await act(async () => { await moveUpButtons[1]!.props.onClick(); });
+      const moveDownButtons = renderer!.root.findAll((node) => node.type === "button" && node.props["aria-label"] === "Move down");
+      expect(moveUpButtons.map((btn) => btn.props.disabled)).toEqual([true, true, false]);
+      expect(moveDownButtons.map((btn) => btn.props.disabled)).toEqual([true, false, true]);
+      await act(async () => { await moveUpButtons[2]!.props.onClick(); });
       expect(requests.find((req) => req.url.endsWith("/api/queue/reorder"))?.body).toEqual({ id: "t-ready", direction: "up" });
 
       // Hold toggle
@@ -384,7 +393,7 @@ describe("AgentQueueDialog", () => {
 
       // Edit task form
       const editButtons = renderer!.root.findAll((node) => node.type === "button" && node.props["aria-label"] === "Edit");
-      expect(editButtons.length).toBe(3); // queued, failed, ready (not running)
+      expect(editButtons.length).toBe(4); // queued, beta-first, ready, failed (not running)
       await act(async () => { editButtons[0]!.props.onClick(); });
       expect(textOf(renderer!.root.findByProps({ className: "modal-title" }))).toBe("Edit queued task");
       const editPrompt = renderer!.root.findByProps({ className: "input queue-prompt-input" });
@@ -495,6 +504,40 @@ describe("AgentQueueDialog", () => {
       expect(renderer!.root.findAllByProps({ className: "icon-button queue-delete-btn" })).toHaveLength(0);
       expect(renderer!.root.findAll((node) => node.type === "button" && ["Add task", "Start now", "Hold", "Pause"].includes(textOf(node)))).toHaveLength(0);
       expect(renderer!.root.findAllByProps({ className: "btn queue-open-tab" })).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("places running and queued projects and tasks at the top above failed and done items", async () => {
+    const snapshot = makeSnapshot({
+      tasks: [
+        makeTask({ id: "t-done-1", folder: "/repo/done-only", title: "Finished work", prompt: "Done 1", status: "done", terminal: "p1" }),
+        makeTask({ id: "t-fail-1", folder: "/repo/failed-only", title: "Broken work", prompt: "Fail 1", status: "failed" }),
+        makeTask({ id: "t-wait-done", folder: "/repo/queued-proj", title: "Old queued done", prompt: "Done 2", status: "done" }),
+        makeTask({ id: "t-wait-q", folder: "/repo/queued-proj", title: "Next idle task", prompt: "Queued 1", status: "queued" }),
+        makeTask({ id: "t-run-done", folder: "/repo/active-proj", title: "Earlier done", prompt: "Done 3", status: "done" }),
+        makeTask({ id: "t-run-q", folder: "/repo/active-proj", title: "Waiting after run", prompt: "Queued 2", status: "queued" }),
+        makeTask({ id: "t-run-live", folder: "/repo/active-proj", title: "Live running", prompt: "Run 1", status: "running", terminal: "p2" }),
+      ],
+    });
+    const { spy } = mockQueueFetch(snapshot);
+    try {
+      await renderDialog({ snapshot });
+      const cards = renderer!.root.findAllByProps({ className: "queue-project-card" });
+      expect(cards.map((card) => textOf(card.findByProps({ className: "queue-project-name" })))).toEqual([
+        "active-proj",
+        "queued-proj",
+        "failed-only",
+        "done-only",
+      ]);
+
+      expect(
+        cards[0]!.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Live running", "Waiting after run", "Earlier done"]);
+      expect(
+        cards[1]!.findAll((node) => node.type === "li").map((row) => textOf(row.findByProps({ className: "queue-task-title" }))),
+      ).toEqual(["Next idle task", "Old queued done"]);
     } finally {
       spy.mockRestore();
     }
