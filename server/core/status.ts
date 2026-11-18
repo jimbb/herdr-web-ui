@@ -8,7 +8,7 @@ import type { AgentStatus, HerdrPane, PaneContext, PlanSummary, ServerMessage, S
 import { alertStatus, paneAlertsMuted, pushPaneTitle } from "../../shared/notify-policy.ts";
 import { AgentTaskStatus, isTaskAgent } from "../agent-tasks.ts";
 import { resolveAgyStore } from "../agy-store.ts";
-import { BackgroundWait } from "../background-wait.ts";
+import { BackgroundWait, WAIT_GRACE_MS } from "../background-wait.ts";
 import { CardWaits, changedHands, type Roster } from "../card-waits.ts";
 import { busyPanes, DESKTOP_ACTIVITY_FILE, trackDesktopActivity } from "../desktop-activity.ts";
 import { ClaudeSubagentStatus, plain } from "../claude-subagents.ts";
@@ -166,7 +166,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     },
     onFound: (paneId) => completions.adopt(paneId, "letta", []),
   });
-  const waits = new BackgroundWait(options.statusNow ?? Date.now, options.backgroundWait);
+  const statusNow = options.statusNow ?? Date.now;
+  const graceMs = options.backgroundWait?.grace ?? WAIT_GRACE_MS;
+  const waits = new BackgroundWait(statusNow, options.backgroundWait);
   /** herdr-core panes whose agent asks on screen what it did not report (server/card-waits.ts); read with state of their own, as a prompt watch is */
   const cardOpenCode = new OpenCodePromptState();
   const cardOmp: OmpLookups = new Map();
@@ -176,6 +178,64 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   );
   const alert = (paneId: string, status: AgentStatus): void => { push.onStatus(paneId, cards.status(paneId, status)).catch(logPushError); };
   let lastPanes: Map<string, HerdrPane> | null = null;
+  /** ponytail: hc child holds live here instead of BackgroundWait so status-free panes keep a clean transition and no 30-min cap */
+  const parentOf = new Map<string, string>();
+  const busyFrame = new Set<string>();
+  const childGrace = new Map<string, number>();
+  const toldHold = new Map<string, boolean>();
+  const snapPane = new Map<string, { status: AgentStatus; agent: string | null }>();
+  const holds = (paneId: string): boolean => {
+    if (waits.waiting(paneId)) return true;
+    const until = childGrace.get(paneId);
+    if (until !== undefined && until > statusNow()) return true;
+    for (const [child, parent] of parentOf) if (parent === paneId && busyFrame.has(child)) return true;
+    return false;
+  };
+  function retell(paneId: string): void {
+    const status = completions.current(paneId) ?? snapPane.get(paneId)?.status;
+    if (status === undefined) return;
+    broadcastAll(paneStatus(paneId, status));
+    const effective = alertStatus(status, holds(paneId));
+    options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? snapPane.get(paneId)?.agent ?? null);
+    alert(paneId, effective);
+  }
+  function syncParents(panes: readonly HerdrPane[], resyncNewer?: ReadonlySet<string>): void {
+    const prevParent = new Map(parentOf);
+    const prevBusy = new Set(busyFrame);
+    const wasTold = new Set(toldHold.keys());
+    const live = new Set(panes.map((pane) => pane.pane_id));
+    parentOf.clear();
+    for (const pane of panes) {
+      if (pane.parent_pane_id && pane.parent_pane_id !== pane.pane_id) parentOf.set(pane.pane_id, pane.parent_pane_id);
+      const status = restingClaude(pane.pane_id, pane.agent, pane.agent_status);
+      snapPane.set(pane.pane_id, { status, agent: pane.agent ?? null });
+      if (!wasTold.has(pane.pane_id) || (resyncNewer !== undefined && !resyncNewer.has(pane.pane_id))) {
+        if (status === "working" || status === "blocked" || waits.waiting(pane.pane_id)) busyFrame.add(pane.pane_id);
+        else busyFrame.delete(pane.pane_id);
+      }
+    }
+    for (const paneId of [...busyFrame]) if (!live.has(paneId)) busyFrame.delete(paneId);
+    for (const state of [childGrace, toldHold, snapPane] as Map<string, unknown>[]) for (const paneId of [...state.keys()]) if (!live.has(paneId)) state.delete(paneId);
+    const now = statusNow();
+    const propagate = (): void => {
+      for (const [paneId, until] of childGrace) if (until > now && (!wasTold.has(paneId) || (resyncNewer !== undefined && !resyncNewer.has(paneId)))) busyFrame.add(paneId);
+      for (let added = true; added;) {
+        added = false;
+        for (const [child, parent] of parentOf) {
+          if (busyFrame.has(parent) || !busyFrame.has(child) || (wasTold.has(parent) && !(resyncNewer !== undefined && !resyncNewer.has(parent)))) continue;
+          busyFrame.add(parent);
+          added = true;
+        }
+      }
+    };
+    propagate();
+    for (const [child, oldParent] of prevParent) {
+      if (prevBusy.has(child) && (parentOf.get(child) !== oldParent || !busyFrame.has(child)) && live.has(oldParent)) childGrace.set(oldParent, now + graceMs);
+    }
+    propagate();
+    for (const pane of panes) if (!wasTold.has(pane.pane_id)) toldHold.set(pane.pane_id, holds(pane.pane_id));
+    for (const pane of panes) if (wasTold.has(pane.pane_id) && holds(pane.pane_id) !== toldHold.get(pane.pane_id)) retell(pane.pane_id);
+  }
   let settling: string | null = null;
   const agentNow = new Map<string, string | null>();
   const agentRead = new Map<string, number>();
@@ -190,12 +250,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   const agentLifetime = new Map<string, number>();
   const handsChanged = (paneId: string): void => { agentLifetime.set(paneId, (agentLifetime.get(paneId) ?? 0) + 1); };
   const eventAgent = new Map<string, { agent: string | null; since: number }>();
-  const statusNow = options.statusNow ?? Date.now;
   function newLifetime(paneId: string, keep: string | null): void {
-    const held = waits.waiting(paneId);
+    const held = holds(paneId);
     const seen = eventAgent.get(paneId);
     if (keep !== null && seen?.agent === keep) waits.resetBefore(paneId, seen.since); else waits.reset(paneId);
-    claudeAgentsChanged(paneId, 0, 0, null, held);
+    claudeAgentsChanged(paneId, 0, 0, null, held && !holds(paneId));
   }
   let service: { pid: number; started: number | null } | null = null;
   const claudeAgents = new ClaudeSubagentStatus({
@@ -455,6 +514,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (pane.agent === "claude" && agentNow.get(pane.pane_id) === "claude") claudeAgents.poll(pane.pane_id);
     }
     options.openCodeState?.reconcile(named.panes, promptCheckpoint);
+    syncParents(named.panes);
     return named;
   };
   const backgroundOf = (paneId: string): number => omo.backgroundOf(paneId) || claudeAgents.countOf(paneId) || opencodeAgents.countOf(paneId) || taskAgents.countOf(paneId);
@@ -479,7 +539,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       ...(lifetime === undefined ? {} : { herdr_lifetime: lifetime }),
       panes: snapshot.panes.map((pane) => {
         const background = backgroundOf(pane.pane_id);
-        const waiting = waits.waiting(pane.pane_id);
+        const waiting = holds(pane.pane_id);
         const plan = plans.summaryOf(pane.pane_id);
         const context = plans.contextOf(pane.pane_id);
         return background > 0 || waiting || plan !== null || context !== null ? { ...pane, ...(background > 0 ? { background_tasks: background } : {}), ...(waiting ? { background_wait: true as const } : {}), ...(plan !== null ? { plan } : {}), ...(context !== null ? { context } : {}) } : pane;
@@ -501,8 +561,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     void telemetry.active(agents, visit)
       .catch((error) => console.error(`telemetry: the visit was not counted (${error instanceof Error ? error.message : String(error)})`));
   }
-  const paneStatus = (paneId: string, status: AgentStatus, about: { background_tasks?: number; plan?: PlanSummary | null; context?: PaneContext | null } = {}): ServerMessage =>
-    ({ type: "pane-status", pane_id: paneId, agent_status: cards.status(paneId, status), ...finishes.status(paneId, status), ...about, ...(waits.waiting(paneId) ? { background_wait: true as const } : {}) });
+  const paneStatus = (paneId: string, status: AgentStatus, about: { background_tasks?: number; plan?: PlanSummary | null; context?: PaneContext | null } = {}): ServerMessage => {
+    const waiting = holds(paneId);
+    toldHold.set(paneId, waiting);
+    return { type: "pane-status", pane_id: paneId, agent_status: cards.status(paneId, status), ...finishes.status(paneId, status), ...about, ...(waiting ? { background_wait: true as const } : {}) };
+  };
   const machines = options.machines === false ? null : new MachineManager(options.stateDir ?? defaultStateDir(), push, completions, clientSnapshot, { restoreReplaced: () => preferences.get().settings.restoreReplacedServer === true, bootId: options.orderSequence?.epoch, localFinishEpoch: () => finishes.epoch, relaySocket: options.relayPcSocket, relayDirectSocket: options.relayPcDirectSocket, serverId: options.serverId, tailnet: options.tailnetPcs, sshCandidates: options.sshCandidates, ...(options.pcUpdateTimings ? { ownUpdate: options.pcUpdateTimings } : {}) });
   if (machines && options.herdrProfiles) machines.watchHerdrProfiles(options.herdrProfiles);
   if (machines && capabilities().machines) machines.watchHcMachines(() => listHcMachines(coreConnection()), (machine) => startMachineBridge(machine, options.stateDir ?? defaultStateDir()));
@@ -516,6 +579,18 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     if (message.type === "pane-status" || message.type === "pane-exited" || message.type === "session-changed") desktopActivity?.changed();
     machines?.localMessage(message);
     for (const client of clients) send(client, message);
+    if (message.type === "pane-status") {
+      const busy = message.agent_status === "working" || message.agent_status === "blocked" || message.background_wait === true;
+      const wasBusy = busyFrame.has(message.pane_id);
+      if (busy !== wasBusy) {
+        if (busy) busyFrame.add(message.pane_id); else busyFrame.delete(message.pane_id);
+        const parent = parentOf.get(message.pane_id);
+        if (parent !== undefined) {
+          if (!busy) childGrace.set(parent, statusNow() + graceMs);
+          if (holds(parent) !== toldHold.get(parent)) retell(parent);
+        }
+      }
+    }
   }
   /** A broken state file must cost the alert, never the server (an unhandled rejection would). */
   const logPushError = (error: unknown): void => {
@@ -530,12 +605,12 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     if (turn && derived === "working") promptWaitEnded(paneId);
     const status = turn ? completions.observe(paneId, derived, "omo", rest) : completions.current(paneId) ?? completions.observe(paneId, derived, "omo");
     if (turn) { pending.status(paneId, status); drainPending(paneId); }
-    const held = waits.waiting(paneId);
+    const held = holds(paneId);
     waits.running(paneId, background, null, false);
     if (turn) waits.status(paneId, status);
     broadcastAll(paneStatus(paneId, status, { background_tasks: background }));
-    if (turn || waits.waiting(paneId) !== held) {
-      const effective = alertStatus(status, waits.waiting(paneId));
+    if (turn || holds(paneId) !== held) {
+      const effective = alertStatus(status, holds(paneId));
       options.onQueuePaneStatus?.(paneId, effective, "omo", turn && rest === "failed" && status === "idle");
       alert(paneId, effective);
     }
@@ -567,7 +642,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     if (status === undefined) return;
     broadcastAll(paneStatus(paneId, status, { background_tasks: running }));
     if (changed) {
-      const effective = alertStatus(status, waits.waiting(paneId));
+      const effective = alertStatus(status, holds(paneId));
       options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
       alert(paneId, effective);
       claudeFailHeldEnds(paneId);
@@ -575,15 +650,14 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   }
 
   function waitsRanOut(): void {
+    const now = statusNow();
+    const expired: string[] = [];
+    for (const [paneId, until] of childGrace) if (until <= now) { childGrace.delete(paneId); expired.push(paneId); }
     for (const paneId of waits.tick()) {
-      const status = completions.current(paneId);
-      if (status === undefined) continue;
-      broadcastAll(paneStatus(paneId, status));
-      const effective = alertStatus(status, waits.waiting(paneId));
-      options.onQueuePaneStatus?.(paneId, effective, agentNow.get(paneId) ?? null);
-      alert(paneId, effective);
+      retell(paneId);
       claudeFailHeldEnds(paneId);
     }
+    for (const paneId of expired) if (holds(paneId) !== toldHold.get(paneId)) retell(paneId);
   }
 
   function planChanged(paneId: string, plan: PlanSummary | null): void {
@@ -734,7 +808,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     } else waits.forget(paneId);
     const tell = (): void => {
       broadcastAll(paneStatus(paneId, status, tracker !== null ? { background_tasks: tracker.countOf(paneId) } : {}));
-      const effective = alertStatus(status, waits.waiting(paneId));
+      const effective = alertStatus(status, holds(paneId));
       options.onQueuePaneStatus?.(paneId, effective, agent, failedRest);
       alert(paneId, effective);
     };
@@ -825,6 +899,15 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     holdPendingPane(paneId, { code: "pane_not_found", message: "The pane ended; its pending messages were not sent" });
     pending.forget(paneId);
     waits.forget(paneId);
+    const wasBusy = busyFrame.delete(paneId);
+    const oldParent = parentOf.get(paneId);
+    parentOf.delete(paneId);
+    for (const [child, parent] of parentOf) if (parent === paneId) parentOf.delete(child);
+    for (const state of [childGrace, toldHold, snapPane] as Map<string, unknown>[]) state.delete(paneId);
+    if (wasBusy && oldParent !== undefined) {
+      childGrace.set(oldParent, statusNow() + graceMs);
+      if (holds(oldParent) !== toldHold.get(oldParent)) retell(oldParent);
+    }
     taskAgents.forget(paneId);
     completions.forget(paneId);
     heard.delete(paneId);
@@ -845,12 +928,13 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (!completions.seen(paneId)) return;
       pending.status(paneId, queueStatus(paneId, "idle")); drainPending(paneId);
       broadcastAll(paneStatus(paneId, "idle"));
-      alert(paneId, alertStatus("idle", waits.waiting(paneId)));
+      alert(paneId, alertStatus("idle", holds(paneId)));
     },
     onBaseline: (panes, newer = new Set(), askedAt = Date.now(), created = new Map()) => {
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       for (const pane of projected) if (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent)) waits.seed(pane.pane_id, pane.agent_status);
-      const alerted = projected.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(pane.agent_status, waits.waiting(pane.pane_id))) }));
+      syncParents(projected);
+      const alerted = projected.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(pane.agent_status, holds(pane.pane_id))) }));
       // web push alone hears a new pane's first reading as a change from its creation; everything else takes the
       // snapshot as for any pane, the queue below included
       for (const pane of alerted) {
@@ -874,7 +958,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         // the tracker's remembered working is what its events already told the queue, and no reading of a new turn
         if (read || status !== "working") pending.baseline(pane.pane_id, queueStatus(pane.pane_id, status), askedAt);
         drainPending(pane.pane_id);
-        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(status, waits.waiting(pane.pane_id)), pane.agent ?? null);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(status, holds(pane.pane_id)), pane.agent ?? null);
       }
     },
     onReconciled: (panes) => {
@@ -891,15 +975,16 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
       finishes.resync(completions, projected, newer);
       const settled = (pane: HerdrPane): AgentStatus => completions.current(pane.pane_id) ?? pane.agent_status;
+      for (const pane of panes) if (!newer.has(pane.pane_id) && (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent))) waits.status(pane.pane_id, settled(pane));
+      syncParents(projected, newer);
       // read from a snapshot: one asked for before an Enter says nothing of its turn. A pane with an event since has it already
       for (const pane of panes) {
         const current = settled(pane);
         if (!newer.has(pane.pane_id)) pending.baseline(pane.pane_id, queueStatus(pane.pane_id, current), askedAt);
         drainPending(pane.pane_id);
-        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(current, waits.waiting(pane.pane_id)), pane.agent ?? null);
+        options.onQueuePaneStatus?.(pane.pane_id, alertStatus(current, holds(pane.pane_id)), pane.agent ?? null);
       }
-      for (const pane of panes) if (!newer.has(pane.pane_id) && (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent))) waits.status(pane.pane_id, settled(pane));
-      push.resync(panes.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(settled(pane), waits.waiting(pane.pane_id))) })), newer);
+      push.resync(panes.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(settled(pane), holds(pane.pane_id))) })), newer);
     },
     onPaneEnded: (paneId) => {
       paneGone(paneId);
@@ -914,7 +999,9 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     },
     onPaneMoved: (from, to) => {
       const renumber = finishes.moved(from, to);
-      for (const state of [codexFailedAt, codexTurns, codexLooked] as Map<string, unknown>[]) if (state.has(from)) { state.set(to, state.get(from)); state.delete(from); }
+      for (const state of [codexFailedAt, codexTurns, codexLooked, parentOf, childGrace, toldHold, snapPane] as Map<string, unknown>[]) if (state.has(from)) { state.set(to, state.get(from)); state.delete(from); }
+      if (busyFrame.delete(from)) busyFrame.add(to);
+      for (const [child, parent] of parentOf) if (parent === from) parentOf.set(child, to);
       if (codexFailed.delete(from)) codexFailed.add(to);
       if (claudeLooked.has(from)) { claudeLooked.set(to, claudeLooked.get(from)!); claudeLooked.delete(from); }
       if (claudeFailed.delete(from)) claudeFailed.add(to);
