@@ -24,6 +24,7 @@ export type SidebarRows = "one" | "two";
 export type AgentOrder = "waiting" | "workspace" | "activity";
 export const AGENT_GROUP_SORTS = ["wait", "recent", "name"] as const;
 export type AgentGroupSort = (typeof AGENT_GROUP_SORTS)[number];
+export type InboxGrouping = "state" | "project";
 export type AgentMarks = "color" | "mono";
 export type UsageCount = "used" | "left";
 /** the limit a plan meter shows: the plan's week, or its short session (5 hours on Claude and Codex) */
@@ -75,6 +76,7 @@ export interface Settings {
   agentOrder: AgentOrder;
   agentGroups: boolean;
   agentGroupSort: AgentGroupSort;
+  inboxGrouping: InboxGrouping;
   agentMarks: AgentMarks;
   agentLocks: boolean;
   /** Settings -> Experimental -> OpenCode: subagent ends from their session: the server ends an OpenCode subagent where its parent session's record does (server/opencode-subagents.ts); off, by its own rows */
@@ -206,7 +208,7 @@ type TelemetrySourceSettings = Omit<Settings,
   | "quickReplies" | "agentLocks" | "lockedAgents" | "opencodeParentEnds" | "ompHeldFiles" | "restoreReplacedServer" | "agentNamedGroups" | "agentGroupNames" | "agentGroupOf" | "usageOrder" | "usageHidden" | "fileOpen" | "filesPanel" | "webLinks" | "reuseExternalLinkTab" | "claudeLaunchMode" | "codexLaunchMode"
   | "claudeLaunchModel" | "claudeLaunchEffort" | "codexLaunchModel" | "codexLaunchEffort"
   | "followHerdrFocus" | "sidebarPeek" | "phoneInbox" | "sidebarBackgroundWorkspaces" | "codexDrag" | "composerArtifacts" | "composerPasteSend" | "composerBtw" | "terminalMirrorWrap" | "sidebarFilter" | "sidebarContext" | "sidebarAgentTree" | "foldHelpers" | "pcLoad"
-  | "expandThinking" | "foldWork" | "customThemes" | "autoTabNames" | "voiceEngine" | "agentGroups" | "agentGroupSort" | "terminalImages" | "terminalAttachButton"
+  | "expandThinking" | "foldWork" | "customThemes" | "autoTabNames" | "voiceEngine" | "agentGroups" | "agentGroupSort" | "inboxGrouping" | "terminalImages" | "terminalAttachButton"
   | "terminalKeyboardOnRequest" | "terminalFoldKeyBar" | "fileFontSize" | "fileFontBase" | "editTextFiles" | "reopenFileOnReturn" | "phoneTabs">;
 
 function differsFromDefault(value: unknown, defaultValue: unknown): boolean {
@@ -301,7 +303,7 @@ export const SETTING_SCOPE = {
   foldHelpers: "device",
   sidebarAgentTree: "device",
   pcLoad: "device",
-  agentGroups: "device", agentGroupSort: "device",
+  agentGroups: "device", agentGroupSort: "device", inboxGrouping: "device",
   keepScreenOn: "device", alertsOn: "device", alertInput: "device", alertDone: "device", alertSound: "device",
   paletteLight: "device", paletteDark: "device", statusIndicators: "device",
   voiceInput: "device", voiceLanguage: "device", voiceEngine: "device", voicePolishChat: "device", voicePolishTerminal: "device",
@@ -334,6 +336,7 @@ export const DEFAULT_SETTINGS: Settings = {
   agentOrder: "waiting",
   agentGroups: false,
   agentGroupSort: "wait",
+  inboxGrouping: "state",
   agentMarks: "color",
   agentLocks: false,
   opencodeParentEnds: false,
@@ -536,6 +539,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     agentOrder: record["agentOrder"] === "waiting" || record["agentOrder"] === "workspace" || record["agentOrder"] === "activity" ? record["agentOrder"] : DEFAULT_SETTINGS.agentOrder,
     agentGroups: typeof record["agentGroups"] === "boolean" ? record["agentGroups"] : DEFAULT_SETTINGS.agentGroups,
     agentGroupSort: AGENT_GROUP_SORTS.includes(record["agentGroupSort"] as AgentGroupSort) ? record["agentGroupSort"] as AgentGroupSort : DEFAULT_SETTINGS.agentGroupSort,
+    inboxGrouping: record["inboxGrouping"] === "project" ? "project" : DEFAULT_SETTINGS.inboxGrouping,
     agentMarks: record["agentMarks"] === "color" || record["agentMarks"] === "mono" ? record["agentMarks"] : DEFAULT_SETTINGS.agentMarks,
     agentLocks: typeof record["agentLocks"] === "boolean" ? record["agentLocks"] : DEFAULT_SETTINGS.agentLocks,
     opencodeParentEnds: typeof record["opencodeParentEnds"] === "boolean" ? record["opencodeParentEnds"] : DEFAULT_SETTINGS.opencodeParentEnds,
@@ -690,8 +694,9 @@ function readPcLoad(): boolean | null {
 /** Settings → Appearance → Group agents by state and Within a state, kept in keys of their own for the same reason: an old tab's save drops a field it does not know. */
 export const AGENT_GROUPS_STORAGE_KEY = "ovis:agent-groups";
 export const AGENT_GROUP_SORT_STORAGE_KEY = "ovis:agent-group-sort";
+const INBOX_GROUPING_STORAGE_KEY = "ovis:inbox-grouping";
 
-function readAgentGroups(): Pick<Settings, "agentGroups" | "agentGroupSort"> {
+function readAgentGroups(): Pick<Settings, "agentGroups" | "agentGroupSort" | "inboxGrouping"> {
   const read = (key: string): unknown => {
     try {
       const raw = window.localStorage.getItem(key);
@@ -700,8 +705,8 @@ function readAgentGroups(): Pick<Settings, "agentGroups" | "agentGroupSort"> {
       return null;
     }
   };
-  const { agentGroups, agentGroupSort } = sanitizeSettings({ agentGroups: read(AGENT_GROUPS_STORAGE_KEY), agentGroupSort: read(AGENT_GROUP_SORT_STORAGE_KEY) });
-  return { agentGroups, agentGroupSort };
+  const { agentGroups, agentGroupSort, inboxGrouping } = sanitizeSettings({ agentGroups: read(AGENT_GROUPS_STORAGE_KEY), agentGroupSort: read(AGENT_GROUP_SORT_STORAGE_KEY), inboxGrouping: read(INBOX_GROUPING_STORAGE_KEY) });
+  return { agentGroups, agentGroupSort, inboxGrouping };
 }
 
 export const PHONE_TABS_STORAGE_KEY = "ovis:phone-tabs";
@@ -885,7 +890,7 @@ export function saveSettings(settings: Settings): boolean {
       darkTheme: mirrored.darkTheme, lightTheme: mirrored.lightTheme,
       mirror: { palette: mirrored.palette, paletteDark: mirrored.paletteDark, paletteLight: mirrored.paletteLight },
     }));
-    const { uiFontFamily, terminalMirrorWrap, sidebarFilter, sidebarContext, sidebarAgentTree, phoneInbox, foldHelpers, pcLoad, voiceEngine, agentGroups, agentGroupSort, fileFontSize, fileFontBase, composerArtifacts, composerPasteSend, composerBtw, expandThinking, foldWork, reuseExternalLinkTab, filesPanel, terminalImages, terminalAttachButton, terminalKeyboardOnRequest, terminalFoldKeyBar, customThemes, phoneTabs, ...main } = mirrored;
+    const { uiFontFamily, terminalMirrorWrap, sidebarFilter, sidebarContext, sidebarAgentTree, phoneInbox, foldHelpers, pcLoad, voiceEngine, agentGroups, agentGroupSort, inboxGrouping, fileFontSize, fileFontBase, composerArtifacts, composerPasteSend, composerBtw, expandThinking, foldWork, reuseExternalLinkTab, filesPanel, terminalImages, terminalAttachButton, terminalKeyboardOnRequest, terminalFoldKeyBar, customThemes, phoneTabs, ...main } = mirrored;
     window.localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(customThemes));
     window.localStorage.setItem(VOICE_ENGINE_STORAGE_KEY, JSON.stringify(voiceEngine));
     window.localStorage.setItem(PHONE_TABS_STORAGE_KEY, JSON.stringify(phoneTabs));
@@ -895,6 +900,7 @@ export function saveSettings(settings: Settings): boolean {
     window.localStorage.setItem(PC_LOAD_STORAGE_KEY, JSON.stringify(pcLoad));
     window.localStorage.setItem(AGENT_GROUPS_STORAGE_KEY, JSON.stringify(agentGroups));
     window.localStorage.setItem(AGENT_GROUP_SORT_STORAGE_KEY, JSON.stringify(agentGroupSort));
+    window.localStorage.setItem(INBOX_GROUPING_STORAGE_KEY, JSON.stringify(inboxGrouping));
     window.localStorage.setItem(FILE_FONT_SIZE_STORAGE_KEY, JSON.stringify(fileFontSize));
     // only beside the size it was recorded for: a Reset over another tab's base must not leave that base behind
     window.localStorage.setItem(FILE_FONT_BASE_STORAGE_KEY, JSON.stringify(fileFontBase?.size === fileFontSize ? fileFontBase : null));

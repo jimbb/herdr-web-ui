@@ -180,13 +180,14 @@ describe("saved theme migration", () => {
   });
 
   it("keeps the agent groups off until chosen, in keys of their own, out of an old tab's whole-record save", () => {
-    expect(loadSettings()).toMatchObject({ agentGroups: false, agentGroupSort: "wait" });
-    saveSettings(sanitizeSettings({ agentGroups: true, agentGroupSort: "name" }));
+    expect(loadSettings()).toMatchObject({ agentGroups: false, agentGroupSort: "wait", inboxGrouping: "state" });
+    saveSettings(sanitizeSettings({ agentGroups: true, agentGroupSort: "name", inboxGrouping: "project" }));
     expect(JSON.parse(records.get(main) ?? "{}")).not.toHaveProperty("agentGroups");
     oldSaveSettings({ ...readOld(), terminalFontSize: 18 });
-    expect(loadSettings()).toMatchObject({ agentGroups: true, agentGroupSort: "name", terminalFontSize: 18 });
+    expect(loadSettings()).toMatchObject({ agentGroups: true, agentGroupSort: "name", inboxGrouping: "project", terminalFontSize: 18 });
     expect(SETTING_SCOPE.agentGroups).toBe("device");
-    expect(sanitizeSettings({ agentGroups: "on", agentGroupSort: "oldest" })).toMatchObject({ agentGroups: false, agentGroupSort: "wait" });
+    expect(SETTING_SCOPE.inboxGrouping).toBe("device");
+    expect(sanitizeSettings({ agentGroups: "on", agentGroupSort: "oldest", inboxGrouping: "folder" })).toMatchObject({ agentGroups: false, agentGroupSort: "wait", inboxGrouping: "state" });
   });
 
   it("keeps the speech recognition in its own key, out of an old tab's whole-record save", () => {
