@@ -589,6 +589,9 @@ const BASE: Record<string, string> = {
   "Agent": "에이전트",
   "Agent Queue": "에이전트 대기열",
   "Install another agent ({count})": "다른 에이전트 설치 ({count})",
+  "Close failed: {reason}": "닫기 실패: {reason}",
+  "Close pane {name}?": "{name} 패널을 닫을까요?",
+  "The pane's running processes will stop. Closing its last pane also closes the workspace.": "패널에서 실행 중인 프로세스가 종료됩니다. 마지막 패널을 닫으면 워크스페이스도 닫힙니다.",
 };
 
 /** The parts KO is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

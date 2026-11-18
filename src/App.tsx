@@ -1028,11 +1028,21 @@ export function App() {
   // a row opens its agent's thread on its chat; the half of the app's own split that shows the pane becomes the
   // active one first, so the pick never moves that pane into the other half
   const openThread = (machineId: string, paneId: string): void => { activateSlotOf({ machineId, paneId }); selectTarget(machineId, paneId, "chat"); };
+  const handleInboxClosed = (machineId: string, paneId: string): void => {
+    void load();
+    if (terminalPeek?.machineId === machineId && terminalPeek.paneId === paneId) setTerminalPeek(null);
+    if (diffViewing?.machineId === machineId && diffViewing.paneId === paneId) releaseDiff();
+    if (unsentFor?.machineId === machineId && unsentFor.pane.pane_id === paneId) closeUnsent();
+    if (selectedMachineId === machineId && selectedPaneId === paneId) {
+      setFilesOpen(false);
+      inbox.show();
+    }
+  };
   const modeList = (column: boolean): ReactNode => (
     <InboxList ref={inbox.list} machines={sidebarMachines} activity={activity} watching={auth?.role === "watch"} wide={column} filter={inbox.filter} onFilter={inbox.setFilter} query={inbox.query} onQuery={inbox.setQuery} scroll={inbox.scroll} focus={{ ...inbox.focus, row: returnTo }}
       current={column && !inbox.shown && selectedPaneId !== null ? sidebarPinKey(selectedMachineId, selectedPaneId) : null}
       onOpen={openThread}
-      onNew={openNewOn} questionReads={inbox.questionReads} summaryReads={inbox.summaryReads}
+      onNew={openNewOn} onClosed={handleInboxClosed} questionReads={inbox.questionReads} summaryReads={inbox.summaryReads}
       more={column ? undefined : { label: moreBase, expanded: more !== null && moreOnList, popup: isSheetWidth ? "dialog" : "menu", onPress: (anchor) => setMore((open) => (open ? null : { anchor })) }}
       note={column ? undefined : <HeaderNote note={listNote} />} connection={!column && listNote === null ? rosterConnection : null} failure={error === null ? null : { error, retry: load }} />
   );

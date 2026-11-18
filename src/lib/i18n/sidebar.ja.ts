@@ -44,6 +44,7 @@ export const SIDEBAR_JA: Record<string, string> = {
   "Filter by state": "状態で絞り込む",
   "Search agents": "エージェントを検索",
   "Filter by state: {state}": "状態で絞り込む: {state}",
+  "Close {agent}": "{agent} を閉じる",
   "Expand worktrees of {name}": "{name} のワークツリーを展開",
   "Collapse worktrees of {name}": "{name} のワークツリーを折りたたむ",
   "Agents: {names}": "エージェント: {names}",

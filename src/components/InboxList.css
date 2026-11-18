@@ -254,6 +254,10 @@
 }
 
 /* the mark with the gutter above and below it is the row: no rule and no gap between two rows */
+.mode-inbox .inbox-item {
+  position: relative;
+}
+
 .mode-inbox .inbox-row {
   position: relative;
   display: flex;
@@ -290,6 +294,81 @@
 
 .mode-inbox .inbox-item.is-offline {
   opacity: 0.55;
+}
+
+.mode-inbox .inbox-close {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  color: var(--text-dim);
+  transform: translateY(-50%);
+}
+
+.mode-inbox .inbox-close:active {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-strong);
+  opacity: 1;
+}
+
+.mode-inbox .inbox-close:focus-visible {
+  outline-offset: var(--ring-inset-offset);
+  color: var(--text-strong);
+}
+
+.mode-inbox:not(.is-wide) .inbox-close {
+  inset-inline-end: calc(var(--inbox-inset) - (var(--touch-target) - var(--icon-size-md)) / 2);
+  width: var(--touch-target);
+  height: var(--touch-target);
+  border-radius: var(--radius-pill);
+}
+
+.mode-inbox:not(.is-wide) .inbox-close svg {
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
+}
+
+.mode-inbox:not(.is-wide) .inbox-item:has(> .inbox-close) > .inbox-row {
+  padding-inline-end: calc(var(--inbox-inset) + var(--touch-target) - var(--space-2));
+}
+
+@media (hover: hover) {
+  .mode-inbox:not(.is-wide) .inbox-close:hover {
+    background: var(--bg-hover);
+    color: var(--text-strong);
+  }
+}
+
+.mode-inbox .inbox-close-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--inbox-gutter) var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--danger-tint);
+  color: var(--danger-text);
+  font-size: var(--fs-sm);
+}
+
+.mode-inbox .inbox-close-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mode-inbox .inbox-close-error-dismiss {
+  width: var(--pointer-target);
+  height: var(--pointer-target);
+  color: var(--danger-text);
+}
+
+.mode-inbox .inbox-close-error-dismiss svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
 }
 
 /* the round mark, in a row and in a thread's title and chip (InboxMode.css), which stand outside the list */
@@ -672,6 +751,99 @@
 
 .mode-inbox.is-wide .inbox-item.is-current .inbox-name {
   font-weight: var(--fw-selected);
+}
+
+.mode-inbox.is-wide .inbox-close-error {
+  margin: 0 var(--space-3) var(--space-2);
+}
+
+.mode-inbox.is-wide .inbox-close {
+  inset-inline-end: var(--space-2);
+  width: var(--pointer-target);
+  height: var(--pointer-target);
+  border-radius: var(--radius-md);
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.mode-inbox.is-wide .inbox-close svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mode-inbox.is-wide .inbox-close {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .mode-inbox.is-wide .inbox-item:hover > .inbox-close,
+  .mode-inbox.is-wide .inbox-item:focus-within > .inbox-close,
+  .mode-inbox.is-wide .inbox-close:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .mode-inbox.is-wide .inbox-item:has(> .inbox-close):is(:hover, :focus-within) > .inbox-row {
+    padding-inline-end: calc(var(--space-2) + var(--pointer-target) + var(--space-1));
+  }
+
+  .mode-inbox.is-wide .inbox-item:not(.is-current):hover > .inbox-row:enabled:not(:active) {
+    background: var(--side-hover);
+  }
+
+  .mode-inbox.is-wide .inbox-close:hover:not(:active) {
+    background: var(--bg-hover);
+    color: var(--text-strong);
+  }
+
+  .mode-inbox.is-wide .inbox-item.is-current .inbox-close:hover:not(:active) {
+    background: color-mix(in srgb, var(--side-selected), var(--border-strong));
+  }
+}
+
+.mode-inbox.is-wide .inbox-close:active {
+  background: color-mix(in srgb, var(--side-selected), var(--border-strong));
+  border-color: transparent;
+  color: var(--text-strong);
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .mode-inbox.is-wide .inbox-close {
+    inset-inline-end: var(--space-1);
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .mode-inbox.is-wide .inbox-close svg {
+    width: var(--icon-size-md);
+    height: var(--icon-size-md);
+  }
+
+  .mode-inbox.is-wide .inbox-item:has(> .inbox-close) > .inbox-row {
+    padding-inline-end: calc(var(--space-1) + var(--touch-target));
+  }
+}
+
+@media (pointer: coarse) {
+  .mode-inbox .inbox-close-error-dismiss {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .mode-inbox .inbox-close-error-dismiss svg {
+    width: var(--icon-size-md);
+    height: var(--icon-size-md);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-inbox .inbox-close {
+    transition: none;
+  }
 }
 
 /* a finger gets its target at any width (the controls' own size is the shell's: InboxMode.css) */

@@ -44,6 +44,7 @@ export const SIDEBAR_ZH: Record<string, string> = {
   "Filter by state": "按状态筛选",
   "Search agents": "搜索 Agent",
   "Filter by state: {state}": "按状态筛选：{state}",
+  "Close {agent}": "关闭 {agent}",
   "Expand worktrees of {name}": "展开 {name} 的工作树",
   "Collapse worktrees of {name}": "折叠 {name} 的工作树",
   "Agents: {names}": "代理：{names}",

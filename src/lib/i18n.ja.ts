@@ -591,6 +591,9 @@ const BASE: Record<string, string> = {
   "Agent": "エージェント",
   "Agent Queue": "エージェントキュー",
   "Install another agent ({count})": "別のエージェントをインストール ({count})",
+  "Close failed: {reason}": "閉じられませんでした: {reason}",
+  "Close pane {name}?": "ペイン{name}を閉じますか？",
+  "The pane's running processes will stop. Closing its last pane also closes the workspace.": "ペインで実行中のプロセスが停止します。最後のペインを閉じるとワークスペースも閉じます。",
 };
 
 /** The parts JA is made of; src/lib/i18n.test.ts fails when a key is in two parts, since a spread keeps only the last. */

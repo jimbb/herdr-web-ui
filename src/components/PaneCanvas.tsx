@@ -26,12 +26,14 @@ import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { SHEET_QUERY } from "../lib/sheets.ts";
 import type { RenameRequest } from "../lib/useRenameRequest.ts";
 import { paneLifetimes } from "../lib/paneLifetime.ts";
+import { usePaneClose } from "../lib/paneClose.ts";
 import { usePaneLocked } from "../lib/paneLocks.ts";
 import { sidebarPinKey } from "../lib/sidebarPins.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { displayPaneTitle } from "./Sidebar.tsx";
 import { RowMenu, type RowMenuItem } from "./RowMenu.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
+import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import "./PaneCanvas.css";
 
 type PaneLayoutSplit = PaneLayoutSnapshot["splits"][number];
@@ -125,13 +127,10 @@ export function PaneCanvas({ snapshot, pane, selectedPaneId, onSelect, onChanged
   // the row's Move to workspace… and Close tab, where a lone tab's row is left out
   const [movingTab, setMovingTab] = useState<{ tab: HerdrTab; anchor: HTMLElement } | null>(null);
   const [closingTab, setClosingTab] = useState<HerdrTab | null>(null);
-  const [closing, setClosing] = useState<HerdrPane | null>(null);
   const [error, setError] = useState<UserError | null>(null);
   // a locked pinned agent (lib/paneLocks.ts) is closed from no menu here, nor is the tab it is in
   const paneLocked = usePaneLocked(machineId);
   const tabLocked = (tabId: string): boolean => snapshot?.panes.some((item) => item.tab_id === tabId && paneLocked(item.pane_id)) === true;
-  // a lock that lands while a confirmation is open (from another browser) takes the confirmation with it
-  if (closing && paneLocked(closing.pane_id)) setClosing(null);
   if (closingTab && tabLocked(closingTab.tab_id)) setClosingTab(null);
   // A new pane can be selected before its snapshot arrives, and a selected pane can close
   // before App confirms its replacement. Keep the prior tab's surviving mounts (and their
@@ -175,7 +174,7 @@ export function PaneCanvas({ snapshot, pane, selectedPaneId, onSelect, onChanged
     return () => { alive.current = false; cancelDrag(); };
   }, []);
   useEffect(() => { cancelDrag(); }, [topology]);
-  useEffect(() => { setMenu(null); setRenaming(null); setRenamingTab(null); setMovingTab(null); setClosingTab(null); setClosing(null); setError(null); renameDrafts.current.clear(); }, [presented?.tab_id]);
+  useEffect(() => { setMenu(null); setRenaming(null); setRenamingTab(null); setMovingTab(null); setClosingTab(null); setError(null); renameDrafts.current.clear(); }, [presented?.tab_id]);
   // one press each: the request depends on itself alone, as the row's does (TabStrip)
   useLayoutEffect(() => {
     if (renameRequest === null || !loneRowHidden || !appLayout.rename || !presented) return;
@@ -220,25 +219,20 @@ export function PaneCanvas({ snapshot, pane, selectedPaneId, onSelect, onChanged
     const made = await api.splitPane(target.pane_id, direction, true);
     if (alive.current && latest.current.tabId === tabId && latest.current.selection === selection) onSelect(made.pane_id);
   };
-  // a close herdr has not yet taken out of the roster, by workspace: until then the roster still counts
-  // the pane, so a second close there (another press of a bound key) would take the workspace's last pane
-  // without asking, or ask herdr for the same pane again; it waits for the roster instead
-  const closingIn = useRef(new Map<string, string>());
-  useEffect(() => {
-    for (const [workspace, paneId] of closingIn.current) if (!snapshot?.panes.some((item) => item.pane_id === paneId)) closingIn.current.delete(workspace);
-  }, [snapshot]);
-  const closePane = async (target: HerdrPane): Promise<void> => {
-    closingIn.current.set(target.workspace_id, target.pane_id);
-    try { await api.closePane(target.pane_id); } catch (reason) {
-      if (closingIn.current.get(target.workspace_id) === target.pane_id) closingIn.current.delete(target.workspace_id);
-      throw reason;
-    }
-  };
+  const closingTabId = useRef<string | undefined>(undefined);
+  const { closing, clearClosing, requestClose: requestPaneClose, confirmClosing } = usePaneClose({
+    closePane: (paneId) => api.closePane(paneId),
+    roster: snapshot,
+    isLive: (_machineId, paneId) => snapshot?.panes.some((item) => item.pane_id === paneId) === true,
+    isLocked: (_machineId, paneId) => paneLocked(paneId),
+    watching,
+    resetKey: presented?.tab_id ?? null,
+    onBeforeImmediate: () => { closingTabId.current = pane?.tab_id; setError(null); },
+    onSuccess: () => { if (alive.current) onChanged(); },
+    onError: (reason) => { if (latest.current.tabId === closingTabId.current) fail(reason); },
+  });
   const requestClose = (target: HerdrPane): void => {
-    if (closingIn.current.has(target.workspace_id)) return;
-    const inWorkspace = snapshot?.panes.filter((item) => item.workspace_id === target.workspace_id).length ?? 1;
-    if (inWorkspace === 1 || target.agent_status === "working" || target.agent_status === "blocked") setClosing(target);
-    else run(() => closePane(target));
+    requestPaneClose({ machineId, pane: target, panes: snapshot?.panes, label: displayPaneTitle(target) });
   };
   // the pane's zoom item and its title's zoom button: the mode the item names, never a toggle (lib/layoutMap.ts)
   const zoom = (target: HerdrPane): void => run(async () => {
@@ -545,9 +539,7 @@ export function PaneCanvas({ snapshot, pane, selectedPaneId, onSelect, onChanged
         const active = document.activeElement;
         if (!active || active === document.body || canvas.current?.contains(active) || active.closest(".confirm-dialog")) focusWorkspaceListToggle();
       }} />}
-    {closing && <ConfirmDialog title={t("Close pane {name}?", { name: displayPaneTitle(closing) })}
-      body={t("The pane's running processes will stop. Closing its last pane also closes the workspace.")}
-      confirmLabel={t("Close pane")} onClose={() => setClosing(null)} onConfirm={async () => { await closePane(closing); setClosing(null); onChanged(); }} />}
+    <PaneCloseConfirm closing={closing} onClose={clearClosing} onConfirm={confirmClosing} />
   </div></PaneSubmitContext.Provider>;
 }
 
