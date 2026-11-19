@@ -1,4 +1,5 @@
 import UIKit
+import UserNotifications
 import Capacitor
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
@@ -8,6 +9,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
+        if let response = connectionOptions.notificationResponse {
+            OvisPushPlugin.handleNotificationResponse(response)
+        }
         window?.rootViewController = HerdrBridgeViewController()
         window?.makeKeyAndVisible()
 

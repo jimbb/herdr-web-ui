@@ -1,6 +1,7 @@
 import UIKit
 import WebKit
 import Capacitor
+import OvisPushCore
 
 /// The PCs this app knows, kept in UserDefaults. The WebView's cookies (a paired device's
 /// sign-in) live in WebKit's own store, not here.
@@ -626,13 +627,83 @@ class HerdrBridgeViewController: CAPBridgeViewController {
         webView.load(URLRequest(url: local.appendingPathComponent("error.html")))
     }
 
+    private static let leavingScript = "window.dispatchEvent(new Event('ovis-page-leaving'))"
+    private static let leavingWait: TimeInterval = 1
+    private var leaving = false
+    private var isOpening: Bool { openingView != nil }
+
+    /// Opens a tapped push alert on the saved PC that sent it: delivers `select-pane` directly to
+    /// the open app page when that PC is already shown, or switches/reloads to the alert's address.
+    static func openAlert(
+        storedKey: String?,
+        serverId: String?,
+        machine: String?,
+        workspace: String?,
+        pane: String?
+    ) {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = (scene?.delegate as? SceneDelegate)?.window
+        let currentVC = window?.rootViewController as? HerdrBridgeViewController
+        let url = currentVC?.webView?.url?.absoluteString
+        let errorURL = currentVC?.bridge?.config.localURL.appendingPathComponent("error.html").absoluteString
+        let shown = (currentVC == nil || currentVC?.isOpening == true || currentVC?.leaving == true || url == nil || url == errorURL) ? nil : url
+        guard let alert = AlertRouting.alertTap(
+            saved: PCStore.saved,
+            current: PCStore.current,
+            shown: shown,
+            storedKey: storedKey,
+            serverId: serverId,
+            machine: machine,
+            workspace: workspace,
+            pane: pane
+        ) else { return }
+        if let selection = alert.selection {
+            currentVC?.webView?.evaluateJavaScript(AlertRouting.selectionScript(selection), completionHandler: nil)
+            return
+        }
+        PCStore.current = alert.pc
+        PCStore.last = alert.pc
+        PCStore.pendingStart = alert.address
+        PCStore.failure = nil
+        PCStore.redirects = 0
+        if window?.rootViewController != nil {
+            reopen()
+        }
+    }
+
     /// Replaces the app's view controller, so the next page (a PC, or the connect screen) is a
-    /// first load. The old one goes with its web view and the page in it (the barcode scanner
-    /// plugin, which kept it alive, is patched in app/patches).
+    /// first load. Before tearing down an open PC page, dispatches `ovis-page-leaving` (waiting at
+    /// most a second) so in-memory unsent drafts are carried to storage for recovery.
     static func reopen() {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         guard let window = (scene?.delegate as? SceneDelegate)?.window else { return }
-        window.rootViewController = HerdrBridgeViewController()
+        guard let existing = window.rootViewController as? HerdrBridgeViewController else {
+            window.rootViewController = HerdrBridgeViewController()
+            return
+        }
+        existing.leaveAndReopen(in: window)
+    }
+
+    private func leaveAndReopen(in window: UIWindow) {
+        if leaving { return }
+        leaving = true
+        let url = webView?.url
+        let errorURL = bridge?.config.localURL.appendingPathComponent("error.html")
+        guard let webView, openingView == nil,
+              let scheme = url?.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url != errorURL else {
+            window.rootViewController = HerdrBridgeViewController()
+            return
+        }
+        var done = false
+        let finish = { [weak self, weak window] in
+            guard !done else { return }
+            done = true
+            guard let self, let window, window.rootViewController === self else { return }
+            window.rootViewController = HerdrBridgeViewController()
+        }
+        webView.evaluateJavaScript(Self.leavingScript) { _, _ in finish() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.leavingWait, execute: finish)
     }
 }
 
