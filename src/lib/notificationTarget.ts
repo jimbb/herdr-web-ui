@@ -53,14 +53,23 @@ export function sameLink(a: AppLink | null, b: AppLink): boolean {
   return a !== null && a.machine === b.machine && a.pane === b.pane && (a.workspace ?? null) === (b.workspace ?? null) && (a.view ?? null) === (b.view ?? null);
 }
 
-type MessageSource = { addEventListener: (type: "message", listener: (event: MessageEvent) => void) => void };
+type MessageSource = { addEventListener: (type: string, listener: (event: Event) => void) => void };
+
+/**
+ * The event the Android app dispatches on an open page's window with a tapped alert's "select-pane"
+ * as its data (PCStore.selectionScript): a page on plain http has no navigator.serviceWorker. Taken
+ * as the worker's message is, and cancelled, so the app knows this page heard it and does not
+ * dispatch it on the worker as well, as it does for an older page.
+ */
+export const SELECT_PANE_EVENT = "ovis-select-pane";
 
 /** Keep the newest target until App is ready, then deliver new selections directly. */
-export function notificationTargets(source?: MessageSource): (select: Select) => () => void {
+export function notificationTargets(source?: MessageSource, page?: MessageSource): (select: Select) => () => void {
   let pending: Target | null = null;
   let consumer: Select | null = null;
-  source?.addEventListener("message", (event) => {
-    const data = event.data as { type?: unknown; pane_id?: unknown; machine_id?: unknown; view?: unknown; workspace_id?: unknown } | null;
+  // a MessageEvent from the worker or the app; any other event has no data and is ignored
+  const receive = (event: Event) => {
+    const data = (event as Partial<MessageEvent>).data as { type?: unknown; pane_id?: unknown; machine_id?: unknown; view?: unknown; workspace_id?: unknown } | null;
     if (data?.type !== "select-pane" || typeof data.pane_id !== "string") return;
     const target: Target = {
       machine_id: typeof data.machine_id === "string" ? data.machine_id : "local",
@@ -70,6 +79,11 @@ export function notificationTargets(source?: MessageSource): (select: Select) =>
     if (typeof data.workspace_id === "string" && data.workspace_id !== "") target.workspace_id = data.workspace_id;
     if (consumer) consumer(target);
     else pending = target;
+  };
+  source?.addEventListener("message", receive);
+  page?.addEventListener(SELECT_PANE_EVENT, (event) => {
+    event.preventDefault();
+    receive(event);
   });
   return (select) => {
     consumer = select;
@@ -84,4 +98,5 @@ export function notificationTargets(source?: MessageSource): (select: Select) =>
 // Install this listener while App's module loads, before creating its root.
 export const onNotificationTarget = notificationTargets(
   typeof navigator !== "undefined" && "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
+  typeof window !== "undefined" ? window : undefined,
 );
