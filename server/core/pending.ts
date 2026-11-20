@@ -1317,7 +1317,7 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
       learn(item, identity, shellPid, processes, held);
       // asked again: the first listing above is a send, and a page whose socket it closes has left by now
       if (headlessHooks === undefined) {
-        if (attended && present(page) && !ask.left) {
+        if (attended && page !== undefined && present(page) && !ask.left) {
           requesters.set(item, page);
           requested.set(page, (requested.get(page) ?? new Set()).add(item));
         } else if (attended) pending.holdItem(item, FIRST_MESSAGE_UNATTENDED);

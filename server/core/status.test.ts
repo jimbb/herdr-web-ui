@@ -2758,7 +2758,7 @@ describe("a head pane held while its hc child terminals work", () => {
     // Resync finds the child working: head becomes held immediately and queue hears working.
     const workingChild = { ...child, agent_status: "working" as const };
     h.herdrSays(head, workingChild);
-    handlers.onResync([head, workingChild], new Set());
+    handlers.onResync([head, workingChild], new Set(), Date.now());
     expect(h.lastFor("head")).toEqual({ status: "done", tasks: 0, bg: true });
     expect(h.queueStatuses.filter((q) => q.paneId === "head").at(-1)?.status).toBe("working");
 
