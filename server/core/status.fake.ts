@@ -130,15 +130,11 @@ export function hub<Owner = unknown, Lease = unknown>(path = transcript, queued?
       const frame = frames.filter((seen) => seen.type === "pane-status").at(-1);
       return { status: frame?.agent_status, tasks: frame?.background_tasks ?? 0, bg: frame?.background_wait === true };
     },
-<<<<<<< HEAD
-=======
     /** a given pane's last status frame, or null when none was sent */
     lastFor: (paneId: string) => {
       const frame = frames.filter((seen) => seen.type === "pane-status" && seen.pane_id === paneId).at(-1);
       return frame ? { status: frame.agent_status, tasks: frame.background_tasks ?? 0, bg: frame.background_wait === true } : null;
     },
-    /** the Claude tracker's poll, as its timer runs it */
->>>>>>> 0f0024959 (feat(status): hold resting heads BG while hc children work)
     poll: () => status.claudeAgents.poll(),
     settle: async () => { await Promise.all(lookups); await Promise.all(polls); },
   };
