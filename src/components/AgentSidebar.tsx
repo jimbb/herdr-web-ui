@@ -18,6 +18,8 @@ import { currentPaneMutes, paneMuteKey, prunePaneMutes, setPaneMutes, subscribeP
 import { lockedPinKeys, locksAfterPinToggle, toggleAgentLock } from "../lib/paneLocks.ts";
 import { agentContext, agentTabName, paneMark, titleOnlyNamesAgent } from "../lib/sidebarAgents.ts";
 import { agentName } from "../lib/runtimeMove.ts";
+import { folderName, shortPathTitle, stripPaneChrome } from "../lib/paneName.ts";
+import { attachmentTabLabel, tabLabelKey } from "../lib/tabLabels.ts";
 import { customTabLabel } from "../lib/tabName.ts";
 import { useSettings } from "../lib/settings.ts";
 import { SHEET_QUERY } from "../lib/sheets.ts";
@@ -156,6 +158,31 @@ export function agentRowTitle(row: AgentRow, oneLine: boolean): { own: string; t
   const place = workspaceTabs(row).findIndex((candidate) => candidate.tab_id === tab?.tab_id) + 1 || tab?.number;
   const named = label || (tab ? customTabLabel(tab, place) : null) || title;
   return { own, title, replaced, drawn: worktree && named === workspace.label ? compactWorktreeName(named) : named };
+}
+
+/**
+ * Title for an agent in the Inbox list and thread header: explicit pane label, else a named/auto-titled tab
+ * (`customTabLabel`), else a learned Ovis tab label (`tab-labels.json`) when the pane's own title only names
+ * the agent or its shell/path, else `agentRowTitle(row, false).title`.
+ */
+export function inboxRowTitle(row: AgentRow, autoLabels?: Readonly<Record<string, string>> | null): string {
+  const { pane, tab } = row.entry;
+  const label = pane.label?.trim() || null;
+  if (label !== null) return label;
+  const place = workspaceTabs(row).findIndex((candidate) => candidate.tab_id === tab?.tab_id) + 1 || tab?.number;
+  const tabName = tab ? customTabLabel(tab, place) : null;
+  if (tabName !== null) {
+    const worktree = row.entry.workspace.worktree?.is_linked_worktree === true;
+    return worktree && tabName === row.entry.workspace.label ? compactWorktreeName(tabName) : tabName;
+  }
+  const base = agentRowTitle(row, false);
+  if (autoLabels && tab) {
+    const learned = autoLabels[tabLabelKey(row.machine.id, pane)];
+    const generic = base.replaced || base.own === pane.pane_id || shortPathTitle(stripPaneChrome(base.own, pane.agent)) !== base.own
+      || (pane.cwd ? base.own === folderName(pane.cwd) : false);
+    if (generic && learned && !attachmentTabLabel(learned)) return learned;
+  }
+  return base.title;
 }
 
 function groupLabel(group: AgentGroup, t: (key: string) => string): string {

@@ -44,6 +44,16 @@ describe("a phone thread's title", () => {
     expect(markup).toContain('<span class="visually-hidden">Codex: </span>');
   });
 
+  it("shows a tab's auto-title in the thread header when the pane has no explicit label", () => {
+    const machines = structuredClone(fixture);
+    machines[0]!.snapshot!.tabs = machines[0]!.snapshot!.tabs.map((tab) =>
+      tab.tab_id === "w1C:t1" ? { ...tab, label: "1 · Agent Inbox Feature Check" } : tab);
+    machines[0]!.snapshot!.panes = machines[0]!.snapshot!.panes.map((pane) =>
+      pane.pane_id === "w1C:p1" ? { ...pane, label: undefined, title: "Claude Code", terminal_title: "Claude Code", terminal_title_stripped: "Claude Code" } : pane);
+    const markup = title(thread("w1C:p1", {}, machines));
+    expect(said(markup, "thread-name")).toBe("1 · Agent Inbox Feature Check");
+  });
+
   it("says the agent's state in the list's words", () => {
     expect(said(title(thread("w1D:p1")), "thread-state")).toBe("Needs you");
     expect(said(title(thread("w1C:p1")), "thread-state")).toBe("Working");

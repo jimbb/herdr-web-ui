@@ -1,5 +1,5 @@
 import { tally, usageCounters } from "../lib/usageCounters.ts";
-import { useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from "react";
+import { useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from "react";
 import { Ellipsis, FolderOpen, ListFilter, ListOrdered, Monitor, Plus, Search, Terminal, TriangleAlert, X } from "lucide-react";
 
 import type { QueueSnapshot } from "../../shared/agent-queue.ts";
@@ -30,8 +30,9 @@ import type { InboxListHandle } from "../lib/useInbox.ts";
 import { questionTargets, useInboxQuestions, type QuestionReads } from "../lib/useInboxQuestions.ts";
 import { summaryTargets, useInboxSummaries, type RowSummary, type SummaryReads } from "../lib/useInboxSummaries.ts";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
+import { shownTabLabels, subscribeTabLabels } from "../lib/tabLabels.ts";
 import { AgentMark } from "./AgentMark.tsx";
-import { agentRowTitle, blockedNote, stateAge } from "./AgentSidebar.tsx";
+import { blockedNote, inboxRowTitle, stateAge } from "./AgentSidebar.tsx";
 import { InboxQueueRow } from "./InboxQueueRow.tsx";
 import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import { RowMenu } from "./RowMenu.tsx";
@@ -126,7 +127,9 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   // at a phone's width a menu of the list's is a sheet, a dialog (RowMenu): its button says which
   const popup = useMediaQuery(SHEET_QUERY) ? "dialog" : "menu";
   // within a state, the Agents list's own order (Settings → Within a state), names as its rows draw them
-  const { agentGroupSort: sort, inboxGrouping, sidebarRows, statusIndicators } = settings;
+  const { agentGroupSort: sort, autoTabNames, inboxGrouping, statusIndicators } = settings;
+  const firstLines = useSyncExternalStore(subscribeTabLabels, shownTabLabels, shownTabLabels);
+  const autoLabels = autoTabNames ? firstLines : null;
   const all = useMemo(() => inboxRoster(machines, activity), [machines, activity]);
   const tasks = queue?.snapshot.tasks;
   const queued = useMemo(() => inboxQueue(tasks ?? [], all), [tasks, all]);
@@ -161,7 +164,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   const readerKey = `${inboxGrouping}\n${filter}\n${query}`;
   const kept = useRef<{ readerKey: string; order: readonly string[] } | null>(null);
   const holding = (focusIn || pressHeld) && kept.current?.readerKey === readerKey;
-  const sections = inboxSections(found, queueFound, machines, activity, inboxGrouping, { sort, name: (row) => agentRowTitle(row, sidebarRows === "one").drawn });
+  const sections = inboxSections(found, queueFound, machines, activity, inboxGrouping, { sort, name: (row) => inboxRowTitle(row, autoLabels) });
   if (holding && kept.current) for (const section of sections) section.entries = inboxHeldEntries(section.entries, kept.current.order);
   const displayed = sections.flatMap(({ entries }) => entries);
   const shown = displayed.flatMap((entry) => entry.kind === "agent" ? [entry.row] : []);
@@ -268,7 +271,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     const online = machine.state === "connected";
     const status = inboxStatus(row, activity);
     const group = agentGroup(status);
-    const title = agentRowTitle(row, false).title;
+    const title = inboxRowTitle(row, autoLabels);
     const tabs = machine.snapshot?.tabs.filter((candidate) => candidate.workspace_id === workspace.workspace_id) ?? [];
     const place = agentContext({
       agentLabel: null, title, markAgent: null, machineName: null,
@@ -464,7 +467,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
               const at = row.since === null ? null : new Date(row.since);
               const { depth = 0, parent } = nesting.get(row.key) ?? {};
               const queueTag = queued.running.has(row.key) ? t("Queue") : null;
-              const startedBy = parent ? t("Started by {name}", { name: agentRowTitle(parent, false).title }) : null;
+              const startedBy = parent ? t("Started by {name}", { name: inboxRowTitle(parent, autoLabels) }) : null;
               // what a screen reader hears for the row: who it is, how it is, what it says, then for how long
               const spoken = [row.kind ? agentName(row.kind) : null, row.title, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
               return (
