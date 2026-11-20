@@ -181,6 +181,12 @@ describe("agy's queued messages", () => {
     expect(f.effects).toEqual(["alt+m"]);
   });
 
+  it("confirms a message agy took straight away, with no queued row, without a key", async () => {
+    const f = fixture([{ ...agyWorking, screen: agy(["● Thought for 2s"]) }]);
+    await interruptCodexSteering(true, "send this now", agyWorking, f.io);
+    expect(f.effects).toEqual([]); expect(f.elapsed()).toBeGreaterThanOrEqual(1500);
+  });
+
   it("never presses alt+m for an ordinary Send or one Codex's panel would take", async () => {
     const f = fixture([agyWorking]); await interruptCodexSteering(false, "send this now", agyWorking, f.io);
     await expect(interruptCodexSteering(true, "send this now", working, fixture([agyWorking]).io)).rejects.toThrow("not confirmed");

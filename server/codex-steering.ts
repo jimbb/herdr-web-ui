@@ -89,7 +89,8 @@ export async function interruptCodexSteering(explicit: boolean, text: string, su
   while (now() < deadline) {
     // The caller rechecks live identity, lease, authority and interactive prompts in this read.
     const current = await io.read();
-    if (now() >= deadline || current.agent !== agent) throw unconfirmed();
+    if (current.agent !== agent) throw unconfirmed();
+    if (now() >= deadline) break;
     if (!current.working) return;
     if (steer.pending(current.screen, text)) {
       if (steer.restart) io.restarting();
@@ -99,5 +100,8 @@ export async function interruptCodexSteering(explicit: boolean, text: string, su
     }
     await wait(Math.min(50, deadline - now()));
   }
+  // agy draws no queued row for a message it took straight away (e.g. its turn ended before the status
+  // said so), and a missed row only leaves it in agy's own queue: Enter went either way, so no resend
+  if (!steer.restart) return;
   throw unconfirmed();
 }
