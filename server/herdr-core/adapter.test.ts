@@ -188,6 +188,21 @@ describe("herdr-core adapter", () => {
     expect(snapshot.panes.map((p) => [p.pane_id, p.agent, p.agent_status])).toEqual([["t1", "claude", "blocked"], ["t2", null, "unknown"]]);
   });
 
+  it("shows agy's plan review at rest, whose input box takes the reply, and its question and approvals blocked", async () => {
+    const agy = (msg: string, kind: string) => ({ app: "antigravity", state: "blocked", kind, msg });
+    const { socket } = await setup([
+      terminal("t1", { status: agy("Approve plan", "permission") }),
+      terminal("t2", { status: agy("Which name would you like?", "question") }),
+      terminal("t3", { status: agy("Run: rm -rf build", "permission") }),
+    ]);
+    const snapshot = await sessionSnapshot(socket);
+    expect(snapshot.panes.map((p) => [p.pane_id, p.agent_status, p.agent_kind ?? null, p.agent_message ?? null])).toEqual([
+      ["t1", "done", null, null],
+      ["t2", "blocked", "question", "Which name would you like?"],
+      ["t3", "blocked", "permission", "Run: rm -rf build"],
+    ]);
+  });
+
   it("types send_text into an attach at the terminal's own grid, and answers once hc took the attach's close", async () => {
     const { socket, cores } = await setup([terminal("t1", { cols: 90, rows: 20 })]);
     await paneSendText("t1", "héllo 한글", socket);
