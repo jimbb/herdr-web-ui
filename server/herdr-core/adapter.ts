@@ -11,7 +11,7 @@ import { jobProcessesBelow } from "../foreground-job.ts";
 import { type HcConnection, HcError } from "./connection.ts";
 import { foreignLayout, leaves, neighbour, OVIS_LAYOUT_DOC, type OvisLayout, type PaneDirection, resizeLeaf, setRatio, splitLeaf, swapLeaves, type TabLayout } from "./layout-doc.ts";
 import { paneSession, titleStatus } from "../agent-identity.ts";
-import { agentInfoOf, agentOf, agentOfStatus, type CoreHost, coreHost, agentStatusOf, foregroundOf, type HcForeground, buildSnapshot, type FirstTurn, keptLayout, opencodeRecords, type SessionOf, reportedFacts, type HcStatus, type HcTerminal, hcKeyName, HERDR_PROTOCOL, isRecord, keyBytes, LAYOUT_DOC, onOtherMachine, OTHER_WORKSPACE_ID, PANE_NAME_LABEL, processInfoOf, runsCommandString, SEEN_LABEL, shownStatusOf, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
+import { agentInfoOf, agentOf, agentOfStatus, agyPlanReview, type CoreHost, coreHost, agentStatusOf, foregroundOf, type HcForeground, buildSnapshot, type FirstTurn, keptLayout, opencodeRecords, type SessionOf, reportedFacts, type HcStatus, type HcTerminal, hcKeyName, HERDR_PROTOCOL, isRecord, keyBytes, LAYOUT_DOC, onOtherMachine, OTHER_WORKSPACE_ID, PANE_NAME_LABEL, processInfoOf, runsCommandString, SEEN_LABEL, shownStatusOf, SPACE_LABEL, TAB_LABEL, TAB_NAME_LABEL, WORKSPACE_NAME_LABEL } from "./snapshot.ts";
 import { checkoutHolding, defaultCheckoutPath, factsOf, git, gitDirIdentity, labeledWorktree, realPath, type Checkout, type Repository, repositoryOf, WORKTREE_LABEL, WorktreeError, worktreeFolder, worktreeLabel } from "./worktrees.ts";
 import type { AgentStatus, SessionSnapshot, WorkspaceWorktreeInfo } from "../../shared/herdr-api.generated.ts";
 import type { WorktreeInfo } from "../herdr/client.ts";
@@ -29,7 +29,8 @@ import type { WorktreeInfo } from "../herdr/client.ts";
  *   resizes nothing);
  * - `pane.send_keys` as those keys' bytes in the same way, or hc's `terminal.keys` for a key that
  *   only hc can encode for the program's keyboard mode;
- * - `agent.prompt` as hc's `terminal.send` (paste and Enter, refused while the program is blocked);
+ * - `agent.prompt` as hc's `terminal.send` (paste and Enter, refused while the program is blocked, but for
+ *   agy's plan review, whose input box takes the reply: snapshot.ts `agyPlanReview`);
  * - `events.subscribe` from hc's own event stream: status changes per pane, and terminal and layout
  *   changes as herdr's lifecycle events.
  *
@@ -1021,7 +1022,10 @@ function createAnswers(hc: HcConnection, firstTurn: FirstTurn, forgetTurns: (liv
       const text = params["text"];
       if (typeof text !== "string") throw new AdapterError("invalid_params", "text is required");
       if (!(await paneOf(paneId, "agent_not_found")).agent) throw new AdapterError("agent_not_found", `no agent in pane ${paneId}`);
-      await inTurn(paneId, () => hc.call("terminal.send", { terminal: paneId, text }, 30_000));
+      await inTurn(paneId, async () => {
+        const force = agyPlanReview((await terminal(paneId)).status);
+        await hc.call("terminal.send", { terminal: paneId, text, ...(force ? { force } : {}) }, 30_000);
+      });
       return { type: "ok" };
     },
     // A new workspace or tab is a shell hc starts, labeled with its space and tab as the Herdr app

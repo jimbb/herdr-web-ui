@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, jest, setSystemTime } from "bun:test";
 import { closeSync, constants, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { HerdrError, herdrRpc, paneGet, paneProcessInfo, paneRead, paneSendKeys, paneSendText, sessionSnapshot, subscribeEvents, type EventFrame, paneClose, paneMoveBeside, paneMoveToNewTab, tabClose, tabCreate, tabMove, tabRename, workspaceClose, workspaceCreate, workspaceRename, agentManifests, agentStart, ping, worktreeCreate, worktreeList, worktreeOpen, worktreeRemove } from "../herdr/client.ts";
+import { HerdrError, herdrRpc, paneGet, paneProcessInfo, paneRead, paneSendKeys, paneSendText, sessionSnapshot, subscribeEvents, type EventFrame, paneClose, paneMoveBeside, paneMoveToNewTab, tabClose, tabCreate, tabMove, tabRename, workspaceClose, workspaceCreate, workspaceRename, agentManifests, agentPrompt, agentStart, ping, worktreeCreate, worktreeList, worktreeOpen, worktreeRemove } from "../herdr/client.ts";
 import { claudeInputDraft, viewportShowsLive } from "../claude-input.ts";
 import { type AdapterOptions, paintedScreen, type SeenObserver, sessionLabeler, startHerdrCoreAdapter } from "./adapter.ts";
 import { SeenMarker } from "./seen-label.ts";
@@ -200,6 +200,18 @@ describe("herdr-core adapter", () => {
       ["t1", "done", null, null],
       ["t2", "blocked", "question", "Which name would you like?"],
       ["t3", "blocked", "permission", "Run: rm -rf build"],
+    ]);
+  });
+
+  it("sends a prompt into agy's plan review with force, and into any other blocked program without", async () => {
+    const blocked = (app: string, msg: string) => ({ status: { app, state: "blocked", kind: "permission", msg } });
+    const { socket, cores } = await setup([terminal("t1", blocked("antigravity", "Approve plan")), terminal("t2", blocked("antigravity", "Run: make")),
+      terminal("t3", blocked("codex", "Approve plan"))], { "terminal.send": () => ({ turn: 1 }) });
+    for (const target of ["t1", "t2", "t3"]) await agentPrompt(target, "use option 2", socket);
+    expect(cores.flatMap((core) => core.calls).filter((call) => call.method === "terminal.send").map((call) => call.params)).toEqual([
+      { terminal: "t1", text: "use option 2", force: true },
+      { terminal: "t2", text: "use option 2" },
+      { terminal: "t3", text: "use option 2" },
     ]);
   });
 
