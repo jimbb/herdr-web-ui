@@ -282,6 +282,7 @@ describe("InboxList", () => {
       const machines = roster((pane) => {
         if (pane.pane_id === "w1C:p1") return { ...pane, label: undefined, title: "Claude Code", terminal_title: "Claude Code", terminal_title_stripped: "Claude Code" } as HerdrPane;
         if (pane.pane_id === "w1E:p1") return { ...pane, label: undefined, title: "gjc", terminal_title: "gjc", terminal_title_stripped: "gjc" } as HerdrPane;
+        if (pane.pane_id === "w1F:p1") return { ...pane, label: undefined, title: "jimmy@herdr: ~/projects/docs-site" } as HerdrPane;
         return pane;
       });
       machines[0]!.snapshot!.tabs = machines[0]!.snapshot!.tabs.map((tab) =>
@@ -300,6 +301,8 @@ describe("InboxList", () => {
       expect(said("w1E:p1", "inbox-topic")).toEqual(["Investigate backup failure"]);
       // a bare command ("agy") or the folder names nothing the row's name does not
       expect(said("w1F:p1", "inbox-topic")).toEqual([]);
+      // a shell prompt for a title names the row by its workspace
+      expect(said("w1F:p1", "inbox-name")).toEqual(["docs-site"]);
     } finally {
       forgetTabLabelsForTests();
     }
