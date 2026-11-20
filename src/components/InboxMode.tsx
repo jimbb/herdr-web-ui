@@ -14,7 +14,7 @@ import { paneMark } from "../lib/sidebarAgents.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { useSettings } from "../lib/settings.ts";
 import { shownTabLabels, subscribeTabLabels } from "../lib/tabLabels.ts";
-import { inboxRowTitle } from "./AgentSidebar.tsx";
+import { agentRowTitle, inboxRowTopic } from "./AgentSidebar.tsx";
 import { InboxAvatar } from "./InboxList.tsx";
 import { InboxRailBlank } from "./InboxRail.tsx";
 import { displayPaneTitle } from "./Sidebar.tsx";
@@ -35,7 +35,7 @@ const EMPTY_SEQS = () => new Map<string, number>();
 export function threadDisplayName(machines: readonly Machine[], machineId: string, pane: HerdrPane, activity?: Pick<SidebarActivity, "seqs">): string {
   const row = agentRoster(machines, { byActivity: false, seqs: activity?.seqs ?? EMPTY_SEQS, pinned: [] }).rest
     .find((candidate) => candidate.machine.id === machineId && candidate.entry.pane.pane_id === pane.pane_id);
-  return row ? inboxRowTitle(row, shownTabLabels()) : displayPaneTitle(pane);
+  return row ? inboxRowTopic(row, shownTabLabels()) ?? agentRowTitle(row, false).title : displayPaneTitle(pane);
 }
 
 function threadFacts({ machines, activity, machineId, pane, connection, watching, severalPcs }: ThreadProps, t: Translate, autoLabels: Readonly<Record<string, string>> | null) {
@@ -47,7 +47,7 @@ function threadFacts({ machines, activity, machineId, pane, connection, watching
   const said = connection !== null ? t(connection === "connected" ? "Connected" : "Reconnecting…")
     : [watching ? t("View only") : null, severalPcs && machine ? machine.name : null, state].filter((part) => part !== null).join(" · ");
   return {
-    name: row ? inboxRowTitle(row, autoLabels) : displayPaneTitle(pane),
+    name: row ? inboxRowTopic(row, autoLabels) ?? agentRowTitle(row, false).title : displayPaneTitle(pane),
     kind: row?.entry.canonicalAgent ?? null,
     mark: row ? paneMark(row.entry) ?? "" : null,
     said,

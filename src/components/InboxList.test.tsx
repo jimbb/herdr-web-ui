@@ -277,7 +277,7 @@ describe("InboxList", () => {
     expect(words(root, "w1F:p1")).toEqual(["Ready"]);
   });
 
-  it("uses a tab's auto-title or custom name in inbox rows unless the pane has its own label, and falls back to learned tab labels when generic", async () => {
+  it("draws a tab's auto-title, without its place, between a row's name and its last words; a learned first line where the tab has none", async () => {
     try {
       const machines = roster((pane) => {
         if (pane.pane_id === "w1C:p1") return { ...pane, label: undefined, title: "Claude Code", terminal_title: "Claude Code", terminal_title_stripped: "Claude Code" } as HerdrPane;
@@ -286,14 +286,20 @@ describe("InboxList", () => {
       });
       machines[0]!.snapshot!.tabs = machines[0]!.snapshot!.tabs.map((tab) =>
         tab.tab_id === "w1C:t1" ? { ...tab, label: "1 · Agent Inbox Feature Check" }
-          : tab.tab_id === "w1D:t1" ? { ...tab, label: "1 · Tab Name Ignored By Pane Label" }
-            : tab);
+          : tab.tab_id === "w1D:t1" ? { ...tab, label: "1 · Export Button Guard" }
+            : tab.tab_id === "w1F:t1" ? { ...tab, label: "1 · agy" }
+              : tab);
       const w1e = machines[0]!.snapshot!.panes.find((pane) => pane.pane_id === "w1E:p1")!;
       setTabLabels({ [tabLabelKey("local", w1e)]: "Investigate backup failure" });
       const root = await draw(machines);
-      expect(byClass(item(root, "w1C:p1"), "inbox-name").map(text)).toEqual(["1 · Agent Inbox Feature Check"]);
-      expect(byClass(item(root, "w1D:p1"), "inbox-name").map(text)).toEqual(["Guard the export button"]);
-      expect(byClass(item(root, "w1E:p1"), "inbox-name").map(text)).toEqual(["Investigate backup failure"]);
+      const said = (paneId: string, kind: string) => byClass(item(root, paneId), kind).map(text);
+      expect(said("w1C:p1", "inbox-name")).toEqual(["checkout-api"]);
+      expect(said("w1C:p1", "inbox-topic")).toEqual(["Agent Inbox Feature Check"]);
+      expect(said("w1D:p1", "inbox-name")).toEqual(["Guard the export button"]);
+      expect(said("w1D:p1", "inbox-topic")).toEqual(["Export Button Guard"]);
+      expect(said("w1E:p1", "inbox-topic")).toEqual(["Investigate backup failure"]);
+      // a bare command ("agy") or the folder names nothing the row's name does not
+      expect(said("w1F:p1", "inbox-topic")).toEqual([]);
     } finally {
       forgetTabLabelsForTests();
     }

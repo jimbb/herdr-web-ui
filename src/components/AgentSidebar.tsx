@@ -18,7 +18,7 @@ import { currentPaneMutes, paneMuteKey, prunePaneMutes, setPaneMutes, subscribeP
 import { lockedPinKeys, locksAfterPinToggle, toggleAgentLock } from "../lib/paneLocks.ts";
 import { agentContext, agentTabName, paneMark, titleOnlyNamesAgent } from "../lib/sidebarAgents.ts";
 import { agentName } from "../lib/runtimeMove.ts";
-import { folderName, shortPathTitle, stripPaneChrome } from "../lib/paneName.ts";
+import { folderName } from "../lib/paneName.ts";
 import { attachmentTabLabel, tabLabelKey } from "../lib/tabLabels.ts";
 import { customTabLabel } from "../lib/tabName.ts";
 import { useSettings } from "../lib/settings.ts";
@@ -161,28 +161,20 @@ export function agentRowTitle(row: AgentRow, oneLine: boolean): { own: string; t
 }
 
 /**
- * Title for an agent in the Inbox list and thread header: explicit pane label, else a named/auto-titled tab
- * (`customTabLabel`), else a learned Ovis tab label (`tab-labels.json`) when the pane's own title only names
- * the agent or its shell/path, else `agentRowTitle(row, false).title`.
+ * What an inbox row is about, drawn between its name and its last words: the tab's auto-title or rename
+ * (herdr-auto-title writes "N · title"), else the first line Ovis learned for the tab, without the place
+ * number. null when it only repeats the row's name, its folder or a bare command ("agy", "projects").
  */
-export function inboxRowTitle(row: AgentRow, autoLabels?: Readonly<Record<string, string>> | null): string {
-  const { pane, tab } = row.entry;
-  const label = pane.label?.trim() || null;
-  if (label !== null) return label;
-  const place = workspaceTabs(row).findIndex((candidate) => candidate.tab_id === tab?.tab_id) + 1 || tab?.number;
-  const tabName = tab ? customTabLabel(tab, place) : null;
-  if (tabName !== null) {
-    const worktree = row.entry.workspace.worktree?.is_linked_worktree === true;
-    return worktree && tabName === row.entry.workspace.label ? compactWorktreeName(tabName) : tabName;
-  }
-  const base = agentRowTitle(row, false);
-  if (autoLabels && tab) {
-    const learned = autoLabels[tabLabelKey(row.machine.id, pane)];
-    const generic = base.replaced || base.own === pane.pane_id || shortPathTitle(stripPaneChrome(base.own, pane.agent)) !== base.own
-      || (pane.cwd ? base.own === folderName(pane.cwd) : false);
-    if (generic && learned && !attachmentTabLabel(learned)) return learned;
-  }
-  return base.title;
+export function inboxRowTopic(row: AgentRow, autoLabels?: Readonly<Record<string, string>> | null): string | null {
+  const { pane, tab, workspace } = row.entry;
+  if (!tab) return null;
+  const place = workspaceTabs(row).findIndex((candidate) => candidate.tab_id === tab.tab_id) + 1 || tab.number;
+  const learned = autoLabels?.[tabLabelKey(row.machine.id, pane)];
+  const named = customTabLabel(tab, place) ?? (learned && !attachmentTabLabel(learned) ? learned : null);
+  const topic = named?.replace(/^\d+\s*·\s*/u, "").trim();
+  if (!topic || /^[a-z0-9._-]+$/.test(topic)) return null;
+  const plain = [agentRowTitle(row, false).title, workspace.label, pane.cwd ? folderName(pane.cwd) : ""].map((name) => name.toLowerCase());
+  return plain.includes(topic.toLowerCase()) ? null : topic;
 }
 
 function groupLabel(group: AgentGroup, t: (key: string) => string): string {

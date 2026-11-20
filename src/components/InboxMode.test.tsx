@@ -51,7 +51,7 @@ describe("a phone thread's title", () => {
     machines[0]!.snapshot!.panes = machines[0]!.snapshot!.panes.map((pane) =>
       pane.pane_id === "w1C:p1" ? { ...pane, label: undefined, title: "Claude Code", terminal_title: "Claude Code", terminal_title_stripped: "Claude Code" } : pane);
     const markup = title(thread("w1C:p1", {}, machines));
-    expect(said(markup, "thread-name")).toBe("1 · Agent Inbox Feature Check");
+    expect(said(markup, "thread-name")).toBe("Agent Inbox Feature Check");
   });
 
   it("says the agent's state in the list's words", () => {

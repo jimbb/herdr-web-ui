@@ -495,6 +495,17 @@
   white-space: nowrap;
 }
 
+/* the tab's auto-title, between the name and the last words */
+.mode-inbox .inbox-topic {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-row-sub);
+  line-height: var(--lh-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mode-inbox .inbox-sub {
   display: flex;
   align-items: center;
@@ -739,6 +750,7 @@
   font-size: var(--fs-md);
 }
 
+.mode-inbox.is-wide .inbox-topic,
 .mode-inbox.is-wide .inbox-words {
   font-size: var(--fs-sm);
 }

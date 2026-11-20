@@ -32,7 +32,7 @@ import { summaryTargets, useInboxSummaries, type RowSummary, type SummaryReads }
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { shownTabLabels, subscribeTabLabels } from "../lib/tabLabels.ts";
 import { AgentMark } from "./AgentMark.tsx";
-import { blockedNote, inboxRowTitle, stateAge } from "./AgentSidebar.tsx";
+import { agentRowTitle, blockedNote, inboxRowTopic, stateAge } from "./AgentSidebar.tsx";
 import { InboxQueueRow } from "./InboxQueueRow.tsx";
 import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import { RowMenu } from "./RowMenu.tsx";
@@ -127,7 +127,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   // at a phone's width a menu of the list's is a sheet, a dialog (RowMenu): its button says which
   const popup = useMediaQuery(SHEET_QUERY) ? "dialog" : "menu";
   // within a state, the Agents list's own order (Settings → Within a state), names as its rows draw them
-  const { agentGroupSort: sort, autoTabNames, inboxGrouping, statusIndicators } = settings;
+  const { agentGroupSort: sort, autoTabNames, inboxGrouping, sidebarRows, statusIndicators } = settings;
   const firstLines = useSyncExternalStore(subscribeTabLabels, shownTabLabels, shownTabLabels);
   const autoLabels = autoTabNames ? firstLines : null;
   const all = useMemo(() => inboxRoster(machines, activity), [machines, activity]);
@@ -164,7 +164,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   const readerKey = `${inboxGrouping}\n${filter}\n${query}`;
   const kept = useRef<{ readerKey: string; order: readonly string[] } | null>(null);
   const holding = (focusIn || pressHeld) && kept.current?.readerKey === readerKey;
-  const sections = inboxSections(found, queueFound, machines, activity, inboxGrouping, { sort, name: (row) => inboxRowTitle(row, autoLabels) });
+  const sections = inboxSections(found, queueFound, machines, activity, inboxGrouping, { sort, name: (row) => agentRowTitle(row, sidebarRows === "one").drawn });
   if (holding && kept.current) for (const section of sections) section.entries = inboxHeldEntries(section.entries, kept.current.order);
   const displayed = sections.flatMap(({ entries }) => entries);
   const shown = displayed.flatMap((entry) => entry.kind === "agent" ? [entry.row] : []);
@@ -271,7 +271,8 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     const online = machine.state === "connected";
     const status = inboxStatus(row, activity);
     const group = agentGroup(status);
-    const title = inboxRowTitle(row, autoLabels);
+    const title = agentRowTitle(row, false).title;
+    const topic = inboxRowTopic(row, autoLabels);
     const tabs = machine.snapshot?.tabs.filter((candidate) => candidate.workspace_id === workspace.workspace_id) ?? [];
     const place = agentContext({
       agentLabel: null, title, markAgent: null, machineName: null,
@@ -285,7 +286,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     const state = !online ? t("Offline") : failed ? t("Turn failed") : inboxStateWord(group, t);
     const line = inboxRowLine({ online, group, words: wordsOf(row), place, machine: severalPcs ? machine.name : null, failed }, t);
     return {
-      key, machine, pane, online, status, group, title, line, failed, mark: paneMark(entry) ?? "", kind, state,
+      key, machine, pane, online, status, group, title, topic, line, failed, mark: paneMark(entry) ?? "", kind, state,
       asks: online && inboxAsks(group), since: online ? inboxSinceAt(group, summary, group === "blocked" ? stateSince(stamps, machine.id, pane.pane_id, pane.terminal_id, "blocked") : null) : null,
     };
   });
@@ -467,14 +468,14 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
               const at = row.since === null ? null : new Date(row.since);
               const { depth = 0, parent } = nesting.get(row.key) ?? {};
               const queueTag = queued.running.has(row.key) ? t("Queue") : null;
-              const startedBy = parent ? t("Started by {name}", { name: inboxRowTitle(parent, autoLabels) }) : null;
+              const startedBy = parent ? t("Started by {name}", { name: agentRowTitle(parent, false).title }) : null;
               // what a screen reader hears for the row: who it is, how it is, what it says, then for how long
-              const spoken = [row.kind ? agentName(row.kind) : null, row.title, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
+              const spoken = [row.kind ? agentName(row.kind) : null, row.title, row.topic, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
               return (
                 <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group} data-depth={Math.min(depth, 2) || undefined}>
                   <button type="button" className="inbox-row" disabled={!row.online} aria-label={spoken} aria-current={open ? "true" : undefined}
                     ref={(node) => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
-                    title={wide ? [row.title, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
+                    title={wide ? [row.title, row.topic, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
                     onPointerDown={(event) => { if (event.button === 0 && row.online) pressPane?.(row.machine.id, row.pane.pane_id); }}
                     onClick={() => { tally(() => usageCounters.paneUse("inbox_open", row.machine.id)); onOpen(row.machine.id, row.pane.pane_id); }}>
                     <InboxAvatar mark={row.mark} />
@@ -484,6 +485,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
                         {queueTag !== null && <span className="inbox-queue-tag">{queueTag}</span>}
                         {!wide && at !== null && <time className="inbox-time" dateTime={at.toISOString()} title={at.toLocaleString(resolvedLanguage)}>{age}</time>}
                       </span>
+                      {row.topic !== null && <span className="inbox-topic" dir="auto">{row.topic}</span>}
                       {wide ? words : <span className="inbox-sub">{words}{stateMark(row.status, row.failed, row.state)}</span>}
                     </span>
                     {wide && stateMark(row.status, row.failed, row.state)}
