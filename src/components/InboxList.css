@@ -31,9 +31,12 @@
   flex: none;
 }
 
+/* z-index 0 keeps everything in the rows (a row's raised Close) under the floating controls: at an equal z-index
+   the later node wins, and a Close scrolled under New workspace took its press */
 .mode-inbox .inbox-scroll {
   position: absolute;
   inset: 0;
+  z-index: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
