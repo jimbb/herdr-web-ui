@@ -45,6 +45,8 @@ export const WORKSPACE_JA: Record<string, string> = {
   "Close dialog": "ダイアログを閉じる",
   "Directory": "作業フォルダー",
   "absolute path or ~/…": "絶対パスまたは ~/…",
+  "Adds to open workspace {name}": "開いているワークスペース {name} に追加します",
+  "Separate workspace": "別のワークスペース",
   "Optional workspace label": "ワークスペース名 (任意)",
   "Workspace label; follows the branch until you change it": "変更するまでブランチ名に従います",
   "The workspace opened, but {agent} did not start. Check that it is installed on the PC, then open it again.": "ワークスペースは開きましたが、{agent} は起動しませんでした。PC にインストールされているか確認してから、もう一度開いてください。",

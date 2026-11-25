@@ -6,7 +6,9 @@
  * first ready turn through its pending path (server/core/pending.ts). Either way the request is the
  * one send: nothing is typed by this page afterwards.
  */
-import type { CreateTabRequest, CreateWorkspaceRequest, WorkspaceCreated } from "../../shared/protocol.ts";
+import { normalizeQueueFolder } from "../../shared/agent-queue.ts";
+import { HC_OTHER_WORKSPACE_ID } from "../../shared/machines.ts";
+import type { CreateTabRequest, CreateWorkspaceRequest, HerdrWorkspace, SessionSnapshot, WorkspaceCreated } from "../../shared/protocol.ts";
 import type { ClaudeLaunchMode, CodexLaunchMode } from "./agentLaunchMode.ts";
 import { firstPromptDelivery, launchAgent, launchCapabilities, launchChoiceFault } from "./agentLaunchMode.ts";
 
@@ -74,4 +76,39 @@ export function firstMessageOutcome(request: CreateWorkspaceRequest, result: Wor
   const answer = result.first_message;
   if (answer && "id" in answer) return { kind: "queued" };
   return { kind: "not_queued", error: answer && "error" in answer ? answer.error : null };
+}
+
+export interface MatchedWorkspace {
+  workspace: HerdrWorkspace;
+  cwd: string;
+}
+
+/**
+ * Finds an already-open workspace on the same machine whose folder matches `folder`
+ * (same rule as lib/agentInbox.ts: checkout_path, else first pane's cwd, normalised).
+ */
+export function matchingWorkspaceForFolder(
+  folder: string,
+  snapshot: Pick<SessionSnapshot, "workspaces" | "panes"> | null | undefined,
+  home: string | null = null,
+): MatchedWorkspace | null {
+  if (!snapshot) return null;
+  let candidate = folder.trim();
+  if (home && (candidate === "~" || candidate.startsWith("~/") || candidate.startsWith("~\\"))) {
+    const cleanHome = normalizeQueueFolder(home);
+    candidate = candidate === "~" ? cleanHome : `${cleanHome}${candidate.slice(1)}`;
+  }
+  const target = normalizeQueueFolder(candidate);
+  if (!target) return null;
+  const firstCwd = new Map<string, string | null | undefined>();
+  for (const pane of snapshot.panes) {
+    if (!firstCwd.has(pane.workspace_id)) firstCwd.set(pane.workspace_id, pane.cwd);
+  }
+  for (const workspace of snapshot.workspaces) {
+    if (workspace.workspace_id === HC_OTHER_WORKSPACE_ID) continue;
+    const raw = workspace.worktree?.checkout_path ?? firstCwd.get(workspace.workspace_id) ?? "";
+    const wsFolder = normalizeQueueFolder(raw);
+    if (wsFolder && wsFolder === target) return { workspace, cwd: wsFolder };
+  }
+  return null;
 }

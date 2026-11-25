@@ -45,6 +45,8 @@ export const WORKSPACE_KO: Record<string, string> = {
   "Close dialog": "창 닫기",
   "Directory": "작업 폴더",
   "absolute path or ~/…": "절대 경로 또는 ~/…",
+  "Adds to open workspace {name}": "열려 있는 워크스페이스 {name}에 추가합니다",
+  "Separate workspace": "별도 워크스페이스",
   "Optional workspace label": "워크스페이스 이름 (선택)",
   "Workspace label; follows the branch until you change it": "직접 바꾸기 전까지 브랜치 이름을 따릅니다",
   "The workspace opened, but {agent} did not start. Check that it is installed on the PC, then open it again.": "워크스페이스는 열렸지만 {agent} 에이전트는 시작되지 않았습니다. PC에 설치되어 있는지 확인한 뒤 다시 여세요.",

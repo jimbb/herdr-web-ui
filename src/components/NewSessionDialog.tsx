@@ -4,7 +4,7 @@ import { FolderOpen, X } from "lucide-react";
 
 import "./NewSessionDialog.css";
 
-import type { AgentKind, SlashCommand } from "../../shared/protocol.ts";
+import type { AgentKind, SessionSnapshot, SlashCommand } from "../../shared/protocol.ts";
 import { MAX_LABEL_CHARS } from "../../shared/labels.ts";
 import { ApiError } from "../lib/api.ts";
 import { AddAgentPanel } from "./AddAgentPanel.tsx";
@@ -22,7 +22,7 @@ import { sidebarPinKey } from "../lib/sidebarPins.ts";
 import { learnTabLabel } from "../lib/tabLabels.ts";
 import { launchCapabilities, launchDefaults, modelSuggestions } from "../lib/agentLaunchMode.ts";
 import { MAX_COMPOSER_CHARS } from "../lib/compose.ts";
-import { createRequest, dialogLaunch, firstMessageOutcome, startNewSession } from "../lib/newSession.ts";
+import { createRequest, dialogLaunch, firstMessageOutcome, matchingWorkspaceForFolder, startNewSession } from "../lib/newSession.ts";
 import { useMachineSessions } from "../lib/machineSessionContext.tsx";
 import { composerDrafts } from "../lib/composerDraft.ts";
 import { paneStorageId } from "../../shared/machines.ts";
@@ -47,6 +47,7 @@ export interface NewSessionDialogProps {
   machineName?: string;
   defaultCwd: string | null;
   tab?: NewTabTarget | null;
+  snapshot?: Pick<SessionSnapshot, "workspaces" | "panes"> | null;
   onClose: () => void;
   onPending?: (pending: boolean) => void;
   onCreated: (paneId: string, agentStarted: boolean, messageWaits?: boolean) => void;
@@ -134,7 +135,7 @@ export function insertToken(text: string, at: number, token: string): { text: st
   return { text: `${head}${after}`.slice(0, MAX_COMPOSER_CHARS), caret: Math.min(head.length, MAX_COMPOSER_CHARS) };
 }
 
-export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPending, onCreated, machineName, prefill = null, onDraft, worktrees = [], onOpenPane, watching = false, groupKept }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, defaultCwd, tab = null, snapshot = null, onClose, onPending, onCreated, machineName, prefill = null, onDraft, worktrees = [], onOpenPane, watching = false, groupKept }: NewSessionDialogProps) {
   const t = useT();
   const { settings, update: updateSettings } = useSettings();
   const machineId = useMachineId();
@@ -170,6 +171,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
   const [createdStarted, setCreatedStarted] = useState(false);
   const [createdKept, setCreatedKept] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  const [browsedHome, setBrowsedHome] = useState<string | null>(null);
+  const [separateWorkspace, setSeparateWorkspace] = useState(false);
   const [adding, setAdding] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const openings = useRef(0);
@@ -219,6 +222,8 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
     setCreatedStarted(false);
     setCreatedKept(false);
     setBrowsing(false);
+    setBrowsedHome(null);
+    setSeparateWorkspace(false);
     setAdding(false);
     setRefreshing(false);
     setRecentFolders(recentDirectories.read(machineId));
@@ -307,6 +312,10 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
   if (!open) return null;
 
   const selectedAgent = agents.find((agent) => agent.kind === agentKind);
+  const matchedWorkspace = tab === null ? matchingWorkspaceForFolder(cwd, snapshot, browsedHome) : null;
+  const targetTab: NewTabTarget | null = tab ?? (matchedWorkspace && !separateWorkspace
+    ? { workspaceId: matchedWorkspace.workspace.workspace_id, workspaceLabel: matchedWorkspace.workspace.label, cwd: matchedWorkspace.cwd, number: matchedWorkspace.workspace.tab_count + 1 }
+    : null);
   const agentLabel = selectedAgent?.label ?? agentKind;
   const pendingLabel = selectedAgent ? t("Starting {agent}… up to 60s", { agent: selectedAgent.label }) : t("Starting shell…");
   const fieldsDisabled = pending || refreshing || createdPaneId !== null;
@@ -385,10 +394,10 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
     // a tab keeps the workspace's folder, which the dialog shows and does not ask for. The first message of an
     // agent whose command line does not take it rides on this request: the bridge queues it for the agent's first
     // ready turn and types it through this page's connection, so this page never types it itself
-    const request = createRequest({ tab, directory, name }, launch, machineSessions?.peek(machineId)?.connection ?? null);
+    const request = createRequest({ tab: targetTab, directory, name }, launch, machineSessions?.peek(machineId)?.connection ?? null);
     const started = startNewSession(guard.current, request, async (body) => {
       rememberAgent(agentKind);
-      return tab ? await createTab({ ...body, workspace_id: tab.workspaceId }) : await createWorkspace(body);
+      return targetTab ? await createTab({ ...body, workspace_id: targetTab.workspaceId }) : await createWorkspace(body);
     });
     if (started === null) { setPending(false); return; }
     const ahead = agentKind === "" ? catchTypeAhead() : null;
@@ -521,10 +530,24 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
                   {t("Browse")}
                 </button>
               </div>
-              {browsing && <DirectoryBrowser start={cwd} onPick={(picked) => { updateCwd(picked); setBrowsing(false); }} onFolder={(path, home) => updateCwd(homeRelative(path, home))} />}
+              {browsing && <DirectoryBrowser start={cwd} onPick={(picked) => { updateCwd(picked); setBrowsing(false); }} onFolder={(path, home) => { setBrowsedHome(home); updateCwd(homeRelative(path, home)); }} />}
               <span id="new-session-cwd-hint" className={`field-hint${cwdError !== null ? " new-session-error" : ""}`} role={cwdError !== null ? "alert" : undefined}>
                 {cwdError ?? t("absolute path or ~/…")}
               </span>
+              {matchedWorkspace && (
+                <div className={`new-session-match${separateWorkspace ? " is-separate" : ""}`}>
+                  <span className="new-session-match-note">{t("Adds to open workspace {name}", { name: matchedWorkspace.workspace.label })}</span>
+                  <label className="new-session-separate">
+                    <input
+                      type="checkbox"
+                      checked={separateWorkspace}
+                      disabled={fieldsDisabled}
+                      onChange={(event) => setSeparateWorkspace(event.target.checked)}
+                    />
+                    <span>{t("Separate workspace")}</span>
+                  </label>
+                </div>
+              )}
             </div>
           )}
           {!tab && shownFolders.length > 0 && <div className="field new-session-recents">
@@ -533,14 +556,14 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, onClose, onPend
               onPick={(path) => { updateCwd(path); setBrowsing(false); }} />
           </div>}
           <label className="field">
-            <span className="field-label">{t(tab ? "Tab name (optional)" : "Optional workspace label")}</span>
+            <span className="field-label">{t(targetTab ? "Tab name (optional)" : "Optional workspace label")}</span>
             <input
               className="input"
               value={name}
               maxLength={MAX_LABEL_CHARS}
               disabled={fieldsDisabled}
               autoComplete="off"
-              placeholder={tab ? String(tab.number) : directoryBasename(cwd)}
+              placeholder={targetTab ? String(targetTab.number) : directoryBasename(cwd)}
               onChange={(event) => setName(event.target.value)}
             />
           </label>

@@ -1371,6 +1371,7 @@ export function App() {
         worktrees={machines.find((m) => m.id === newSessionMachineId)?.snapshot?.workspaces.flatMap((workspace) => workspace.worktree?.is_linked_worktree ? [workspace.worktree.checkout_path] : []) ?? []}
         open={newSessionOpen}
         tab={newTab}
+        snapshot={machines.find((m) => m.id === newSessionMachineId)?.snapshot ?? null}
         defaultCwd={newSessionMachineId === selectedMachineId ? selectedPane?.cwd ?? null : null}
         prefill={newPrefill}
         onDraft={setNewFields}

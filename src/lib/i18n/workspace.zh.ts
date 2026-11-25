@@ -45,6 +45,8 @@ export const WORKSPACE_ZH: Record<string, string> = {
   "Close dialog": "关闭对话框",
   "Directory": "工作目录",
   "absolute path or ~/…": "绝对路径或 ~/…",
+  "Adds to open workspace {name}": "将添加到已打开的工作区 {name}",
+  "Separate workspace": "新建独立工作区",
   "Optional workspace label": "工作区名称（可选）",
   "Workspace label; follows the branch until you change it": "修改之前跟随分支名",
   "The workspace opened, but {agent} did not start. Check that it is installed on the PC, then open it again.": "工作区已打开，但 {agent} 未能启动。请确认 PC 上已安装它，然后再次打开。",

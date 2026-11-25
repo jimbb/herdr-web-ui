@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { act, createElement } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
+import type { HerdrPane, HerdrWorkspace } from "../../shared/protocol.ts";
 import { SettingsProvider, useSettings, type Settings } from "../lib/settings.ts";
 import { clearNewSessionDrafts, NewSessionDialog, type NewSessionDialogProps } from "./NewSessionDialog.tsx";
 
@@ -298,6 +299,51 @@ describe("NewSessionDialog", () => {
       expect(cwdInput.props["aria-describedby"]).toBe("new-session-cwd-hint");
       expect(cwdHint.props.role).toBe("alert");
       expect(cwdHint.props.children).toBe("Directory not found");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("adds to a matching open workspace as a tab by default, and creates a separate workspace when checked", async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("tab/create") || url.includes("workspace/create")) {
+        calls.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+        return new Response(JSON.stringify({ workspace_id: "w1", pane_id: "w1:p2" }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ agents: [] }), { headers: { "content-type": "application/json" } });
+    }, { preconnect: globalThis.fetch.preconnect }));
+    const snapshot = {
+      workspaces: [{ workspace_id: "w1", label: "Automation", tab_count: 2, active_tab_id: "w1:t1" } as HerdrWorkspace],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", tab_id: "w1:t1", cwd: "/home/u/Automation" } as HerdrPane],
+    };
+    const view = createElement(SettingsProvider, {
+      children: createElement(NewSessionDialog, { open: true, defaultCwd: "/home/u/Automation/", snapshot, onClose: () => undefined, onCreated: () => undefined }),
+    });
+    try {
+      await act(async () => { renderer = create(view); });
+      const note = () => renderer!.root.findAllByProps({ className: "new-session-match-note" });
+      expect(note().map((node) => node.children.join(""))).toEqual(["Adds to open workspace Automation"]);
+      const checkbox = () => renderer!.root.findByProps({ type: "checkbox" });
+      expect(checkbox().props.checked).toBe(false);
+
+      await act(async () => { renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toContain("tab/create");
+      expect(calls[0]!.body).toMatchObject({ workspace_id: "w1", cwd: "/home/u/Automation" });
+
+      // Checking "Separate workspace" uses workspace/create instead.
+      await act(async () => { checkbox().props.onChange({ target: { checked: true } }); });
+      await act(async () => { renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.url).toContain("workspace/create");
+      expect(calls[1]!.body).toMatchObject({ cwd: "/home/u/Automation/" });
+
+      // Changing to an unmatched folder hides the notice and checkbox.
+      await act(async () => { renderer!.root.findByProps({ id: "new-session-cwd" }).props.onChange({ target: { value: "/home/u/brand-new" } }); });
+      expect(note()).toHaveLength(0);
+      expect(renderer!.root.findAllByProps({ type: "checkbox" })).toHaveLength(0);
     } finally {
       fetch.mockRestore();
     }

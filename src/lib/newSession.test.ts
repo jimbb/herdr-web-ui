@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
-import { createRequest, dialogLaunch, firstMessageOf, firstMessageOutcome, newSessionLaunch, startNewSession } from "./newSession.ts";
+import { HC_OTHER_WORKSPACE_ID } from "../../shared/machines.ts";
+import type { HerdrPane, HerdrWorkspace } from "../../shared/protocol.ts";
+import { createRequest, dialogLaunch, firstMessageOf, firstMessageOutcome, matchingWorkspaceForFolder, newSessionLaunch, startNewSession } from "./newSession.ts";
 import { inFlightGuard } from "./sessionHistory.ts";
 
 const plain = { claudeLaunchMode: "default", codexLaunchMode: "default" } as const;
@@ -111,5 +113,47 @@ describe("Start's in-flight guard", () => {
     expect(guard.busy()).toBeFalse();
     expect(start()).not.toBeNull();
     expect(sent).toHaveLength(2);
+  });
+});
+
+describe("matchingWorkspaceForFolder", () => {
+  const ws = (workspace_id: string, label: string, checkout_path?: string): HerdrWorkspace => ({
+    workspace_id,
+    label,
+    tab_count: 1,
+    active_tab_id: `${workspace_id}:t1`,
+    ...(checkout_path ? { worktree: { repo_key: "r", repo_name: label, repo_root: checkout_path, checkout_path, is_linked_worktree: false } } : {}),
+  }) as HerdrWorkspace;
+  const pane = (pane_id: string, workspace_id: string, cwd?: string): HerdrPane =>
+    ({ pane_id, workspace_id, tab_id: `${workspace_id}:t1`, cwd }) as HerdrPane;
+
+  const snapshot = {
+    workspaces: [
+      ws(HC_OTHER_WORKSPACE_ID, "Other terminals"),
+      ws("w1", "Automation", "/home/u/Automation"),
+      ws("w2", "ovis"),
+    ],
+    panes: [
+      pane("o:p1", HC_OTHER_WORKSPACE_ID, "/home/u/scratch"),
+      pane("w1:p1", "w1", "/home/u/Automation/subdir"),
+      pane("w2:p1", "w2", "/home/u/ovis/"),
+      pane("w2:p2", "w2", "/home/u/other"),
+    ],
+  };
+
+  it("matches by checkout_path or first pane cwd, normalising trailing slashes and ~ when home is known", () => {
+    expect(matchingWorkspaceForFolder("/home/u/Automation/", snapshot)).toEqual({ workspace: snapshot.workspaces[1]!, cwd: "/home/u/Automation" });
+    expect(matchingWorkspaceForFolder(" /home/u/ovis ", snapshot)).toEqual({ workspace: snapshot.workspaces[2]!, cwd: "/home/u/ovis" });
+    expect(matchingWorkspaceForFolder("~/Automation/", snapshot, "/home/u/")).toEqual({ workspace: snapshot.workspaces[1]!, cwd: "/home/u/Automation" });
+    expect(matchingWorkspaceForFolder("~/ovis", snapshot, "/home/u")).toEqual({ workspace: snapshot.workspaces[2]!, cwd: "/home/u/ovis" });
+  });
+
+  it("does not match Other terminals, non-first pane cwds, checkout_path overrides, blank folders, or missing snapshots", () => {
+    expect(matchingWorkspaceForFolder("/home/u/scratch", snapshot)).toBeNull();
+    expect(matchingWorkspaceForFolder("/home/u/other", snapshot)).toBeNull();
+    expect(matchingWorkspaceForFolder("/home/u/Automation/subdir", snapshot)).toBeNull();
+    expect(matchingWorkspaceForFolder("   ", snapshot)).toBeNull();
+    expect(matchingWorkspaceForFolder("/home/u/ovis", null)).toBeNull();
+    expect(matchingWorkspaceForFolder("~/ovis", snapshot, null)).toBeNull();
   });
 });

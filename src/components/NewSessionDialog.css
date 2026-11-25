@@ -48,6 +48,33 @@
   flex: none;
 }
 
+.new-session-match {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-1);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.new-session-match-note {
+  color: var(--text);
+}
+
+.new-session-match.is-separate .new-session-match-note {
+  color: var(--text-dim);
+}
+
+.new-session-separate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
 .new-session-folder-chips-frame {
   position: relative;
   min-width: 0;
@@ -240,5 +267,9 @@
 
   .new-session-modal .new-session-prompt {
     height: auto;
+  }
+
+  .new-session-separate {
+    min-height: var(--touch-target);
   }
 }
