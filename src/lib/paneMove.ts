@@ -79,3 +79,7 @@ export function movedView<S extends { panes: Record<string, PaneTarget> }>(selec
     split: split !== null && moved.length > 0 ? { ...split, panes: { ...split.panes, ...Object.fromEntries(moved.map(([slot]) => [slot, { machineId, paneId: to }])) } } : null,
   };
 }
+
+export function keptMoveView<V>(target: { machine_id: string; pane_id: string; view?: V } | null, machineId: string, from: string): V | undefined {
+  return target !== null && target.machine_id === machineId && target.pane_id === from ? target.view : undefined;
+}

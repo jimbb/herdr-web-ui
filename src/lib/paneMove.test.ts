@@ -3,7 +3,7 @@ import { paneStorageId, type Machine } from "../../shared/machines.ts";
 import { ComposerDraftStore, SEND_LEASE_MS } from "./composerDraft.ts";
 import { ReplyCommentStore } from "./replyComments.ts";
 import { PaneLifetimes, paneLifetimes } from "./paneLifetime.ts";
-import { carryPaneState, movedView } from "./paneMove.ts";
+import { carryPaneState, keptMoveView, movedView } from "./paneMove.ts";
 import { readTerminalDraft, setTerminalDraftSending, writeTerminalDraft } from "./terminalDraft.ts";
 function fixture() {
   const data = new Map<string, string>();
@@ -249,4 +249,11 @@ it("takes the view of a pane moved elsewhere to its new ID in any slot, and noth
   // the same pane ID on another PC is another pane
   expect(movedView({ machineId: "other", paneId: "w1:p1" }, null, "pc", "w1:p1", "w2:p1")).toEqual({ selection: null, split: null });
   expect(movedView({ machineId: "pc", paneId: "w3:p1" }, null, "pc", "w1:p1", "w2:p1")).toEqual({ selection: null, split: null });
+});
+
+it("keeps a pane's forced view only for the moved pane on the same PC", () => {
+  expect(keptMoveView({ machine_id: "pc", pane_id: "w1:p1", view: "chat" }, "pc", "w1:p1")).toBe("chat");
+  expect(keptMoveView({ machine_id: "other", pane_id: "w1:p1", view: "chat" }, "pc", "w1:p1")).toBeUndefined();
+  expect(keptMoveView({ machine_id: "pc", pane_id: "w1:p2", view: "chat" }, "pc", "w1:p1")).toBeUndefined();
+  expect(keptMoveView(null, "pc", "w1:p1")).toBeUndefined();
 });

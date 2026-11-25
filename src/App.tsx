@@ -1,5 +1,5 @@
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, ChevronDown, ChevronLeft, Eye, Plus, CircleHelp, Ellipsis, FolderOpen, Inbox, Link, ListOrdered, Menu, MessageCircle, MessageSquare, PanelLeft, PanelsTopLeft, Search, Settings as SettingsGlyph, SquareTerminal, Target, TextSearch, X } from "lucide-react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Bell, ChevronDown, ChevronLeft, Eye, Folder, FolderInput, Plus, CircleHelp, Ellipsis, FolderOpen, Inbox, Link, ListOrdered, Menu, MessageCircle, MessageSquare, PanelLeft, PanelsTopLeft, Search, Settings as SettingsGlyph, SquareTerminal, Target, TextSearch, X } from "lucide-react";
 
 import type { HerdrPane, PaneDirection } from "../shared/protocol.ts";
 import { authenticate, createTab, movePaneBeside, moveTabToWorkspace, paneSessionKey, shareSeen, swapPaneWith } from "./lib/api.ts";
@@ -124,7 +124,7 @@ import logoDark from "./assets/brand/logo-dark.png";
 import logoLight from "./assets/brand/logo-light.png";
 import { nextWaitingTarget, sessionCountsAcross, tabPosition, useDrawerDialog, useWaitingRosters, waitingElsewhere, waitingTargets } from "./lib/headerSessions.ts";
 import { selectionStill } from "./lib/selectionMark.ts";
-import { carryMovedPane, movedView } from "./lib/paneMove.ts";
+import { carryMovedPane, keptMoveView, movedView } from "./lib/paneMove.ts";
 import { useScreenWakeLock } from "./lib/wakeLock.ts";
 import { useSidebarLayout } from "./lib/useSidebarLayout.ts";
 import { useSidebarPeek } from "./lib/sidebarPeek.ts";
@@ -153,6 +153,7 @@ import { inboxOrder } from "./lib/agentInbox.ts";
 import { layoutCells } from "./lib/layoutMap.ts";
 import { pageStartsInInbox, useInboxMode } from "./lib/inboxMode.ts";
 import { buildModeMoreItems, buildModeThreadItems, useInboxThreadClose } from "./lib/inboxThreadClose.ts";
+import { inboxThreadMoveDestinations } from "./lib/inboxThreadMove.ts";
 import { InboxList } from "./components/InboxList.tsx";
 import { InboxConnecting, InboxFootEntry, InboxUnchosen, threadDisplayName, ThreadTitle, ThreadTop } from "./components/InboxMode.tsx";
 import { InboxRail } from "./components/InboxRail.tsx";
@@ -253,6 +254,8 @@ export function App() {
   const updates = useUpdates(locked === false);
   const desktopUpdate = useDesktopUpdate();
   const { selectedPaneId, setSelectedPaneId, notificationViewTarget, setNotificationViewTarget, terminalPeek, setTerminalPeek, endPeek, pendingLink, linkLanded, setLinkLanded, rosterSeq, linkSince, selectionSince, rosterTick, setRosterTick, linkTick, setLinkTick } = useSelectionState({ initialLink });
+  const notificationViewTargetRef = useRef(notificationViewTarget);
+  notificationViewTargetRef.current = notificationViewTarget;
   const { otherRecheck, otherRosterTick, setOtherRosterTick } = useSplitRecheck();
   const { rosterIn, pendingFile, selectionHint, headerNote, setHeaderNote, note: linkNote, autoSelected, setAutoSelected } = useLinkLanding({ initialLink, otherRecheck, setOtherRosterTick, pendingLink, rosterSeq, setRosterTick, linkLanded, t });
   const inboxMode = useInboxMode({ startsIn: () => pageStartsInInbox(phoneInboxOn(settings), window.matchMedia?.(SHEET_QUERY).matches === true, initialLink) });
@@ -277,6 +280,8 @@ export function App() {
   // it there) goes to the hosted app's Add a PC, one the phone app opened by its address to the app's own screens
   const addPcTo = addPcExit({ nativeApp: inNativeApp(), relayShell: shellMode() === "relay", pathname: window.location.pathname });
   const { more, setMore, closeMore, group: moreGroup, openGroup: openMoreGroup, closeGroup: closeMoreGroup } = moreMenu;
+  const [inboxMoveMenu, setInboxMoveMenu] = useState<{ anchor: HTMLElement; machineId: string; tabId: string } | null>(null);
+  useLayoutEffect(() => { if (inboxMoveMenu !== null && !inboxMoveMenu.anchor.isConnected) setInboxMoveMenu(null); });
   const paneActionsRef = useRef<((target: HerdrPane, options?: { counted?: boolean }) => RowMenuItem[]) | null>(null);
   const paneLocked = usePaneLocked(selectedMachineId);
   const { filesOpen, setFilesOpen, filesDocked, filesCovered, revealFiles, viewing, openFile, closeFile, hideFile, leaveFile, restoreFile, fileFromPop, forgetLeftFiles, diffViewing, openDiff, closeDiff, releaseDiff, presentation, fileDocked, webPage, closeWebPage, openWebPage, openDiffFile, reportFileKind, toggleFilePresentation, viewFile } = useFilePanels({ settings, filePanelAvailable, selectedPaneId, selectedMachineId });
@@ -441,6 +446,7 @@ export function App() {
 
   // Nothing is sent: held text waits for its Send or Discard
   const followPaneMove = (machineId: string, from: string, to: string): void => {
+    if (from === to) return;
     carryMovedPane(machineId, from, to);
     updateSettings(({ lockedAgents, agentGroupOf }) => ({
       lockedAgents: [...movedSidebarPins(lockedAgents, machineId, from, to)],
@@ -450,8 +456,8 @@ export function App() {
     if (view.split !== null) setSplit(view.split);
     if (view.selection === null) return;
     const listed = inbox.shownRef.current;
-    // the shown pane moved, not picked: its note stays
-    selectTargetRef.current(machineId, view.selection, undefined, true);
+    // the shown pane moved, not picked: its note stays, and an open inbox thread keeps its view
+    selectTargetRef.current(machineId, view.selection, keptMoveView(notificationViewTargetRef.current, machineId, from), true);
     if (listed) inbox.show();
   };
   const { takeNotificationTargetRef } = useNotificationTargets({ machinesRef, selectTargetRef, selectionHint, pendingLink, pendingFile, setLinkLanded, linkSince, rosterSeq, setLinkTick, load, onLinkWait: () => inbox.leave() });
@@ -835,11 +841,30 @@ export function App() {
   ];
   const fromMore = (id: string): RowMenuItem[] => moreItems.filter((item) => item.id === id);
   const moreOnList = inbox.shown;
+  const inboxMoveDestinations = inboxThreadMoveDestinations({
+    inMode,
+    inboxShown: inbox.shown,
+    guideShown,
+    watching: auth?.role === "watch",
+    machineConnected: selectedMachine?.state === "connected",
+    moveOffered: appLayoutOn(selectedMachineId).move,
+    snapshot,
+    pane: selectedPane,
+  });
+  const inboxMoveActive = inboxMoveMenu !== null && inboxMoveDestinations.length > 0 && selectedPane !== null
+    && inboxMoveMenu.machineId === selectedMachineId && inboxMoveMenu.tabId === selectedPane.tab_id;
+  useEffect(() => { if (inboxMoveMenu !== null && !inboxMoveActive) setInboxMoveMenu(null); }, [inboxMoveMenu, inboxMoveActive]);
   const modeThreadItems: RowMenuItem[] = buildModeThreadItems([
     ...(inboxWide ? [] : fromMore("next-waiting")), ...fromMore("find-group"), ...fromMore("find"),
     ...(foldFind ? [] : paneMoreItems.filter((item) => item.id === "search-conversation")),
     ...fromMore("files"), ...fromMore("copy-link"),
     ...paneMoreItems.filter((item) => item.id === "mirror-width" || item.id === "recover-unsent"),
+    ...(inboxMoveDestinations.length > 0 && more && selectedPane ? [{
+      id: "move-workspace",
+      label: t("Move to workspace"),
+      icon: FolderInput,
+      run: () => setInboxMoveMenu({ anchor: more.anchor, machineId: selectedMachineId, tabId: selectedPane.tab_id }),
+    }] : []),
   ], threadClose.listed ? { label: t("Close pane"), run: threadClose.requestFromMenu, disabled: !threadClose.offered } : null);
   const modeLeadItems: RowMenuItem[] = [
     // a phone's way to another PC stays first in the inbox mode too
@@ -925,7 +950,7 @@ export function App() {
         aria-label={round ? t("More") : moreLabel}
         title={round ? t("More") : moreLabel}
         aria-haspopup={isSheetWidth ? "dialog" : "menu"}
-        aria-expanded={(more !== null && !(inMode && moreOnList && !inboxWide)) || groupItems.length > 0}
+        aria-expanded={(more !== null && !(inMode && moreOnList && !inboxWide)) || groupItems.length > 0 || inboxMoveActive}
         onClick={(event) => {
           const anchor = event.currentTarget;
           setMore((open) => (open ? null : { anchor }));
@@ -1128,6 +1153,21 @@ export function App() {
           />
         )}
         {moreGroup && groupItems.length > 0 && <RowMenu anchor={moreGroup.anchor} title={t(moreGroup.kind === "find" ? "Find…" : "Pane and tab…")} items={groupItems} onClose={closeMoreGroup} />}
+        {inboxMoveActive && inboxMoveMenu && (
+          <RowMenu
+            anchor={inboxMoveMenu.anchor}
+            title={t("Move to workspace")}
+            items={inboxMoveDestinations.map((entry): RowMenuItem => ({
+              id: `workspace:${entry.workspace_id}`,
+              label: entry.label,
+              icon: Folder,
+              run: () => {
+                void actions.moveTabToWorkspace({ machineId: inboxMoveMenu.machineId, tabId: inboxMoveMenu.tabId, workspaceId: entry.workspace_id, notice: true }).catch(() => undefined);
+              },
+            }))}
+            onClose={() => setInboxMoveMenu(null)}
+          />
+        )}
 
       <PanePressContext.Provider value={pressPane}>
       <div className="app-body">
