@@ -45,10 +45,10 @@ export function cmdQuestionPanelActive(lines: string[]): boolean {
   if (cmdQuestionFooterStart(lines) >= 0) return true;
   const last = findLastIndex(lines, (line) => cleanLine(line) !== "");
   if (last < 0) return false;
-  if (/^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[last]!)) return true;
-  if (!/^\s*(?:[❯›>])?\s*Submit\s*$/i.test(lines[last]!)) return false;
+  if (/^\s*(?:[❯›>])?\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[last]!)) return true;
+  if (!/^\s*(?:[❯›>])?\s*(?:Submit|Next)\s*$/i.test(lines[last]!)) return false;
   const custom = findLastIndex(lines.slice(0, last), (line) => cleanLine(line) !== "");
-  return custom >= 0 && /^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[custom]!);
+  return custom >= 0 && /^\s*(?:[❯›>])?\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[custom]!);
 }
 
 const CMD_TAB_RE = /^[✔●◯]\s+(.+?)(?:\s+\|\s+[✔●◯]\s+.+)+$/;
@@ -102,7 +102,7 @@ function commandRows(lines: string[], start: number, end: number): CmdRow[] {
       selected: match[1] !== undefined, checked: match[3] === "[✔]", answered, lineIndex: index,
     };
     const description: string[] = [];
-    for (let line = index + 1; line < end && !CMD_ROW_RE.test(lines[line]!) && !/^\s*Submit\s*$/.test(lines[line]!) && lines[line]!.trim() !== ""; line += 1) {
+    for (let line = index + 1; line < end && !CMD_ROW_RE.test(lines[line]!) && !/^\s*(?:Submit|Next)\s*$/.test(lines[line]!) && lines[line]!.trim() !== ""; line += 1) {
       if (isDivider(lines[line]!)) break;
       description.push(cleanLine(lines[line]!));
     }
@@ -163,19 +163,20 @@ function parseCmdQuestion(screen: string): ParsedPrompt | null {
   const firstRow = lines.findIndex((line, index) => index < end && CMD_ROW_RE.test(line));
   if (firstRow < 0) return null;
   const tabs = commandTabs(lines, firstRow);
+  if (footer < 0 && tabs === null) return null;
   const rows = commandRows(lines, firstRow, end);
   if (rows.length < 2 || !rows.every((row, index) => row.number === index + 1)) return null;
-  const submit = findLastIndex(lines, (line, index) => index > firstRow && index < end && /^\s*Submit\s*$/.test(line));
-  const hasSubmit = submit >= 0;
+  const finish = findLastIndex(lines, (line, index) => index > firstRow && index < end && /^\s*(?:Submit|Next)\s*$/.test(line));
+  const hasFinish = finish >= 0;
   const customRow = rows.at(-1)!;
   if (!/^Type something\.{3}$/i.test(customRow.label)) return null;
   const optionRows = rows.slice(0, -1);
   const multi = optionRows.some((row) => row.checked || /\[[ xX✔]\]/.test(lines[row.lineIndex]!));
-  if (hasSubmit !== multi) return null;
+  if (hasFinish !== multi) return null;
   const selectedRows = rows.filter((row) => row.selected);
-  const submitSelected = hasSubmit && /^\s*[❯›>]/.test(lines[submit]!);
-  if (selectedRows.length + (submitSelected ? 1 : 0) !== 1) return null;
-  const selectedIndex = submitSelected ? optionRows.length + 1 : selectedRows[0]!.number - 1;
+  const finishSelected = hasFinish && /^\s*[❯›>]/.test(lines[finish]!);
+  if (selectedRows.length + (finishSelected ? 1 : 0) !== 1) return null;
+  const selectedIndex = finishSelected ? optionRows.length + 1 : selectedRows[0]!.number - 1;
   const tabsInfo = tabs && tabs.tabs.at(-1)?.marker !== "current" ? tabs : null;
   const current = tabsInfo?.tabs.findIndex((tab) => tab.marker === "current") ?? -1;
   if (tabsInfo && current < 0 || tabsInfo && current === tabsInfo.tabs.length - 1) return null;
@@ -196,7 +197,7 @@ function parseCmdQuestion(screen: string): ParsedPrompt | null {
   };
   const internal: Parameters<typeof finishPrompt>[2] = {
     ...(navigation ? { nativeSteps: navigation.nativeSteps } : {}), responder: "cmd-question",
-    menuLabels: [...optionRows.map((row) => row.label), customRow.label, ...(hasSubmit ? ["Submit"] : [])], selectedIndex,
+    menuLabels: [...optionRows.map((row) => row.label), customRow.label, ...(hasFinish ? [cleanLine(lines[finish]!).trim()] : [])], selectedIndex,
     checkedOptionIndices: optionRows.flatMap((row, index) => row.checked ? [index] : []), customMenuIndex: optionRows.length,
     rejectWithEscapeIndex: null,
     customSteps: (text: string, picked?: number[]) => {
@@ -226,7 +227,7 @@ function parseCmdQuestion(screen: string): ParsedPrompt | null {
       return keySteps(keys);
     } } : {}),
   };
-  return finishPrompt("cmd", draft, internal, { body: lines.slice(0, firstRow).join("\n"), steps: undefined, can_step_back: undefined, can_step_next: undefined, default_option_index: undefined });
+  return finishPrompt("cmd", draft, internal, { steps: undefined, can_step_back: undefined, can_step_next: undefined, default_option_index: undefined });
 }
 
 function parseCmdPermission(screen: string): ParsedPrompt | null {

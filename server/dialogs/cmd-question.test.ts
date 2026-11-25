@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { answerKeys, parseInteractivePrompt } from "../prompt.ts";
 
 const screen = (name: string) => readFileSync(join(import.meta.dir, "..", "fixtures", `cmd-question-1.93.3-${name}.txt`), "utf8");
+const fixture = (name: string) => screen(name);
 
 describe("Command Code 1.93.3 ask_user_question", () => {
   it("reads a single-select question and its descriptions", () => {
@@ -44,6 +45,26 @@ describe("Command Code 1.93.3 ask_user_question", () => {
       { question: "Which sizes do you want?", answer: "Medium" },
     ]);
     expect(answerKeys(prompt!, { option_index: 0 })).toEqual([{ keys: ["enter"] }]);
+  });
+
+  it("reads a one-question panel without the optional footer and its Review page", () => {
+    const prompt = parseInteractivePrompt("cmd", fixture("single"));
+    expect(prompt).toMatchObject({ title: "Pet · 1 of 1", question: "Which pet do you want?", custom_option_index: 2 });
+    expect(answerKeys(prompt!, { option_index: 1 })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }]);
+    const review = parseInteractivePrompt("cmd", fixture("single-review"));
+    expect(review).toMatchObject({ kind: "menu", title: "Review", answers: [{ question: "Which pet do you want?", answer: "Cat" }] });
+  });
+
+  it("accepts Next on a non-final multi-select question", () => {
+    const middle = screen("2").replace("✔ Colour | ● Sizes | ◯ Review", "● Sizes | ◯ Colour | ◯ Review").replace("  Submit", "  Next");
+    const prompt = parseInteractivePrompt("cmd", middle);
+    expect(prompt).toMatchObject({ multi_select: true, question: "Which sizes do you want?", can_step_next: true });
+    expect(answerKeys(prompt!, { option_indices: [1] })).toEqual([{ keys: ["down"] }, { keys: ["space"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
+  });
+
+  it("leaves hideCustomInput panels to the terminal instead of guessing a card", () => {
+    const hidden = screen("single").replace("● Pet | ◯ Review\n\n", "").replace(/\n  3\. Type something\.\.\.$/, "");
+    expect(parseInteractivePrompt("cmd", hidden)).toBeNull();
   });
 
   it("does not keep a question card after later output", () => {
