@@ -348,4 +348,44 @@ describe("NewSessionDialog", () => {
       fetch.mockRestore();
     }
   });
+
+  it("fetches home once for a ~ path so typed or recent ~/x folders match an open workspace without opening Browse", async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    let dirReads = 0;
+    const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/directories")) {
+        dirReads += 1;
+        return new Response(JSON.stringify({ path: "/home/u", home: "/home/u", parent: "/home", directories: [] }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("tab/create") || url.includes("workspace/create")) {
+        calls.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+        return new Response(JSON.stringify({ workspace_id: "w1", pane_id: "w1:p2" }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ agents: [] }), { headers: { "content-type": "application/json" } });
+    }, { preconnect: globalThis.fetch.preconnect }));
+    const snapshot = {
+      workspaces: [{ workspace_id: "w1", label: "Automation", tab_count: 1, active_tab_id: "w1:t1" } as HerdrWorkspace],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", tab_id: "w1:t1", cwd: "/home/u/Automation" } as HerdrPane],
+    };
+    const view = createElement(SettingsProvider, {
+      children: createElement(NewSessionDialog, { open: true, defaultCwd: "~/other", snapshot, onClose: () => undefined, onCreated: () => undefined }),
+    });
+    try {
+      await act(async () => { renderer = create(view); });
+      expect(dirReads).toBe(1);
+      expect(renderer!.root.findAllByProps({ className: "new-session-match-note" })).toHaveLength(0);
+
+      await act(async () => { renderer!.root.findByProps({ id: "new-session-cwd" }).props.onChange({ target: { value: "~/Automation" } }); });
+      expect(dirReads).toBe(1);
+      expect(renderer!.root.findAllByProps({ className: "new-session-match-note" }).map((node) => node.children.join(""))).toEqual(["Adds to open workspace Automation"]);
+
+      await act(async () => { renderer!.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toContain("tab/create");
+      expect(calls[0]!.body).toMatchObject({ workspace_id: "w1", cwd: "/home/u/Automation" });
+    } finally {
+      fetch.mockRestore();
+    }
+  });
 });

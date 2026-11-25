@@ -139,7 +139,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, snapshot = null
   const t = useT();
   const { settings, update: updateSettings } = useSettings();
   const machineId = useMachineId();
-  const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands } = useMachineApi();
+  const { createTab, createWorkspace, fetchAgentKinds, fetchAgentCommands, fetchDirectories } = useMachineApi();
   const machineSessions = useMachineSessions();
   const [agents, setAgents] = useState<AgentKind[]>([]);
   const [agentKind, setAgentKind] = useState(rememberedAgent);
@@ -172,6 +172,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, snapshot = null
   const [createdKept, setCreatedKept] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [browsedHome, setBrowsedHome] = useState<string | null>(null);
+  const homeFetched = useRef(false);
   const [separateWorkspace, setSeparateWorkspace] = useState(false);
   const [adding, setAdding] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -223,6 +224,7 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, snapshot = null
     setCreatedKept(false);
     setBrowsing(false);
     setBrowsedHome(null);
+    homeFetched.current = false;
     setSeparateWorkspace(false);
     setAdding(false);
     setRefreshing(false);
@@ -261,6 +263,24 @@ export function NewSessionDialog({ open, defaultCwd, tab = null, snapshot = null
       cancelled = true;
     };
   }, [open]);
+
+  const needsHome = open && tab === null && browsedHome === null && cwd.trim().startsWith("~");
+  useEffect(() => {
+    if (!needsHome || homeFetched.current) return;
+    homeFetched.current = true;
+    let cancelled = false;
+    let settled = false;
+    void fetchDirectories("~", false)
+      .then((listing) => {
+        settled = true;
+        if (!cancelled && listing.home) setBrowsedHome(listing.home);
+      })
+      .catch(() => { settled = true; });
+    return () => {
+      cancelled = true;
+      if (!settled) homeFetched.current = false;
+    };
+  }, [needsHome, fetchDirectories]);
 
   const groupFolder = tab ? tab.cwd : cwd;
   const groupKey = groupNames.join("\n");
