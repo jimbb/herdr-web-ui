@@ -45,6 +45,7 @@ describe("agent inbox", () => {
     expect(inboxQueueSearched(entries, "all", "THE CHECKS").length).toBe(4);
     expect(inboxQueueSearched(entries, "done", "")).toEqual([]);
     const [state] = inboxSections(rows, entries, machines, shown, "state");
+    expect([state!.machineId, state!.workspaceId]).toEqual([null, null]);
     expect(state!.entries.map(({ key }) => key)).toEqual([
       "local:w1E:p1", "lab:w1E:p1", "local:w1F:p1", "lab:w1F:p1", "queue:held", "queue:next", "queue:failed", "queue:other", "local:w1C:p1", "lab:w1C:p1", "local:w1D:p1", "lab:w1D:p1",
     ]);
@@ -62,11 +63,16 @@ describe("agent inbox", () => {
     const rows = inboxOrder(machines, shown);
     const { entries } = inboxQueue([task("branch", "/worktrees/branch/"), task("api", "/repos/api"), task("same-name", "/other/checkout-api"), task("by-name", "/other/web-dashboard")], rows);
     const sections = inboxSections(rows, entries, machines, shown, "project");
-    const keys = (sectionKey: string) => sections.find(({ key }) => key === sectionKey)?.entries.map(({ key }) => key);
+    const section = (sectionKey: string) => sections.find(({ key }) => key === sectionKey);
+    const keys = (sectionKey: string) => section(sectionKey)?.entries.map(({ key }) => key);
     expect(keys("local:w1C")).toEqual(["local:w1F:p1", "local:w1C:p1", "queue:branch", "queue:api"]);
     expect(keys("lab:w1C")).toEqual(["lab:w1F:p1", "lab:w1C:p1"]);
     expect(keys("folder:/other/checkout-api")).toEqual(["queue:same-name"]);
     expect(keys("local:w1D")).toEqual(["local:w1D:p1", "queue:by-name"]);
+    expect([section("local:w1C")?.machineId, section("local:w1C")?.workspaceId]).toEqual(["local", "w1C"]);
+    expect([section("lab:w1C")?.machineId, section("lab:w1C")?.workspaceId]).toEqual(["lab", "w1C"]);
+    expect([section("local:w1D")?.machineId, section("local:w1D")?.workspaceId]).toEqual(["local", "w1D"]);
+    expect([section("folder:/other/checkout-api")?.machineId, section("folder:/other/checkout-api")?.workspaceId]).toEqual([null, null]);
   });
 
   it("keeps a visible helper family together and re-roots it when a parent is filtered out", () => {

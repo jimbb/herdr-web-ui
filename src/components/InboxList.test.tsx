@@ -145,6 +145,7 @@ describe("InboxList", () => {
     handle?: { current: InboxListHandle | null };
     onFilter?: (filter: InboxFilter) => void; onQuery?: (query: string) => void;
     onOpen?: (machineId: string, paneId: string) => void; onNew?: (machineId: string) => void;
+    onNewTab?: (machineId: string, workspaceId: string) => void;
     queue?: Parameters<typeof InboxList>[0]["queue"];
     onClosed?: (machineId: string, paneId: string) => void;
   }
@@ -158,7 +159,7 @@ describe("InboxList", () => {
     <Stamping machines={machines} activity={options.activity ?? activity} />
     <InboxList ref={options.handle} machines={machines} activity={options.activity ?? activity} watching={options.watching ?? false} wide={options.wide ?? false} current={options.current ?? null}
       filter={options.filter ?? "all"} onFilter={options.onFilter ?? (() => {})} query={options.query ?? ""} onQuery={options.onQuery ?? (() => {})} scroll={scroll} focus={{ opening: options.opening ?? 1, taken, row: options.returnTo ?? null }}
-      onOpen={options.onOpen ?? (() => {})} queue={options.queue} onNew={options.onNew ?? (() => {})} onClosed={options.onClosed} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
+      onOpen={options.onOpen ?? (() => {})} queue={options.queue} onNew={options.onNew ?? (() => {})} onNewTab={options.onNewTab ?? (() => {})} onClosed={options.onClosed} questionReads={questionReads} summaryReads={summaryReads} more={options.more} note={options.note} connection={options.connection ?? null} failure={options.failure ?? null} />
   </PanePressContext.Provider></SettingsProvider>;
   const draw = async (machines: Machine[], options: DrawOptions = {}) => {
     nodes = new Map();
@@ -427,6 +428,47 @@ describe("InboxList", () => {
     await redraw({ filter: "blocked" });
     expect(item(root, "w1D:p1").props["data-depth"]).toBeUndefined();
     expect(byClass(root, "inbox-project").map(text)).toContain("web-dashboardAgents: 1 · Tasks: 0");
+  });
+
+  it("offers + on each connected workspace header in project mode, and hides it for queue-only folders, watching, and offline PCs", async () => {
+    const added: string[] = [];
+    const queueOnlyTask = {
+      id: "q1", folder: "/other/standalone-repo", title: "Run audit", prompt: "Audit it", agent: "codex", hold: false,
+      status: "queued" as const, terminal: null, createdAt: "", startedAt: null, finishedAt: null, error: null,
+    };
+    const snapshot: QueueSnapshot = {
+      version: 1, tasks: [queueOnlyTask], settings: DEFAULT_QUEUE_SETTINGS,
+      gate: { status: "idle", summary: "", memAvailableMb: null, workingCount: 0, cooldownLeftSec: 0 }, lastLaunchAt: null,
+    };
+    const root = await draw(twoPcs("disconnected"), {
+      queue: { snapshot, onOpen() {}, onChange() {} },
+      onNewTab: (machineId, workspaceId) => added.push(`${machineId}:${workspaceId}`),
+    });
+    await act(async () => { byClass(root, "inbox-group-toggle")[0]!.props.onClick(); });
+
+    const headers = byClass(root, "inbox-project");
+    const addButtons = byClass(root, "inbox-project-add");
+    // local has 4 workspaces, laptop (offline) has 4 workspaces, queue-only folder has 1 section -> only local's 4 get +
+    expect(headers).toHaveLength(9);
+    expect(addButtons).toHaveLength(4);
+    expect(addButtons.map((btn) => btn.props["aria-label"]).sort()).toEqual([
+      "New agent in checkout-api",
+      "New agent in docs-site",
+      "New agent in infra",
+      "New agent in web-dashboard",
+    ]);
+
+    const checkoutBtn = addButtons.find((btn) => btn.props["aria-label"] === "New agent in checkout-api")!;
+    await act(async () => { checkoutBtn.props.onClick(); });
+    expect(added).toEqual(["local:w1C"]);
+
+    // Queue-only section ("standalone-repo") has no + button.
+    const queueHeader = headers.find((header) => text(header).startsWith("standalone-repo"))!;
+    expect(byClass(queueHeader, "inbox-project-add")).toHaveLength(0);
+
+    // Watch-only role hides every workspace header + button.
+    await redraw({ watching: true });
+    expect(byClass(root, "inbox-project-add")).toHaveLength(0);
   });
 
   it("says its menus are sheets at a phone's width and popovers beyond it", async () => {

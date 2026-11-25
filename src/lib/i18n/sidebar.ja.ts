@@ -7,6 +7,7 @@
 export const SIDEBAR_JA: Record<string, string> = {
   "Group by project": "プロジェクトでまとめる",
   "Agents: {agents} · Tasks: {tasks}": "エージェント：{agents} · タスク：{tasks}",
+  "New agent in {workspace}": "{workspace} で新しいエージェント",
   "Queue": "キュー",
   "Pin agent": "エージェントを固定",
   "Unpin agent": "エージェントの固定を解除",

@@ -63,6 +63,7 @@ export interface InboxListProps {
   onOpen(machineId: string, paneId: string): void;
   queue?: { snapshot: QueueSnapshot; onOpen(taskId: string): void; onChange(next: QueueSnapshot): void };
   onNew(machineId: string): void;
+  onNewTab?(machineId: string, workspaceId: string): void;
   onClosed?(machineId: string, paneId: string): void;
   questionReads: QuestionReads;
   summaryReads: SummaryReads;
@@ -96,7 +97,7 @@ export function InboxAvatar({ mark }: { mark: string | null }) {
  * The inbox mode's list: every shown PC's agents, the ones that need the reader first, each a row of two lines.
  * Agent rows open chat; queue rows open the task in Agent Queue.
  */
-export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, queue, onNew, onClosed, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
+export function InboxList({ ref, machines, activity, watching, wide, filter, onFilter, query, onQuery, scroll, focus, current = null, onOpen, queue, onNew, onNewTab, onClosed, questionReads, summaryReads, more, note, connection = null, failure = null }: InboxListProps) {
   const t = useT();
   const pressPane = useContext(PanePressContext);
   const paneLocked = usePaneLockChecker();
@@ -299,6 +300,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     return () => clearInterval(timer);
   }, [timed]);
   const connected = machines.filter((machine) => machine.state === "connected");
+  const onlineMachines = new Set(connected.map((machine) => machine.id));
   const offerNew = !watching && connected.length > 0;
   useEffect(() => { if (connected.length < 2) setPcMenu(null); }, [connected.length]);
   const total = all.length + queued.entries.length;
@@ -451,10 +453,27 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
         ) : empty !== null ? <p className="inbox-empty" role="status">{empty.flatMap((line, at) => [...(at > 0 ? [" "] : []), <span key={line}>{line}</span>])}</p> : (
           <ul className="inbox-rows" onPointerDown={holdAfterPress} onTouchEnd={holdAfterPress}
             onFocus={(event) => setFocusIn(event.target.matches?.(":focus-visible") ?? false)} onBlur={(event) => { if (!(typeof Node === "function" && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocusIn(false); }}>
-            {sections.flatMap(({ key, name, entries }) => [
+            {sections.flatMap(({ key, name, machineId, workspaceId, entries }) => [
               ...(name === null ? [] : [
-                <li className="inbox-project" key={`project:${key}`}><h2 dir="auto">{name}</h2>
-                  <span>{t("Agents: {agents} · Tasks: {tasks}", { agents: entries.filter((entry) => entry.kind === "agent").length, tasks: entries.filter((entry) => entry.kind === "queue").length })}</span>
+                <li className="inbox-project" key={`project:${key}`}>
+                  <div className="inbox-project-info">
+                    <h2 dir="auto">{name}</h2>
+                    <span>{t("Agents: {agents} · Tasks: {tasks}", { agents: entries.filter((entry) => entry.kind === "agent").length, tasks: entries.filter((entry) => entry.kind === "queue").length })}</span>
+                  </div>
+                  {!watching && onNewTab !== undefined && machineId !== null && workspaceId !== null && onlineMachines.has(machineId) && (
+                    <button
+                      type="button"
+                      className="icon-button inbox-project-add"
+                      aria-label={t("New agent in {workspace}", { workspace: name })}
+                      title={t("New agent in {workspace}", { workspace: name })}
+                      onClick={() => {
+                        tally(() => usageCounters.paneUse("new_tab_by_button", machineId));
+                        onNewTab(machineId, workspaceId);
+                      }}
+                    >
+                      <Plus aria-hidden="true" />
+                    </button>
+                  )}
                 </li>,
               ]),
               ...entries.map((entry) => {

@@ -910,7 +910,7 @@ export function App() {
       current={column && !inbox.shown && selectedPaneId !== null ? sidebarPinKey(selectedMachineId, selectedPaneId) : null}
       onOpen={openThread}
       queue={queueSnapshot === null ? undefined : { snapshot: queueSnapshot, onOpen: setQueueOpen, onChange: setQueueSnapshot }}
-      onNew={openNewOn} onClosed={handleInboxClosed} questionReads={inbox.questionReads} summaryReads={inbox.summaryReads}
+      onNew={openNewOn} onNewTab={(machineId, workspaceId) => actions.openNewTab({ machineId, workspaceId })} onClosed={handleInboxClosed} questionReads={inbox.questionReads} summaryReads={inbox.summaryReads}
       more={column ? undefined : { label: moreBase, expanded: more !== null && moreOnList, popup: isSheetWidth ? "dialog" : "menu", onPress: (anchor) => setMore((open) => (open ? null : { anchor })) }}
       note={column ? undefined : <HeaderNote note={listNote} />} connection={!column && listNote === null ? rosterConnection : null} failure={error === null ? null : { error, retry: load }} />
   );

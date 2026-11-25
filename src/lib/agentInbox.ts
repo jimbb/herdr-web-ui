@@ -65,7 +65,13 @@ export interface InboxQueueEntry {
 }
 
 type InboxEntry = InboxQueueEntry | { kind: "agent"; key: string; row: AgentRow };
-interface InboxSection { key: string; name: string | null; entries: InboxEntry[] }
+export interface InboxSection {
+  key: string;
+  name: string | null;
+  machineId: string | null;
+  workspaceId: string | null;
+  entries: InboxEntry[];
+}
 
 /** Positions are from the full folder queue, so filtering a row never renumbers the next one. */
 export function inboxQueue(tasks: readonly QueueTask[], agents: readonly AgentRow[]) {
@@ -99,7 +105,7 @@ export function inboxSections(rows: readonly AgentRow[], queue: InboxQueueEntry[
   const agentEntry = (row: AgentRow): InboxEntry => ({ kind: "agent", key: inboxKey(row), row });
   if (grouping === "state") {
     const urgent = groups.filter(({ group }) => group === "blocked" || group === "working");
-    return [{ key: "state", name: null, entries: [...urgent.flatMap(({ rows }) => rows.map(agentEntry)), ...queue, ...groups.slice(urgent.length).flatMap(({ rows }) => rows.map(agentEntry))] }];
+    return [{ key: "state", name: null, machineId: null, workspaceId: null, entries: [...urgent.flatMap(({ rows }) => rows.map(agentEntry)), ...queue, ...groups.slice(urgent.length).flatMap(({ rows }) => rows.map(agentEntry))] }];
   }
 
   const byWorkspace = new Map<string, InboxSection>();
@@ -108,7 +114,7 @@ export function inboxSections(rows: readonly AgentRow[], queue: InboxQueueEntry[
   for (const { id, snapshot } of machines) {
     for (const { workspace, children } of worktreeGroups(snapshot?.workspaces ?? [])) {
       const key = sidebarPinKey(id, workspace.workspace_id);
-      const project: InboxSection = { key, name: workspace.label, entries: [] };
+      const project: InboxSection = { key, name: workspace.label, machineId: id, workspaceId: workspace.workspace_id, entries: [] };
       for (const member of [workspace, ...children]) byWorkspace.set(sidebarPinKey(id, member.workspace_id), project);
     }
   }
@@ -139,7 +145,7 @@ export function inboxSections(rows: readonly AgentRow[], queue: InboxQueueEntry[
   for (const entry of queue) {
     const folder = normalizeQueueFolder(entry.task.folder);
     const name = queueFolderName(folder);
-    const project = byFolder.get(folder) ?? byLabel.get(name) ?? { key: `folder:${folder}`, name, entries: [] };
+    const project = byFolder.get(folder) ?? byLabel.get(name) ?? { key: `folder:${folder}`, name, machineId: null, workspaceId: null, entries: [] };
     byFolder.set(folder, project);
     project.entries.push(entry);
     projects.add(project);

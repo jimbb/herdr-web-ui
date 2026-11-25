@@ -270,9 +270,18 @@
 }
 
 .mode-inbox .inbox-project {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
   padding: var(--space-3) var(--inbox-inset) var(--space-1);
   color: var(--text-dim);
   font-size: var(--fs-xs);
+}
+
+.mode-inbox .inbox-project-info {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .mode-inbox .inbox-project h2 {
@@ -282,6 +291,43 @@
   font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mode-inbox .inbox-project-add {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: var(--text-dim);
+}
+
+.mode-inbox .inbox-project-add:active {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--text-strong);
+}
+
+.mode-inbox .inbox-project-add:focus-visible {
+  outline-offset: var(--ring-inset-offset);
+  color: var(--text-strong);
+}
+
+.mode-inbox:not(.is-wide) .inbox-project-add {
+  width: var(--touch-target);
+  height: var(--touch-target);
+  margin-inline-end: calc((var(--touch-target) - var(--icon-size-md)) / -2);
+  border-radius: var(--radius-pill);
+}
+
+.mode-inbox:not(.is-wide) .inbox-project-add svg {
+  width: var(--icon-size-md);
+  height: var(--icon-size-md);
+}
+
+@media (hover: hover) {
+  .mode-inbox .inbox-project-add:hover {
+    background: var(--bg-hover);
+    color: var(--text-strong);
+  }
 }
 
 .mode-inbox .inbox-item[data-depth] {
@@ -735,6 +781,17 @@
 
 .mode-inbox.is-wide .inbox-project { padding-inline: var(--space-2); }
 
+.mode-inbox.is-wide .inbox-project-add {
+  width: var(--pointer-target);
+  height: var(--pointer-target);
+  border-radius: var(--radius-md);
+}
+
+.mode-inbox.is-wide .inbox-project-add svg {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
 .mode-inbox.is-wide .inbox-item[data-depth]::before {
   inset-inline-start: calc(var(--space-2) - var(--inbox-indent));
 }
@@ -834,6 +891,16 @@
 }
 
 @media (hover: none), (pointer: coarse) {
+  .mode-inbox.is-wide .inbox-project-add {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .mode-inbox.is-wide .inbox-project-add svg {
+    width: var(--icon-size-md);
+    height: var(--icon-size-md);
+  }
+
   .mode-inbox.is-wide .inbox-close {
     inset-inline-end: var(--space-1);
     width: var(--touch-target);

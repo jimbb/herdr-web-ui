@@ -7,6 +7,7 @@
 export const SIDEBAR_KO: Record<string, string> = {
   "Group by project": "프로젝트별로 묶기",
   "Agents: {agents} · Tasks: {tasks}": "에이전트: {agents} · 작업: {tasks}",
+  "New agent in {workspace}": "{workspace}에 새 에이전트",
   "Queue": "대기열",
   "Pin agent": "에이전트 고정",
   "Unpin agent": "에이전트 고정 해제",
