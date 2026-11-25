@@ -195,34 +195,31 @@ function parseCmdQuestion(screen: string): ParsedPrompt | null {
     ...(optionRows.findIndex((row) => row.answered) >= 0 ? { default_option_index: optionRows.findIndex((row) => row.answered) } : {}),
     ...(navigation ? { steps: navigation.steps, can_step_back: navigation.can_step_back, can_step_next: navigation.can_step_next } : {}),
   };
+  // Enter ticks a row of a multiple choice, as Space does, but Space ticks only the row Command Code was told is
+  // highlighted, and none is until the cursor first moves: a Space on the row the panel opened on is lost
+  const toggles = (picked: readonly number[]) => {
+    const wanted = new Set(picked);
+    const keys: string[] = [];
+    let cursor = selectedIndex;
+    for (const index of optionRows.keys()) {
+      if (wanted.has(index) === optionRows[index]!.checked) continue;
+      keys.push(...navigationKeys(index - cursor), KEY.enter);
+      cursor = index;
+    }
+    return { keys, cursor };
+  };
   const internal: Parameters<typeof finishPrompt>[2] = {
     ...(navigation ? { nativeSteps: navigation.nativeSteps } : {}), responder: "cmd-question",
     menuLabels: [...optionRows.map((row) => row.label), customRow.label, ...(hasFinish ? [cleanLine(lines[finish]!).trim()] : [])], selectedIndex,
     checkedOptionIndices: optionRows.flatMap((row, index) => row.checked ? [index] : []), customMenuIndex: optionRows.length,
     rejectWithEscapeIndex: null,
     customSteps: (text: string, picked?: number[]) => {
-      const keys: string[] = [];
-      let cursor = selectedIndex;
-      if (multi && picked !== undefined) {
-        const wanted = new Set(picked);
-        for (const index of optionRows.keys()) {
-          if (wanted.has(index) === optionRows[index]!.checked) continue;
-          keys.push(...navigationKeys(index - cursor), KEY.space);
-          cursor = index;
-        }
-      }
+      const { keys, cursor } = multi && picked !== undefined ? toggles(picked) : { keys: [] as string[], cursor: selectedIndex };
       keys.push(...navigationKeys(optionRows.length - cursor));
       return [...keySteps(keys), { text: text.replace(/\s*\r?\n\s*/g, " ").trim() }, ...keySteps(multi ? [KEY.enter, KEY.down, KEY.enter] : [KEY.enter])];
     },
     ...(multi ? { multiSteps: (picked: number[]) => {
-      const wanted = new Set(picked);
-      const keys: string[] = [];
-      let cursor = selectedIndex;
-      for (const index of optionRows.keys()) {
-        if (wanted.has(index) === optionRows[index]!.checked) continue;
-        keys.push(...navigationKeys(index - cursor), KEY.space);
-        cursor = index;
-      }
+      const { keys, cursor } = toggles(picked);
       keys.push(...navigationKeys(optionRows.length + 1 - cursor), KEY.enter);
       return keySteps(keys);
     } } : {}),

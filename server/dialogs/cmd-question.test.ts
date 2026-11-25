@@ -59,7 +59,9 @@ describe("Command Code 1.93.3 ask_user_question", () => {
     const middle = screen("2").replace("✔ Colour | ● Sizes | ◯ Review", "● Sizes | ◯ Colour | ◯ Review").replace("  Submit", "  Next");
     const prompt = parseInteractivePrompt("cmd", middle);
     expect(prompt).toMatchObject({ multi_select: true, question: "Which sizes do you want?", can_step_next: true });
-    expect(answerKeys(prompt!, { option_indices: [1] })).toEqual([{ keys: ["down"] }, { keys: ["space"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
+    expect(answerKeys(prompt!, { option_indices: [1] })).toEqual([{ keys: ["down"] }, { keys: ["enter"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
+    // the row the panel opened on: Enter, as Command Code drops a Space there until the cursor has moved
+    expect(answerKeys(prompt!, { option_indices: [0, 2] })).toEqual([{ keys: ["enter"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }, { keys: ["down"] }, { keys: ["down"] }, { keys: ["enter"] }]);
   });
 
   it("leaves hideCustomInput panels to the terminal instead of guessing a card", () => {
