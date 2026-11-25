@@ -44,7 +44,11 @@ export function cmdQuestionFooterStart(lines: string[]): number {
 export function cmdQuestionPanelActive(lines: string[]): boolean {
   if (cmdQuestionFooterStart(lines) >= 0) return true;
   const last = findLastIndex(lines, (line) => cleanLine(line) !== "");
-  return last >= 0 && /^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[last]!);
+  if (last < 0) return false;
+  if (/^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[last]!)) return true;
+  if (!/^\s*(?:[❯›>])?\s*Submit\s*$/i.test(lines[last]!)) return false;
+  const custom = findLastIndex(lines.slice(0, last), (line) => cleanLine(line) !== "");
+  return custom >= 0 && /^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[custom]!);
 }
 
 const CMD_TAB_RE = /^[✔●◯]\s+(.+?)(?:\s+\|\s+[✔●◯]\s+.+)+$/;
