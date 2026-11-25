@@ -8,3 +8,10 @@ it("fits every chip it can, keeping room for the +N chip when some are left over
   expect(chipsThatFit([300, 100], 40, 8, 200)).toBe(1);
   expect(chipsThatFit([], 40, 8, 200)).toBe(0);
 });
+
+it("keeps room for the +N chip while more folders wait to be shown, even when every chip shown would fit", () => {
+  expect(chipsThatFit([100, 100, 100], 40, 8, 316, true)).toBe(2);
+  expect(chipsThatFit([100, 100, 100], 40, 8, 364, true)).toBe(3);
+  expect(chipsThatFit([300], 40, 8, 200, true)).toBe(1);
+  expect(chipsThatFit([], 40, 8, 200, true)).toBe(0);
+});
