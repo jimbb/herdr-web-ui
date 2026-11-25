@@ -46,7 +46,8 @@ export function resumeLine(line: string, state: { session: string | null }): str
 }
 
 export default function (cmd: ModApi): void {
-  if (process.env.HERDR_ENV !== "1") return;
+  // herdr sets HERDR_ENV in its panes, herdr-core (hc) HC_TERMINAL_ID in its terminals
+  if (process.env.HERDR_ENV !== "1" && !process.env.HC_TERMINAL_ID) return;
   const dir = join(homedir(), ".commandcode", "ovis");
   const file = join(dir, `${process.pid}.json`);
   let published: string | null = null;

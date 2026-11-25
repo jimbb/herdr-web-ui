@@ -9,6 +9,8 @@ describe("which agent a pane runs", () => {
     expect(paneAgent({ reported: "kimi-code" }, "linux")).toBe("kimi");
     // Grok Build 1.0.67 reports itself as `grok-build` (old-desktop, 2026-11-08)
     expect(paneAgent({ reported: "grok-build" }, "linux")).toBe("grok");
+    // Command Code's hc status mod reports `command-code` (herd's cmd-hc-status.ts)
+    expect(paneAgent({ reported: "command-code" }, "linux")).toBe("cmd");
   });
 
   it("prefers the report to the process in front", () => {
