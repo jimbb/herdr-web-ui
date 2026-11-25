@@ -4,12 +4,12 @@
  * moved by hand and every wait is for the answer its line names.
  */
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, openSync, closeSync, fstatSync, readFileSync, rmSync, statSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, openSync, closeSync, fstatSync, readFileSync, rmSync, statSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bounded } from "../relay/test-helpers.ts";
 import {
-  CONFIRM_MS, LOCAL_CONFIRM_FILE, LocalConfirms, desktopOwnerChannel, dropDesktopOwnerFd, peerUidInTable, openConfirmListener, peerUidOnLinux, takeDesktopOwnerFd,
+  CONFIRM_MS, LOCAL_CONFIRM_FILE, LocalConfirms, desktopOwnerChannel, dropDesktopOwnerFd, peerUidInTable, openConfirmListener, openOnDesktop, peerUidOnLinux, takeDesktopOwnerFd,
   type ScreenAction,
 } from "./local-confirm.ts";
 
@@ -366,7 +366,7 @@ test("N6: a channel that fails ends loudly and answers nothing more", async () =
 });
 
 const TCP_HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
-const tcpRow = (local: string, remote: string, uid: number) => `   0: ${local} ${remote} 01 00000000:00000000 00:00000000 00000000  ${uid}        0 1`;
+const tcpRow = (local: string, remote: string, uid: number, state = "01") => `   0: ${local} ${remote} ${state} 00000000:00000000 00:00000000 00000000  ${uid}        0 1`;
 
 test("Q20: the peer's user is the one of the exact connection, not of another loopback address on the same ports", () => {
   const listener = 0x9c40;
@@ -389,4 +389,23 @@ test("N6: a switch with no number after it leaves the next argument alone", () =
   const argv = ["serve", "--desktop-owner-fd", "--other"];
   expect(takeDesktopOwnerFd(argv)).toBeNull();
   expect(argv).toEqual(["serve", "--other"]);
+});
+
+test("Q20: only an established connection names the peer, and two exact rows name nobody", () => {
+  const hex = (port: number) => port.toString(16).toUpperCase();
+  const local = `0100007F:${hex(0xa000)}`;
+  const remote = `0100007F:${hex(0x9c40)}`;
+  expect(peerUidInTable([TCP_HEADER, tcpRow(local, remote, 2000, "06"), tcpRow(local, remote, 1000)].join("\n"), 0x9c40, 0xa000)).toBe(1000);
+  expect(peerUidInTable([TCP_HEADER, tcpRow(local, remote, 1000, "06")].join("\n"), 0x9c40, 0xa000)).toBeNull();
+  expect(peerUidInTable([TCP_HEADER, tcpRow(local, remote, 1000), tcpRow(local, remote, 2000)].join("\n"), 0x9c40, 0xa000)).toBeNull();
+});
+
+test("R8: the confirm page counts as opened only once xdg-open started; a desktop without it is told so", async () => {
+  const bin = stateDir();
+  const env = { DISPLAY: ":0", PATH: bin };
+  expect(await bounded(openOnDesktop("http://127.0.0.1:1/", env, "linux"))).toBe(false);
+  writeFileSync(join(bin, "xdg-open"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(bin, "xdg-open"), 0o755);
+  expect(await bounded(openOnDesktop("http://127.0.0.1:1/", env, "linux"))).toBe(true);
+  expect(await openOnDesktop("http://127.0.0.1:1/", {}, "linux")).toBe(false);
 });

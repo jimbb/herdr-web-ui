@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { QueueSnapshot } from "../../shared/agent-queue.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, Machine, MachineEvent, RelayPairingRequest, RemotePairingRequest } from "../../shared/machines.ts";
+import { pcHeld } from "./relay/newPcHere.ts";
+import type { DevicePairedEvent, DeviceRemovedEvent, Machine, MachineEvent, PendingKey, RelayPairingRequest, RemotePairingRequest } from "../../shared/machines.ts";
 import type { ServerMessage } from "../../shared/protocol.ts";
 import { ApiError, authenticate, fetchMachines, observePaneSessions, paneSessionEvents, paneSessionsMoving, verifySourceBoot } from "./api.ts";
 import { passingFolder, recentDirectories } from "./recent-directories.ts";
@@ -24,10 +25,15 @@ import { pruneWaitingSends } from "./sentWaiting.ts";
 import { paneLifetimes } from "./paneLifetime.ts";
 import { displayPaneTitle } from "../components/Sidebar.tsx";
 import { useHeaderConnection, type HeaderConnection } from "./headerConnection.ts";
+import { CarrierDownError } from "./transport.ts";
+import { heardAgentToolPanes } from "./agentToolPanes.ts";
+import { t } from "./i18n.ts";
 import type { usePreferencesSync } from "./preferencesSync.ts";
 import type { useAlertSignals } from "./useAlertSignals.ts";
 
 const POLL_MS = 5000;
+/** A roster read that failed only because the relay carrier is reconnecting stays quiet this long before the card. */
+export const CARRIER_GRACE_MS = 10_000;
 const STREAM_BACKSTOP_MS = 30_000;
 type RosterStreamUpdate = "opened" | "lost" | "closed" | Machine[];
 
@@ -129,6 +135,13 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
   const stream = useRef({ open: false, localConnected: false });
   const polling = useRef<((readNow: boolean) => void) | null>(null);
   const [link, setLink] = useState<RosterLink>({ open: false, before: false });
+  // reads failed on a reconnecting carrier: the header says Reconnecting, and the card waits CARRIER_GRACE_MS from
+  // the first of them (`timer` null once the card is shown); the carrier's return reads again at once
+  const carrierDown = useRef<{ timer: number | null } | null>(null);
+  const carrierBack = useCallback(() => {
+    if (carrierDown.current?.timer != null) window.clearTimeout(carrierDown.current.timer);
+    carrierDown.current = null;
+  }, []);
   const rosterConnection: HeaderConnection = useHeaderConnection({ scope: "roster", reportedBy: "roster", connected: link.open, connectedBefore: link.before, outputStopped: false });
   const onRosterStream = useCallback((update: RosterStreamUpdate) => {
     setLink((previous) => rosterLinkAfter(previous, update));
@@ -141,8 +154,9 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
     else if (update === "opened") stream.current = { open: true, localConnected: false };
     else stream.current = { open: false, localConnected: false };
     const slow = stream.current.open && stream.current.localConnected;
+    const reread = update === "opened" && carrierDown.current !== null;
     // Repeated pushed rosters must not postpone the backstop.
-    if (previous !== slow) polling.current?.(!slow && lockedRef.current !== true);
+    if (previous !== slow || reread) polling.current?.((!slow || reread) && lockedRef.current !== true);
   }, []);
   const healthFailingRef = useRef(healthFailing);
   useEffect(() => {
@@ -178,6 +192,7 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
         rosterIn();
         stateWatch.read(asked);
         setMachineRosterLoaded(true);
+        carrierBack();
         setError(null); setLocked(false);
       }, full ? (next) => {
         // A PC whose own messages keep overtaking its reads would never recover: after RECOVERY_DROPS such
@@ -204,9 +219,18 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
     }
     catch (err) {
       if (err instanceof ApiError && err.status === 401) { setLocked(true); return; }
+      // an account-joined device on a PC from before it answered this read: the roster comes over the socket alone
+      if (err instanceof ApiError && err.status === 403 && err.code === "local_only") { carrierBack(); setError(null); return; }
+      if (err instanceof CarrierDownError) {
+        carrierDown.current ??= { timer: window.setTimeout(() => {
+          if (carrierDown.current) carrierDown.current.timer = null;
+          setError(t("Can't reach the PC. Check your connection, then try again."));
+        }, CARRIER_GRACE_MS) };
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [rosterIn, reorderCoordinator]);
+  }, [rosterIn, reorderCoordinator, carrierBack]);
   const load = useCallback(() => read(false), [read]);
   loadRef.current = load;
 
@@ -262,11 +286,12 @@ export function useRosterLoader({ locked, healthFailing, rosterIn, setMachines, 
 
   useEffect(() => () => {
     if (refetchTimer.current !== null) window.clearTimeout(refetchTimer.current);
-  }, []);
+    carrierBack();
+  }, [carrierBack]);
   return { snapshotRequests, recovery, reorderCoordinator, load, scheduleRefetch, onRosterStream, rosterConnection };
 }
 
-export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, recovery, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, getTakeNotificationTargetRef }: {
+export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, locked, onRosterStream, receivePreferencesRef, snapshotRequests, recovery, onRoster, reorderCoordinator, setMachines, rosterIn, setMachineRosterLoaded, machinesRef, onPaneStatus, onPaneExited, followFocusRef, selectionRef, splitShownRef, splitRef, pendingLink, selectionHint, setSelectedPaneId, setNotificationViewTarget, setTerminalPeek, setAutoSelected, scheduleRefetch, preferencesResubscribedRef, preferencesDisconnectedRef, preferencesClosedRef, dropIn, chime, setPairedNotices, setRelayPairings, setRemotePairings, setRemovedNotices, setPendingKeys, getTakeNotificationTargetRef }: {
   machineSessions: MachineSessionRegistry;
   locked: boolean | null;
   onRosterStream: (update: RosterStreamUpdate) => void;
@@ -301,6 +326,8 @@ export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, lo
   dropIn: ReturnType<typeof useAlertSignals>["dropIn"];
   chime: ReturnType<typeof useAlertSignals>["chime"];
   setPairedNotices: Dispatch<SetStateAction<readonly DevicePairedEvent[]>>;
+  /** the devices waiting for this PC's screen (S2-34), as the PC lists them after each change */
+  setPendingKeys: (pending: readonly PendingKey[]) => void;
   setRelayPairings: Dispatch<SetStateAction<readonly RelayPairingRequest[]>>;
   setRemotePairings: Dispatch<SetStateAction<readonly RemotePairingRequest[]>>;
   setRemovedNotices: Dispatch<SetStateAction<readonly DeviceRemovedEvent[]>>;
@@ -320,9 +347,13 @@ export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, lo
       if (payload.type === "seen") { receiveSeen(payload.finishes); return; }
       if (payload.type === "agent-queue") { onAgentQueueRef.current?.(payload.queue); return; }
       if (payload.type === "device-paired") { setPairedNotices((list) => withPairedNotice(list, payload)); return; }
+      // another window of this PC saw it
+      if (payload.type === "device-paired-seen") { setPairedNotices((list) => list.filter((item) => item.event_id !== payload.event_id)); return; }
       if (payload.type === "relay-pairings") { setRelayPairings(payload.pairings); return; }
       if (payload.type === "remote-pairings") { setRemotePairings(payload.pairings); return; }
       if (payload.type === "device-removed") { setRemovedNotices((list) => withPairedNotice(list, payload)); return; }
+      if (payload.type === "pending-redemptions") { setPendingKeys(payload.pending); return; }
+      if (payload.type === "agent-tool-panes") { heardAgentToolPanes(payload); return; }
       const fresh = payload.type === "machines" ? payload.machines.filter((machine) => !kept.has(machine.id)) : [];
       const vouches = payload.type !== "machines" || kept.size === 0 || fresh.length > 0;
       if (vouches) snapshotRequests.current.invalidate();
@@ -369,7 +400,8 @@ export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, lo
         if (machine.id === "local") window.dispatchEvent(new Event("herdr-usage-changed"));
         onPaneExited(machine, message, takeNotificationTargetRef);
       }
-      if (message.type === "pane-focused" && followsHerdrFocus({
+      // C3 pin 1 (#16): herdr's focus selects nothing of a PC new in the account here
+      if (message.type === "pane-focused" && !(machine.id === "local" && pcHeld()) && followsHerdrFocus({
         enabled: followFocusRef.current, machineId: machine.id, paneId: message.pane_id, selection: selectionRef.current,
         splitOthers: splitShownRef.current ? otherTargets(splitRef.current) : [], linkPending: pendingLink.current !== null,
         busy: deviceInUse(selectionRef.current), ownMove: movingHerdrFocusOn(machine.id),
@@ -402,6 +434,7 @@ export function useRosterEvents({ onPaneMoved, onAgentQueue, machineSessions, lo
         scheduleRefetch(true);
       },
     });
-    return () => { stop(); onRosterStream("closed"); };
+    // the owner's pane list goes with the stream that brought it: a sign-out without a reload must not leave it shown
+    return () => { stop(); onRosterStream("closed"); heardAgentToolPanes({ pending: [], allowed: [] }); };
   }, [machineSessions, locked, scheduleRefetch, dropIn, chime, reorderCoordinator, onRosterStream]);
 }

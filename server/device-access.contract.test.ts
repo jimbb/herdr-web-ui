@@ -1,6 +1,6 @@
 import { expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLEAR_LEGACY_DEVICE_COOKIE, DEVICE_COOKIE, DEVICE_COOKIE_CLEARED } from "./auth.ts";
@@ -11,14 +11,17 @@ import { MachineRelay } from "./machine-relay.ts";
 import { MachineManager } from "./machines.ts";
 import { startFakePushService } from "./push.fake.ts";
 import { createServer } from "./index.ts";
+import { loadRelayIdentity } from "./relay/identity.ts";
+import { FakeAccountService } from "../shared/account-service-fake.ts";
+import { pressInto, registerSnapshotPc } from "./account/listed-pc.test-helpers.ts";
 import { workspaceCreate, workspaceClose } from "./herdr/client.ts";
 import type { DevicePairedEvent, DevicesRevokedAll, MachineEvent, ServerMessage } from "../shared/protocol.ts";
 
 const guard = { "x-herdr-machine": "1", "content-type": "application/json" };
 
-it("pairs a relay device, authenticates its key, and dispatches with the stored role", async () => {
+it.each([false, true])("pairs a relay device, authenticates its key, and dispatches with the stored role (Step 2: %s)", async accountOpensAll => {
   const stateDir = mkdtempSync(join(tmpdir(), "ovis-relay-contract-"));
-  const app = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "configured", tailscaleOwner: null, machines: false, sidecar: false });
+  const app = createServer({ port: 0, hostname: "127.0.0.1", stateDir, token: "configured", tailscaleOwner: null, machines: false, sidecar: false, accountOpensAll });
   try {
     const store = app.context.services.devices;
     const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
@@ -38,8 +41,15 @@ it("pairs a relay device, authenticates its key, and dispatches with the stored 
       expect(health?.status).toBe(200);
       expect(await health?.json()).toMatchObject({ auth: { via: "relay", role }, security: { observed_ingress: "relay", pairing_gate: "closed" } });
       const listing = await handleRequest(new Request("https://relay.ovis.invalid/api/devices"), ctx);
-      expect(await listing?.json()).toEqual({ devices: [expect.objectContaining({ id: device.id, role, current: true, via_relay: true })] });
+      const roster = await listing?.json() as { devices: { remote_revoke?: string }[] };
+      expect(roster).toEqual({ devices: [expect.objectContaining({ id: device.id, role, current: true, via_relay: true })] });
+      expect(roster.devices[0]).not.toHaveProperty("remote_revoke");
       if (role === "watch") {
+        for (const prefix of ["/api", "/api/machines/other"]) for (const action of ["cancel", "release"]) {
+          const res = await handleRequest(new Request(`https://relay.ovis.invalid${prefix}/pane/turn/${action}`, { method: "POST", headers: guard, body: "{}" }), ctx);
+          expect(res?.status).toBe(403);
+          expect(await res?.json()).toMatchObject({ error: { code: "read_only" } });
+        }
         const mutation = await handleRequest(new Request("https://relay.ovis.invalid/api/preferences", { method: "PUT", headers: guard, body: "{}" }), ctx);
         expect(mutation?.status).toBe(403);
         expect(await mutation?.json()).toMatchObject({ error: { code: "read_only" } });
@@ -146,6 +156,28 @@ it("keeps the gate closed, and a device paired in the install's other state dir 
   }
 });
 
+it("takes nothing from another PC's state dir, Step 2 off too: a device paired to that PC is not let in here", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-device-access-"));
+  const [active, sibling] = [join(root, "herdr-web-ui"), join(root, "ovis")];
+  for (const dir of [active, sibling]) mkdirSync(dir);
+  expect(loadRelayIdentity(active).server_id).not.toBe(loadRelayIdentity(sibling).server_id);
+  const token = "6".repeat(64);
+  const created = "2026-10-25T05:20:00.000Z";
+  writeFileSync(join(sibling, "devices.json"), JSON.stringify({ gate_closed_at: created, devices: [{ id: "0123456789abcdef", label: "Phone", role: "drive", token_hash: createHash("sha256").update(token).digest("hex"), created_at: created, last_seen_at: null }] }));
+  const server = createServer({ port: 0, stateDir: active, siblingStateDir: sibling, tailscaleOwner: null, accountOpensAll: false });
+  const base = `http://127.0.0.1:${server.port}`;
+  const remote = { "x-forwarded-for": "100.64.0.9" };
+  try {
+    const paired = await (await fetch(`${base}/api/health`, { headers: { ...remote, cookie: `${DEVICE_COOKIE}=${token}` } })).json() as { auth: { via?: string } };
+    expect(paired.auth.via).not.toBe("device");
+    const merged = join(active, "devices.json");
+    expect(existsSync(merged) ? readFileSync(merged, "utf8") : "").not.toContain("0123456789abcdef");
+  } finally {
+    server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("serves the state dir it merged into, even when the merge gave the old dir files of its own", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-access-"));
   const [legacy, next] = [join(root, "herdr-web-ui"), join(root, "ovis")];
@@ -235,6 +267,63 @@ async function openEvents(base: string, headers: Record<string, string>, signal:
   const setCookies = response.headers.getSetCookie();
   return { events, next, ended, setCookies, cookie: setCookies[0]?.split(";")[0] ?? null };
 }
+
+it("a join waits on the PC until one window sees it: told to a window opened later, after a restart too, never to the device itself", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ovis-waiting-join-"));
+  const start = () => createServer({ port: 0, hostname: "127.0.0.1", stateDir: root, token: "", tailscaleOwner: null, sidecar: false });
+  // each run's streams end before its server stops: a server stopping under a stream cuts it
+  let abort = new AbortController();
+  let server = start();
+  const restart = () => { abort.abort(); server.stop(); abort = new AbortController(); server = start(); };
+  const base = () => `http://127.0.0.1:${server.port}`;
+  const joined = (event: MachineEvent): event is DevicePairedEvent => event.type === "device-paired" && event.label === "Phone";
+  let theme = 0;
+  // the stream is ordered and a join waiting is told as the window subscribes: after this barrier, nothing more comes
+  const settled = async (window: Awaited<ReturnType<typeof openEvents>>) => {
+    const value = `barrier-${++theme}`;
+    const heard = window.next((event) => event.type === "preferences" && event.preferences.settings["theme"] === value, "the barrier");
+    expect((await fetch(`${base()}/api/preferences`, { method: "PUT", headers: guard, body: JSON.stringify({ settings: { theme: value } }) })).status).toBe(200);
+    await heard;
+  };
+  try {
+    const store = server.context.services.devices;
+    const paired = store.pair(store.startPairing().code, "Phone", "drive");
+    if (!paired) throw new Error("Expected pairing");
+    store.match(paired.token);
+    // nobody had a window open when the phone joined, and the PC restarted since
+    restart();
+    const first = await openEvents(base(), {}, abort.signal);
+    const told = await first.next(joined, "a window opened later hears of the join") as DevicePairedEvent;
+    const own = await openEvents(base(), { cookie: `${DEVICE_COOKIE}=${paired.token}` }, abort.signal);
+    await settled(own);
+    expect(own.events.filter(joined)).toEqual([]);
+    // a device paired after the join never hears of it, so it cannot mark it seen for the others
+    const running = server.context.services.devices;
+    const tablet = running.pair(running.startPairing().code, "Tablet", "drive");
+    if (!tablet) throw new Error("Expected pairing");
+    running.match(tablet.token);
+    const tabletCookie = `${DEVICE_COOKIE}=${tablet.token}`;
+    const later = await openEvents(base(), { cookie: tabletCookie }, abort.signal);
+    await settled(later);
+    expect(later.events.filter(joined)).toEqual([]);
+    const refused = await fetch(`${base()}/api/devices/joins/seen`, { method: "POST", headers: { ...guard, cookie: tabletCookie }, body: JSON.stringify({ event_id: told.event_id }) });
+    expect(refused.status).toBe(404);
+    const second = await openEvents(base(), {}, abort.signal);
+    await second.next(joined, "another window hears of it too");
+    const gone = second.next((event) => event.type === "device-paired-seen" && event.event_id === told.event_id, "seen in the first window");
+    const seen = await fetch(`${base()}/api/devices/joins/seen`, { method: "POST", headers: guard, body: JSON.stringify({ event_id: told.event_id }) });
+    expect(await seen.json()).toEqual({ seen: true });
+    await gone;
+    restart();
+    const afterRestart = await openEvents(base(), {}, abort.signal);
+    await settled(afterRestart);
+    expect(afterRestart.events.filter(joined)).toEqual([]);
+  } finally {
+    abort.abort();
+    server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 for (const action of ["revoke", "role change"] as const) {
 it(`keeps native WS and SSE open on rename until ${action}`, async () => {
@@ -344,14 +433,18 @@ it("revocation closes an active device's terminal and roster stream without disc
   }
 }, 10_000);
 
-it("revoking every device closes each paired client's streams at once, voids every credential, and leaves the token, this PC and the Tailscale login in, also after a restart", async () => {
+it.each([false, true])("revoking every device closes each paired client's streams at once, voids every credential, and leaves the token, this PC and the Tailscale login in, also after a restart (Step 2: %s)", async accountOpensAll => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-revoke-all-"));
   const OWNER = "owner@example.com";
   // a device that only watches: issued through the store itself, since the pairing route pairs drivers only
   const seed = new DeviceStore(root);
   const watch = seed.pair(seed.startPairing().code, "Watch", "watch")!;
   seed.match(watch.token);
-  const options = { port: 0, stateDir: root, token: "test-revoke-all", tailscaleOwner: OWNER } as const;
+  const service = new FakeAccountService();
+  service.opensAll = true;
+  if (accountOpensAll) await registerSnapshotPc(service, { stateDir: root });
+  const options = { port: 0, stateDir: root, token: "test-revoke-all", tailscaleOwner: OWNER, accountOpensAll,
+    accountService: { url: "https://account.test", fetch: service.fetch } } as const;
   let server = createServer(options);
   let base = `http://127.0.0.1:${server.port}`;
   const admin = { ...guard, authorization: "Bearer test-revoke-all" };
@@ -386,8 +479,10 @@ it("revoking every device closes each paired client's streams at once, voids eve
     const cookieD = await pair("D");
     const toldD = await Promise.all(heardD);
     expect(toldD.every((event) => event.type === "device-paired" && event.event_id === (toldD[0] as DevicePairedEvent).event_id)).toBe(true);
+    // a device opens on the joins nobody has seen yet that came after it was paired (T57), never its own, then hears each
+    // new one: C, paired after A and B, hears only D (Watch was paired before the server ran, so no join of it waits)
     expect(streamC.events.filter((event) => event.type === "device-paired").map((event) => (event as DevicePairedEvent).label)).toEqual(["D"]);
-    expect(streamA.events.filter((event) => event.type === "device-paired").map((event) => (event as DevicePairedEvent).label)).toEqual(["C", "D"]);
+    expect(streamA.events.filter((event) => event.type === "device-paired").map((event) => (event as DevicePairedEvent).label)).toEqual(["B", "C", "D"]);
     const { devices } = await (await fetch(`${base}/api/devices`, { headers: admin })).json() as { devices: { id: string; label: string }[] };
     expect(devices.map((device) => device.label).sort()).toEqual(["A", "B", "C", "D", "Watch"]);
 
@@ -414,9 +509,17 @@ it("revoking every device closes each paired client's streams at once, voids eve
     expect(a.socket.readyState).toBe(WebSocket.OPEN);
     for (const cookie of [cookieA, cookieB, cookieC, cookieD, watchCookie]) expect((await fetch(`${base}/api/session`, { headers: { ...stranger, cookie } })).status).toBe(200);
 
-    // the revocation, from a paired device that can drive: everything paired goes, its own pairing included
+    // Only a bound Step 2 PC reserves global removal to the PC.
+    const driver = { ...guard, ...stranger, cookie: cookieD };
+    if (accountOpensAll) {
+      await pressInto(service, server.context.services);
+      expect(await server.context.services.accountMailbox.readSnapshot()).toMatchObject({ committed: true });
+      const refused = await revokeAll(driver);
+      expect(refused.status).toBe(403);
+      expect(await refused.json()).toMatchObject({ error: { code: "local_required" } });
+    }
     const closures = Promise.all([a.closed, b.closed, streamA.ended, streamC.ended]);
-    const revoked = await revokeAll({ ...guard, ...stranger, cookie: cookieD });
+    const revoked = await revokeAll(accountOpensAll ? admin : driver);
     expect(revoked.status).toBe(200);
     expect((await revoked.json()) as DevicesRevokedAll).toEqual({ revoked: 5 });
     expect(revoked.headers.getSetCookie()).toEqual([DEVICE_COOKIE_CLEARED, CLEAR_LEGACY_DEVICE_COOKIE]);
@@ -548,8 +651,18 @@ it("revoking every device closes relayed remote terminals through /ws?machine_id
 
 it("a revocation of every device that cannot be persisted changes nothing, and once it can, every credential issued before is void", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-revoke-all-write-"));
+  // Step 1 changes nothing on a failed registry write; Step 2 fails closed on a failed durable deny.
   const options = { port: 0, stateDir: root, token: "", tailscaleOwner: null } as const;
-  let server = createServer(options);
+  const startOptedOut = () => {
+    const previous = process.env["OVIS_ACCOUNT_OPENS_ALL"];
+    process.env["OVIS_ACCOUNT_OPENS_ALL"] = "0";
+    try { return createServer(options); }
+    finally {
+      if (previous === undefined) delete process.env["OVIS_ACCOUNT_OPENS_ALL"];
+      else process.env["OVIS_ACCOUNT_OPENS_ALL"] = previous;
+    }
+  };
+  let server = startOptedOut();
   let base = `http://127.0.0.1:${server.port}`;
   const forwarded = { "x-forwarded-for": "198.51.100.24" };
   const abort = new AbortController();
@@ -598,7 +711,7 @@ it("a revocation of every device that cannot be persisted changes nothing, and o
     abort.abort();
     await owner.ended;
     server.stop();
-    server = createServer(options);
+    server = startOptedOut();
     base = `http://127.0.0.1:${server.port}`;
     expect(JSON.parse(readFileSync(join(root, "devices.json"), "utf8"))).toEqual({ gate_closed_at: expect.any(String), devices: [] });
     expect((await session(forwarded)).status).toBe(401);
@@ -995,15 +1108,19 @@ it("revoking a paired device removes its persistent push subscription", async ()
   } finally { fake.stop(); server.stop(); rmSync(root, { recursive: true, force: true }); }
 });
 
-it("returns an error when revocation cannot be persisted, then allows a successful retry", async () => {
+it.each([
+  ["single device", true], ["all devices", true], ["single device", false], ["all devices", false],
+] as const)("returns an error when revocation of %s cannot be persisted, then allows a retry (Step 2: %s)", async (target, accountOpensAll) => {
   const root = mkdtempSync(join(tmpdir(), "herdr-device-write-"));
   const store = new DeviceStore(root);
   const paired = store.pair(store.startPairing().code, "Phone", "drive")!;
   store.match(paired.token);
-  const server = createServer({ port: 0, stateDir: root, token: "test-write", tailscaleOwner: null, machines: false });
+  const server = createServer({ port: 0, stateDir: root, token: "test-write", tailscaleOwner: null, machines: false, accountOpensAll });
   const base = `http://127.0.0.1:${server.port}`;
   try {
-    const revoke = () => fetch(`${base}/api/devices/${paired.device.id}`, { method: "DELETE", headers: { ...guard, authorization: "Bearer test-write" } });
+    const revoke = (headers: Record<string, string> = {}) => fetch(`${base}/api/devices/${target === "all devices" ? "revoke-all" : paired.device.id}`, {
+      method: target === "all devices" ? "POST" : "DELETE", headers: { ...guard, authorization: "Bearer test-write", ...headers },
+    });
     const fsync = failFileSync();
     try {
       const failed = await revoke();
@@ -1011,7 +1128,12 @@ it("returns an error when revocation cannot be persisted, then allows a successf
       expect(await failed.json()).toMatchObject({ error: { code: "internal_error" } });
       expect(new DeviceStore(root).match(paired.token)).not.toBeNull();
     } finally { fsync.mockRestore(); }
-    expect((await revoke()).status).toBe(204);
+    if (accountOpensAll) {
+      const remote = await revoke({ "x-forwarded-for": "100.64.0.9" });
+      expect(remote.status).toBe(403);
+      expect(await remote.json()).toMatchObject({ error: { code: "strict" } });
+    }
+    expect((await revoke()).status).toBe(target === "all devices" ? 200 : 204);
     expect(new DeviceStore(root).match(paired.token)).toBeNull();
   } finally { server.stop(); rmSync(root, { recursive: true, force: true }); }
 });

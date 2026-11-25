@@ -76,6 +76,7 @@
 }
 
 .account-approval-ask {
+  overflow-wrap: anywhere;
   margin: 0 0 var(--space-2);
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
@@ -113,6 +114,11 @@
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+/* what to do first on the new device, under the numbers */
+.account-approval-choices + .account-approval-hint {
+  margin: var(--space-3) 0 0;
+}
+
 .account-approval-error {
   margin: var(--space-3) 0 0;
   font-size: var(--fs-sm);
@@ -124,6 +130,10 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--space-2);
   margin-top: var(--space-5);
+}
+
+.account-approval-actions > :only-child {
+  grid-column: 1 / -1;
 }
 
 .account-approval-note {

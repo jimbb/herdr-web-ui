@@ -9,7 +9,21 @@ import { PreferenceStore } from "./preferences.ts";
 import { privateStateFs, writePrivateState } from "./private-state.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { createPushService, PUSH_EXTRA_KEYS } from "./push.ts";
-import { mergeRegistries, mergeSiblingState, siblingStateDir } from "./state-merge.ts";
+import { mergeRegistries, mergeSiblingState, recordedLegacyCredential, siblingStateDir } from "./state-merge.ts";
+
+it("settled sibling twins share membership and the signed add only for the reconciled binding", () => {
+  const plain: StoredDevice = { id: "a".repeat(16), role: "watch", label: "Phone", token_hash: "t", relay_public_key: "k",
+    created_at: "2026-11-15T00:00:00.000Z", last_seen_at: null };
+  const marked = { ...plain, account: "acct_old", account_add: { account: "acct_old" }, linked_at: plain.created_at, member_approved_in: "acct_old" };
+  for (const account of [null, "acct_new", "acct_old"]) for (const [a, b] of [[plain, marked], [marked, plain]] as const) {
+    const rules = { boundAccount: account, dropConflictingKeys: true };
+    const [row] = mergeRegistries({ devices: [a], gate_closed_at: null }, { devices: [b], gate_closed_at: null }, { own: null, other: null }, undefined, rules).devices;
+    expect(row?.token_hash).toBe(plain.token_hash);
+    expect([row?.account, row?.linked_at, row?.account_add]).toEqual(account === "acct_old"
+      ? [marked.account, marked.linked_at, marked.account_add] : [undefined, undefined, undefined]);
+    if (account !== "acct_old") expect(row?.member_approved_in).toBeUndefined();
+  }
+});
 
 const roots: string[] = [];
 const fakes: FakePushService[] = [];
@@ -58,6 +72,43 @@ const writeJson = (path: string, value: unknown, mtime?: Date) => {
 };
 
 describe("paired devices of the install's other state dir", () => {
+  it("without a shared identity a merge keeps only surviving, previously witnessed credentials", () => {
+    const { active, sibling } = install();
+    const kept = device("a"), removed = device("b"), added = device("c");
+    writeDevices(active, []);
+    writeDevices(sibling, [kept, removed]);
+    expect(mergeSiblingState(active, sibling).devicesBlocked).toBeNull();
+    const first = mergeSiblingState(active, sibling, undefined, { dropConflictingKeys: true, sharedLegacyIdentity: "ab".repeat(16) });
+    expect([first.legacyCredential?.(kept), first.legacyCredential?.(removed)]).toEqual([true, true]);
+
+    writeDevices(sibling, [kept, added]);
+    const next = mergeSiblingState(active, sibling, undefined, { dropConflictingKeys: true });
+    expect(next.devicesBlocked).toBeNull();
+    expect(ids(active)).toEqual(["a", "c"]);
+    const witnessed = recordedLegacyCredential(active);
+    expect([kept, removed, added].map(row => witnessed?.(row) ?? false)).toEqual([true, false, false]);
+  });
+
+  it("flag off: twins keep their local holds and a newly imported held row stays out", () => {
+    const { active, sibling } = install();
+    const twin = device("a");
+    const held = "b".repeat(32);
+    const incoming = { ...device("b"), held };
+    const conflict = device("c");
+    writeDevices(active, [twin, { ...conflict, held }]);
+    writeDevices(sibling, [{ ...twin, held }, incoming, { ...conflict, token_hash: hash("other-c") }]);
+    expect(mergeSiblingState(active, sibling).devicesBlocked).toBeNull();
+    const local = new DeviceStore(active);
+    expect(local.sessionRow(twin.id)?.role).toBe("drive");
+    const other = new DeviceStore(sibling);
+    expect(other.sessionRow(twin.id)).toBeNull();
+    expect(other.match("token-c")).toBeNull();
+    expect(other.match("other-c")?.id).toBe(conflict.id);
+    expect(local.list(null).map(row => row.id)).toContain(incoming.id);
+    expect(local.match("token-b")).toBeNull();
+    expect(registry(active).devices.find(row => row.id === incoming.id)?.held).toBe(held);
+  });
+
   it("are all kept at the first merge, the gate closed from the earliest evidence, both dirs ending alike", () => {
     const { active, sibling } = install();
     writeDevices(active, [device("a", "2026-10-25T05:22:00.000Z")]);
@@ -65,7 +116,11 @@ describe("paired devices of the install's other state dir", () => {
     const before = readFileSync(join(active, "devices.json"), "utf8");
     expect(mergeSiblingState(active, sibling, at(0)).devicesBlocked).toBeNull();
     expect(ids(active)).toEqual(["a", "b"]);
-    expect(registry(active)).toEqual(registry(sibling));
+    // each dir marks the rows it only copied (imported): a dir's own word, the rest alike (P22)
+    const alike = (dir: string) => ({ ...registry(dir), devices: registry(dir).devices.map(({ imported: _copied, ...device }) => device) });
+    expect(alike(active)).toEqual(alike(sibling));
+    expect(registry(active).devices.map((d) => d.imported === true)).toEqual([false, true]);
+    expect(registry(sibling).devices.map((d) => d.imported === true)).toEqual([true, false]);
     expect(registry(active).gate_closed_at).toBe("2026-10-25T05:19:00.000Z");
     // the device paired in the other dir gets in with its own cookie
     expect(new DeviceStore(active).match("token-b")?.id).toBe(device("b").id);

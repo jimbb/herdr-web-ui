@@ -49,6 +49,17 @@ when the Ovis pages have it (Korean, Japanese, Chinese; `src/text.ts`), English 
   default browser. A blank window a page opens for a sign-in sends its address to the default
   browser and closes. Only the microphone (dictation, never the camera), the clipboard,
   notifications and full screen are granted, and only to the server's own pages.
+- **Browser for links** (Settings → Chat → Files, system default unless chosen): a web link the
+  page opens (`kind` link in `src/lib/externalLink.ts`, through the `ovisBrowsers` bridge) opens in
+  the browser chosen there; sign-ins, Ovis pages and mailto stay with the default browser.
+  `src/browsers.ts` lists the browsers: Linux's `.desktop` files that take https, Windows'
+  `StartMenuInternet` clients, the apps a Mac's LaunchServices opens https with, and agent-browser
+  when its program is on the PC (headed, in a session `ovis-links` of its own). A page names one by
+  its id, and only the server's own page (its main frame, by its real origin) may ask; the program
+  runs without a shell, the address as one argument. A registration that names a shell or another
+  interpreter, or puts the address inside a larger or quoted argument, is not offered. When the chosen browser
+  is gone or fails at once, the default browser opens the link and a notification says so. The
+  choice is kept in `<user data>/link-browser.json`.
 - **Links to a pane**: another program on the PC shows a pane in the window, instead of a browser
   tab, with an `ovis://open` link: `ws` (the workspace's id), `pane`, and optionally `view`
   (`terminal` or `chat`) and `machine` (another PC), as the server's own deep links name them. The
@@ -175,9 +186,16 @@ A downloaded update says so, in three places:
   may be what a server that cannot start needs. A window a page opens has no line.
 - **Restart to Update** in the tray, as long as the update waits.
 
-The line is drawn by the pages, from what the app's preload tells them (`ovisUpdate`): the
-downloaded version and whether its line was closed. Only the connection screen and the server's
-own pages are answered.
+**Settings → About** in the app's window shows the app's own version on the Ovis row, with
+**Check for updates**: it checks now, the same check the hourly one runs (one at a time), and
+says how it goes there: checking, up to date, the version it downloads and how far, then
+**Restart to Update** once the app holds it, or the error in one line. A build that does not
+update itself says so instead. A browser on the app's server keeps the sentence that updates come
+with the app.
+
+The line and About's row are drawn by the pages, from what the app's preload tells them
+(`ovisUpdate`): the downloaded version and whether its line was closed, and the app's version and
+where its check stands. Only the connection screen and the server's own pages are answered.
 
 On Linux the AppImage replaces itself, so one kept in a folder the user cannot write (under
 `/opt`, say) does not update itself: the log says why its updates are off. A .deb install
@@ -212,6 +230,13 @@ pins again and unpacks them afresh. It also adds the release's Rust PTY host
 by `package.json` was built from this checkout's PTY host sources, as on a release tag; otherwise
 the server uses Node for the few things that need a PTY host of its own, where the PC has Node. `bun run start` then runs the app from `stage/`
 without packaging it. Nothing downloaded is committed.
+
+On macOS, run `OVIS_BUILD_STAGING=1 bun run dist` for a staging preview. If you stage and package
+separately, set `OVIS_BUILD_STAGING=1` on the `package` step. The packaged app opens the staging
+account service and relay without a launcher script. Its default home is `~/.ost` and its profile
+is `~/.ost/app`. If the core socket path would be too long, both move under `/tmp/ost-<uid>`.
+Environment overrides and `--user-data-dir` still take precedence. The login `HOME` by itself
+is not a home override. Packaging without the switch leaves out the staging marker.
 
 To try it without touching your own hc core or Ovis state, give it a fresh user data folder and hc
 session:
@@ -251,7 +276,8 @@ bun scripts/e2e.ts --update --from-tray       # the same, restarting from the tr
 
 It covers the first launch (connection screen, then Ovis), a terminal and an agent pane (a
 stand-in `claude`) in the app's core, quit and relaunch (the terminals keep running, the address
-stays), the tray's items, a killed app (the next start ends the server left behind) and, with
+stays), the tray's items, Browser for links on Linux (a browser of the run's own is listed, chosen
+and given a link as one argument), a killed app (the next start ends the server left behind) and, with
 `--update`, the app's updates: an AppImage in a folder that cannot be written keeps them off; a
 downloaded update's one notification and that notification's click, its line in the window and
 on the connection screen, a later check that leaves the held version alone, the downloaded file

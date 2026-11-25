@@ -1,12 +1,16 @@
+import { join } from "node:path";
+import { AcpChildren } from "../acp/children.ts";
 import { chmodSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { startHerdrCoreAdapter, type HerdrCoreAdapter } from "./adapter.ts";
-import { HcConnection, spawnHcConnect } from "./connection.ts";
+import { HcConnection } from "./connection.ts";
+import { spawnHcConnect } from "./hc-connect.ts";
 import { MachineScopedConnection } from "./machine-scope.ts";
 import { SeenMarker } from "./seen-label.ts";
 import { coreStartEnv, terminalEnvFor, userTerminalEnv } from "./terminal-env.ts";
 import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
-import { BUNDLED_PROBE_TIMEOUT_MS, coreSocket, findHc, type FoundHc } from "./discovery.ts";
+import { coreSocket } from "./core-socket.ts";
+import { BUNDLED_PROBE_TIMEOUT_MS, findHc, type FoundHc } from "./discovery.ts";
 import { adapterAddress } from "./pipe.ts";
 import { opencodeDatabasePath, opencodeSessionsTitled } from "../opencode.ts";
 import { HERDR_CORE, serveRuntime } from "../runtime/capabilities.ts";
@@ -108,6 +112,12 @@ function coreAnswers(path: string): Promise<boolean> {
 /** HERDR_SOCKET as this process had it before startRuntime pointed it at the adapter (null until then): a core `hc connect` starts hands its env to every pane */
 let herdrSocketBefore: { HERDR_SOCKET: string | undefined } | null = null;
 let adapterSocket: string | null = null;
+let children: AcpChildren | null = null;
+
+/** The registry of this runtime only, never a terminal with the same address on another core. */
+export function coreAcp(): AcpChildren | null {
+  return process.env["HERDR_SOCKET"] === adapterSocket ? children : null;
+}
 
 let terminalEnvironment: Record<string, string> = {};
 let terminalEnvFn: (() => Promise<Record<string, string>>) | null = null;
@@ -183,17 +193,21 @@ export async function startRuntime(stateDir: string, find: (onRefused?: (bin: st
   if (coreRuns) void reading.then((env) => { if (connection === hc) terminalEnvironment = env; });
   // on Windows the pipe is named after the folder itself: a junction or a short (8.3) spelling of it names the same pipe
   terminalEnvFn = hcMachine() !== null ? null : terminalEnvFor(hc, reading, hcEnv() ?? process.env);
+  const acp = hcMachine() === null ? new AcpChildren(join(stateDir, "acp"), { hc }) : null;
   const adapter = await startHerdrCoreAdapter(hc, adapterAddress(unix ? stateDir : realpathSync.native(stateDir), platform), (address, turn, labels) => coreSeenMarker().observe(address, turn, labels),
     // another machine's OpenCode keeps its sessions there: none of its panes is bound to one here
-    hcMachine() !== null ? { otherMachine: true } : { opencodeTitled: (title) => opencodeSessionsTitled(opencodeDatabasePath(), title), terminalEnv: terminalEnvFn! });
+    hcMachine() !== null ? { otherMachine: true } : { acp, opencodeTitled: (title) => opencodeSessionsTitled(opencodeDatabasePath(), title), terminalEnv: terminalEnvFn! });
   if (unix) chmodSync(adapter.socketPath, 0o600);
   if (herdrSocketBefore === null || process.env["HERDR_SOCKET"] !== adapterSocket) herdrSocketBefore = { HERDR_SOCKET: process.env["HERDR_SOCKET"] };
   adapterSocket = adapter.socketPath;
+  children = acp;
   process.env["HERDR_SOCKET"] = adapter.socketPath;
   serveRuntime(HERDR_CORE);
   return {
     socketPath: adapter.socketPath,
     stop: () => {
+      children?.close();
+      children = null;
       adapter.stop();
       hc.close();
       connection = null;

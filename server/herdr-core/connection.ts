@@ -11,9 +11,6 @@
  * own, which carries the stream (raw terminal bytes, or one JSON-RPC notification per line).
  */
 
-import { homedir } from "node:os";
-import { liveSessionsRefused, sameSocket } from "../herdr/client.ts";
-import { coreSocket } from "./discovery.ts";
 import type { HcMethod, HcMethods } from "./hc-api.generated.ts";
 
 export type HcStreamMethod = "terminal.attach" | "events.subscribe";
@@ -51,6 +48,9 @@ export class HcError extends Error {
     this.kind = kind;
   }
 }
+
+/** An error answer from the core, rather than a local failure to receive the answer. */
+export class HcReplyError extends HcError {}
 
 export function encodeFrame(channel: number, kind: number, payload: Uint8Array | string): Uint8Array {
   const body = typeof payload === "string" ? new TextEncoder().encode(payload) : payload;
@@ -151,50 +151,6 @@ export interface HcTransport {
   kill: () => void;
 }
 
-/** Whether hc in `env` would reach the user's default core: the one this process's environment, or its owner's home, names when no HC_SOCKET or HC_SESSION does. */
-function userCore(env: Record<string, string | undefined>): boolean {
-  const unnamed = { ...process.env, HC_SOCKET: undefined, HC_SESSION: undefined };
-  const defaults = [coreSocket({ env: unnamed }).path, coreSocket({ env: unnamed, home: homedir() }).path].map(sameSocket);
-  return defaults.includes(sameSocket(coreSocket({ env }).path));
-}
-
-/**
- * This server's own variables (its port and address, OVIS_* settings and tokens, the plugin launch's):
- * a core that `hc connect` starts keeps its environment for every pane, where a dev server would take
- * Ovis's PORT. So is the herdr pane Ovis was started from (HERDR_ENV, its pane, tab, workspace and
- * socket): an agent in a core's pane would take that pane's reports (#3260). The rest is the user's
- * (LANG, SHELL, SSH_AUTH_SOCK, Windows' own) and stays.
- */
-export const SERVER_ENV = /^(?:PORT|HOST|OVIS_.*|HERDR_WEB_.*|HERDR_PLUGIN_.*|HERDR_(?:ENV|PANE_ID|TAB_ID|WORKSPACE_ID|SOCKET_PATH|AGENT|BIN_PATH))$/i;
-
-/** `hc connect` as a child process (in `env`, else this process's, either without SERVER_ENV); a program that cannot be started is an HcError (`closed`). */
-export function spawnHcConnect(bin: string, env?: Record<string, string | undefined>): HcTransport {
-  if (bin === "/dev/null/herdr-core-moved") throw new HcError("closed", "herdr-core moved (an update?), and Ovis is looking for it again: try again in a moment");
-  // a process that asked for an isolated herdr never reaches the user's default core, however it is named
-  if (liveSessionsRefused(process.env) && userCore(env ?? process.env)) {
-    throw new HcError("live_core_refused", "HERDR_TEST_SESSION is set, but hc would reach the user's own herdr-core: give it HC_SOCKET or an HC_SESSION of its own, or set OVIS_ALLOW_LIVE_HERDR=1");
-  }
-  let child: Bun.Subprocess<"pipe", "pipe", "ignore">;
-  try {
-    const hcEnv = Object.fromEntries(Object.entries(env ?? process.env).filter((entry): entry is [string, string] => entry[1] !== undefined && !SERVER_ENV.test(entry[0])));
-    child = Bun.spawn([bin, "connect"], { stdin: "pipe", stdout: "pipe", stderr: "ignore", env: hcEnv });
-  } catch (error) {
-    throw new HcError("closed", `hc could not be started (${bin}): ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return {
-    readable: child.stdout,
-    write: (bytes) => {
-      try {
-        child.stdin.write(bytes);
-        Promise.resolve(child.stdin.flush()).catch(() => {});
-      } catch {
-      }
-    },
-    exited: child.exited,
-    kill: () => child.kill(),
-  };
-}
-
 interface Line {
   transport: HcTransport;
   hello: Promise<HelloInfo>;
@@ -210,24 +166,41 @@ interface Line {
 /** What the core answered hello with: what it can do is read from `methods` and `features`, never from `version`. */
 export interface HelloInfo { version: string; core: { id: string; name: string }; methods: string[]; features: string[] }
 
+/** What an HcConnection may be told beyond its transport; without them it keeps its defaults. */
+export interface HcConnectionOptions {
+  /** how long hello and each call wait for hc (default 10 s); a call's own `timeoutMs` still wins */
+  timeoutMs?: number;
+  /**
+   * told once per line, first, when the line ends: the kind it ended for (`closed`, `timeout`,
+   * `bad_frame`, `bad_hello`), before its waiting calls are failed and its channels hear `connection_lost`
+   */
+  onEnd?: (kind: string, message: string) => void;
+}
+
 export class HcConnection {
   private line: Line | null = null;
   private nextId = 1;
   private readonly spawn: () => HcTransport;
+  private readonly timeoutMs: number;
+  private readonly helloTimeoutMs: number;
+  private readonly onEnd: ((kind: string, message: string) => void) | undefined;
 
-  constructor(spawn: () => HcTransport) {
+  constructor(spawn: () => HcTransport, options: HcConnectionOptions = {}) {
     this.spawn = spawn;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.helloTimeoutMs = options.timeoutMs ?? HELLO_TIMEOUT_MS;
+    this.onEnd = options.onEnd;
   }
 
   async hello(): Promise<HelloInfo> {
     return this.current().hello;
   }
 
-  call<M extends HcMethod>(method: M, params: HcMethods[M]["params"], timeoutMs = DEFAULT_TIMEOUT_MS): Promise<HcMethods[M]["result"]> {
+  call<M extends HcMethod>(method: M, params: HcMethods[M]["params"], timeoutMs = this.timeoutMs): Promise<HcMethods[M]["result"]> {
     return this.request<HcMethods[M]["result"]>(method, { ...params }, timeoutMs);
   }
 
-  async open<M extends HcStreamMethod>(method: M, params: HcMethods[M]["params"], handlers: ChannelHandlers, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<{ result: HcMethods[M]["result"]; channel: Channel }> {
+  async open<M extends HcStreamMethod>(method: M, params: HcMethods[M]["params"], handlers: ChannelHandlers, timeoutMs = this.timeoutMs): Promise<{ result: HcMethods[M]["result"]; channel: Channel }> {
     const line = this.current();
     const result = await this.request<HcMethods[M]["result"]>(method, { ...params }, timeoutMs, handlers, line);
     // framed mode always answers with a channel (only plain mode's subscribe has none)
@@ -336,7 +309,7 @@ export class HcConnection {
       helloFailed(new HcError(kind, message));
       this.end(line, kind, message);
     };
-    const helloTimer = setTimeout(() => fail("timeout", `hc connect did not answer hello within ${HELLO_TIMEOUT_MS}ms`), HELLO_TIMEOUT_MS);
+    const helloTimer = setTimeout(() => fail("timeout", `hc connect did not answer hello within ${this.helloTimeoutMs}ms`), this.helloTimeoutMs);
     void hello.then(() => clearTimeout(helloTimer), () => clearTimeout(helloTimer));
     const readFrame = makeFrameReader((frame) => this.onFrame(line, frame), (reason) => this.end(line, "bad_frame", `hc sent an invalid frame (${reason})`));
     void (async () => {
@@ -425,7 +398,7 @@ export class HcConnection {
       const error = message.error;
       const data = "data" in error && typeof error.data === "object" && error.data !== null ? error.data : null;
       const kind = data && "kind" in data && typeof data.kind === "string" ? data.kind : "error";
-      call.reject(new HcError(kind, "message" in error && typeof error.message === "string" ? error.message : "hc refused the call"));
+      call.reject(new HcReplyError(kind, "message" in error && typeof error.message === "string" ? error.message : "hc refused the call"));
       return;
     }
     const result = "result" in message ? message.result : null;
@@ -442,6 +415,7 @@ export class HcConnection {
   private end(line: Line, kind: string, message: string): void {
     if (line.dead) return;
     line.dead = true;
+    this.onEnd?.(kind, message);
     if (this.line === line) this.line = null;
     for (const call of line.pending.values()) {
       clearTimeout(call.timer);

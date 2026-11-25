@@ -97,9 +97,18 @@ export function appLinkFiles(): Record<string, string> {
 export const RENDER_PATH = "/s/:id/~render";
 
 /**
+ * Where Pages serves render.html from: its extensionless address. A rewrite to `/render.html` is
+ * answered with Pages' own 308 to `/render`, which leaves the render host's path and so its policy:
+ * the shell's then refused render.html's inline script, and no page drew on app.ovis.sh.
+ */
+export const RENDER_DOCUMENT = "/render";
+
+/**
  * Pages `_redirects`: a PC's scope is the shell, its manifest and its worker under its own path.
  * The first matching rule wins, so the files come before the scope's catch-all; a scope named
  * without its slash is sent to it, so the page's relative manifest resolves inside the scope.
+ * Pages ignores the catch-all itself (a rewrite of a splat to /index.html would loop through its
+ * html handling) and answers those paths with index.html as a single-page app.
  */
 export function shellRedirects(): string {
   return [
@@ -107,28 +116,37 @@ export function shellRedirects(): string {
     "/s/:id /s/:id/ 301",
     "/s/:id/manifest.webmanifest /manifest.webmanifest 200",
     "/s/:id/sw.js /sw.js 200",
-    `${RENDER_PATH} /render.html 200`,
+    `${RENDER_PATH} ${RENDER_DOCUMENT} 200`,
     "/s/* /index.html 200",
     "",
   ].join("\n");
 }
 
 /**
+ * The shell's two policies, as every host of it sends them (Pages `_headers`, the Caddyfile, and the Android app that
+ * carries the shell, which reads them back from the `_headers` of the copy it carries: app/scripts/bundled-shell.ts):
+ * `page` on every path, `render` alone on a PC's render host.
+ */
+export function shellPolicies(): { page: string; render: string } {
+  return { page: shellContentSecurityPolicy(Object.values(REGIONAL_APPS)), render: pagePolicy(null) };
+}
+
+/**
  * Pages `_headers`: the shell's policy on everything, the render host's own policy on its path
  * (the first is detached there: Pages joins a header set twice with a comma), and the caching
  * rules the PC's server applies (server/static.ts): hashed assets for good, the shell, the worker
- * and the manifest revalidated on every load, under a PC's scope too.
+ * and the manifest revalidated on every load, under a PC's scope too. A hashed asset the deployment
+ * lacks is a 404 (MISSING_ASSET_PAGE), never the page under the assets' year-long caching.
  */
 export function shellHeaders(): string {
+  const policies = shellPolicies();
   return [
     "# Derived from the PC server's policy: server/static.ts shellContentSecurityPolicy(Object.values(REGIONAL_APPS)) (scripts/shell-build.ts)",
     "/*",
-    `  Content-Security-Policy: ${shellContentSecurityPolicy(Object.values(REGIONAL_APPS))}`,
+    `  Content-Security-Policy: ${policies.page}`,
     "",
-    `${RENDER_PATH}`,
-    "  ! Content-Security-Policy",
-    `  Content-Security-Policy: ${pagePolicy(null)}`,
-    "",
+    // and render.html at its own address the same, so it never runs under the shell's policy
+    ...[RENDER_PATH, RENDER_DOCUMENT].flatMap((path) => [path, "  ! Content-Security-Policy", `  Content-Security-Policy: ${policies.render}`, ""]),
     "/assets/*",
     `  Cache-Control: ${IMMUTABLE_CACHE}`,
     "",
@@ -139,6 +157,27 @@ export function shellHeaders(): string {
     ...["/", "/index.html", "/sw.js", "/manifest.webmanifest", "/s/*"].flatMap((path) => [path, `  Cache-Control: ${REVALIDATE}`, ""]),
   ].join("\n");
 }
+
+/**
+ * `assets/404.html`: without a 404.html on its way up from the path, Pages answers a missing file
+ * with index.html as a 200, and under /assets/ that page took the assets' year-long immutable caching.
+ * A phone that asked for a file between two deployments then kept the page as that stylesheet or
+ * script: the browser refuses it (nosniff), so the shell failed to load on every start, for a year.
+ * With this page Pages answers 404, and drops any Cache-Control on a 404 for `no-store`, so the next
+ * load asks again. Only /assets/ has it: every other path keeps the page as before.
+ */
+export const MISSING_ASSET_PAGE = "assets/404.html";
+
+/**
+ * The shell's hashed files are named with ten characters of their hash where the build's default has
+ * eight, so none takes an address 0.5.8's shell served: a phone that got the page for one of those
+ * (MISSING_ASSET_PAGE) keeps it for a year, and an unchanged file would otherwise keep its name.
+ */
+export const SHELL_FILE_NAMES = {
+  entryFileNames: "assets/[name]-[hash:10].js",
+  chunkFileNames: "assets/[name]-[hash:10].js",
+  assetFileNames: "assets/[name]-[hash:10][extname]",
+} as const;
 
 export function shellCaddyfile(site: string, root = "/opt/ovis-shell/current"): string {
   if (!/^[a-z0-9.-]+$/.test(site) || !/^\/[\w./-]+$/.test(root)) throw new Error("not a site address or a folder");
@@ -154,9 +193,13 @@ export function shellCaddyfile(site: string, root = "/opt/ovis-shell/current"): 
     `\t@worker path_regexp worker ${scope}/sw\\.js$`,
     `\t@revalidate path / /index.html /sw.js /manifest.webmanifest /s/*`,
     `\t@hidden path /_headers /_redirects`,
-    `\theader @notrender Content-Security-Policy "${shellContentSecurityPolicy(Object.values(REGIONAL_APPS))}"`,
-    `\theader @render Content-Security-Policy "${pagePolicy(null)}"`,
-    `\theader /assets/* Cache-Control "${IMMUTABLE_CACHE}"`,
+    `\t@asset {\n\t\tpath /assets/*\n\t\tfile\n\t}`,
+    `\t@missingasset {\n\t\tpath /assets/*\n\t\tnot file\n\t}`,
+    `\theader @notrender Content-Security-Policy "${shellPolicies().page}"`,
+    `\theader @render Content-Security-Policy "${shellPolicies().render}"`,
+    // only a file there is pinned for a year: a missing one is file_server's 404, asked for again (MISSING_ASSET_PAGE)
+    `\theader @asset Cache-Control "${IMMUTABLE_CACHE}"`,
+    `\theader @missingasset Cache-Control "no-store"`,
     `\theader @revalidate Cache-Control "${REVALIDATE}"`,
     // as Pages answers it: the first script on app.ovis.sh compares this copy's build with its own
     `\theader /build.json Access-Control-Allow-Origin "*"`,
@@ -198,6 +241,7 @@ addEventListener("message", render);
 parent.postMessage({ type: "ovis-render-ready" }, "*");
 </script></body></html>`,
     "manifest.webmanifest": shellManifest(manifest),
+    [MISSING_ASSET_PAGE]: "<!doctype html><title>Not found</title><p>Not found</p>\n",
     _redirects: shellRedirects(),
     _headers: shellHeaders(),
     ...appLinkFiles(),
@@ -209,6 +253,7 @@ export function shellBuild(): Plugin {
   return {
     name: "shell-build",
     apply: "build",
+    config: () => ({ build: { rollupOptions: { output: SHELL_FILE_NAMES } }, worker: { rollupOptions: { output: SHELL_FILE_NAMES } } }),
     configResolved(config) {
       const path = join(config.root, "public", "manifest.webmanifest");
       if (!existsSync(path)) throw new Error("public/manifest.webmanifest is missing: the shell derives its manifest from it");

@@ -31,7 +31,7 @@ export const COPILOT_UNAVAILABLE_REASONS = [
   "copilot_api_foreground_changed", "copilot_api_no_foreground", "copilot_api_transcript_unproved",
 ] as const;
 const COPILOT_SETTLED = new Set<string>(["copilot_session_unregistered", "copilot_peer_conflict", "copilot_report_mismatch",
-  "copilot_api_no_foreground", "copilot_api_foreground_changed"]);
+  "copilot_api_no_foreground", "copilot_api_foreground_changed", "copilot_api_unsupported_protocol"]);
 export const copilotRecoverable = (diagnostic: string | undefined): boolean =>
   diagnostic !== undefined && diagnostic.startsWith("copilot_") && !COPILOT_SETTLED.has(diagnostic);
 export const UNAVAILABLE_DIAGNOSTICS = [...COPILOT_UNAVAILABLE_REASONS, "agent_cwd_missing", "devin_current_session_unverified"] as const;
@@ -147,7 +147,7 @@ export class HistoryChanged extends Error {
 
 export type RecognizedConversation = {
   activity?: "thinking" | "working" | "idle";
-  source: "dsh-transcript" | "kiro-transcript" | "copilot-transcript" | "grok-transcript" | "agy-transcript" | "muse-transcript" | "letta-transcript" | "kimi-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript";
+  source: "acp" | "dsh-transcript" | "kiro-transcript" | "copilot-transcript" | "grok-transcript" | "agy-transcript" | "muse-transcript" | "letta-transcript" | "kimi-transcript" | "claude-transcript" | "omp-transcript" | "omo-transcript" | "gjc-transcript" | "pi-transcript" | "cmd-transcript" | "codex-transcript" | "devin-transcript" | "opencode-transcript" | "hermes-transcript";
   turns: ConversationTurn[];
   metadata: ConversationMetadata;
   screen?: true;
@@ -163,7 +163,7 @@ export type RecognizedConversation = {
   version: string;
 };
 
-export type StreamSource = Exclude<RecognizedConversation["source"], "opencode-transcript" | "devin-transcript" | "hermes-transcript" | "dsh-transcript" | "kiro-transcript">;
+export type StreamSource = Exclude<RecognizedConversation["source"], "acp" | "opencode-transcript" | "devin-transcript" | "hermes-transcript" | "dsh-transcript" | "kiro-transcript">;
 
 const PROCESS_VERSION = randomUUID();
 

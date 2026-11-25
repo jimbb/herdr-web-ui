@@ -485,7 +485,9 @@ it("never replays a queued submit after disconnecting, including before its capa
     socket.open();
     client.attach("w1:p1", 80, 24);
     if (known) socket.receive(snapshot(["submit", "pending-input"]));
-    const result = client.submit("w1:p1", "do not replay", "do not replay", false, "queue");
+    const key = crypto.randomUUID();
+    const press = () => client.submit("w1:p1", "do not replay", "do not replay", false, "queue", undefined, false, undefined, undefined, false, false, key);
+    const result = press();
     for (let turn = 0; turn < 10 && known && submissions(socket).length === 0; turn++) await Promise.resolve();
     socket.disconnect();
     expect(await result).toMatchObject({ ok: false, code: known ? "disconnected" : "not_transmitted" });
@@ -498,6 +500,16 @@ it("never replays a queued submit after disconnecting, including before its capa
     await Promise.resolve();
     expect(reconnect.sent.map((frame) => frame.type)).toEqual(["role", "attach"]);
     expect(submissions(socket).length).toBe(known ? 1 : 0);
+    if (known) {
+      const first = submissions(socket)[0]!;
+      expect(reconnect.sent.find((frame) => frame.type === "attach")).toMatchObject({ receipt_resume_id: new URL(socket.url).searchParams.get("receipt_resume_id") });
+      expect(first.command_key).toBe(key);
+      const next = reconnect.nextSubmission(), retry = press(), frame = await next;
+      expect(frame).toMatchObject({ command_key: key });
+      expect(frame.id).not.toBe(first.id);
+      reconnect.receive({ type: "submit-result", id: frame.id, pane_id: "w1:p1", ok: true, replayed: true });
+      expect(await retry).toEqual({ ok: true, replayed: true });
+    }
     client.close();
   }
 });
@@ -3324,6 +3336,40 @@ it("runs on a transport's socket where the page has no global WebSocket", () => 
   }
 });
 
+it("reopens the app stream as soon as the relay carrier is back, not when its backoff runs out", () => {
+  const routeListeners = new Set<() => void>();
+  const relay = {
+    ...nativeTransport, kind: "relay" as const, route: undefined as "relay" | "direct" | undefined,
+    openSocket: (url: string) => new FakeSocket(url) as unknown as WebSocketLike,
+    onRouteChange: (listener: () => void) => { routeListeners.add(listener); return () => { routeListeners.delete(listener); }; },
+  };
+  const routeChanged = (route: "relay" | "direct" | undefined): void => { relay.route = route; for (const listener of [...routeListeners]) listener(); };
+  setTransport(relay);
+  const client = new HerdrSocket("ws://test/ws");
+  try {
+    relay.route = "relay";
+    client.connect();
+    const first = FakeSocket.last;
+    first.open();
+    // the carrier drops: the stream closes and waits out its backoff
+    routeChanged(undefined);
+    first.disconnect();
+    expect(FakeSocket.last).toBe(first);
+    routeChanged("relay");
+    const second = FakeSocket.last;
+    expect(second).not.toBe(first);
+    second.open();
+    // a carrier switch with the stream already open opens nothing more
+    routeChanged("direct");
+    expect(FakeSocket.last).toBe(second);
+    client.close();
+    expect(routeListeners.size).toBe(0);
+  } finally {
+    client.close();
+    setTransport(nativeTransport);
+  }
+});
+
 it("forgets machine event capability on disconnect before a replacement subscriber can observe it", () => {
   const client = new HerdrSocket("ws://test/ws");
   client.connect(); const socket = FakeSocket.last; socket.open();
@@ -3352,5 +3398,47 @@ it("backoffDelay keeps main's steps up to 2s whatever the draw, and jitters from
     }
   } finally {
     random.mockRestore();
+  }
+});
+
+it("G5: offers the account to open every PC only on a PC that lists account-opens-all/1, from its snapshot or a trusted frame", () => {
+  const client = new HerdrSocket("ws://test/ws");
+  client.connect();
+  const socket = FakeSocket.last;
+  socket.open();
+  try {
+    socket.receive({ type: "features", features: ["submit", "account-opens-all/1"], connection: "c1" });
+    expect(client.accountOpensAll()).toBe(false);
+    socket.receive(snapshot(["submit"]));
+    expect(client.accountOpensAll()).toBe(false);
+    socket.receive(snapshot(["submit", "account-opens-all/1"]));
+    expect(client.accountOpensAll()).toBe(true);
+    socket.disconnect();
+    expect(client.accountOpensAll()).toBe(false);
+  } finally {
+    client.close();
+  }
+});
+
+it("T57: a PC's notice replay reaches listeners, and seen or answer frames go only to a PC that lists account-opens-all/1", () => {
+  const client = new HerdrSocket("ws://test/ws");
+  const heard: string[] = [];
+  client.on((message) => { if (message.type === "device-notice-replay" || message.type === "device-notice") heard.push(message.type); });
+  client.connect();
+  const socket = FakeSocket.last;
+  socket.open();
+  try {
+    socket.receive(snapshot(["submit"]));
+    expect(client.sendNotice({ type: "notice-seen", seq: 4 })).toBe(false);
+    socket.receive(snapshot(["submit", "account-opens-all/1"]));
+    socket.receive({ type: "device-notice-replay", replay: { notices: [], cut: 0 } });
+    expect(heard).toEqual(["device-notice-replay"]);
+    expect(client.sendNotice({ type: "notice-seen", seq: 4 })).toBe(true);
+    expect(client.sendNotice({ type: "notice-answer", id: "c".repeat(32), answer: "its_me" })).toBe(true);
+    expect(socket.sent.filter((frame) => frame.type.startsWith("notice-"))).toEqual([
+      { type: "notice-seen", seq: 4 }, { type: "notice-answer", id: "c".repeat(32), answer: "its_me" },
+    ]);
+  } finally {
+    client.close();
   }
 });

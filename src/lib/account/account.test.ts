@@ -1,13 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import type { BlockRecord } from "../../../shared/account-records.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEVICE_CODE_TTL_S, FakeAccountService, WEB_REDIRECT } from "../../../shared/account-service-fake.ts";
+import { newRecordId, signSafetyRecord } from "../../../shared/account-records.ts";
 import { startDeviceSignIn, startLinkPageSignIn } from "./deviceSignIn.ts";
 import type { RelayDevice } from "../relay/device.ts";
 import { myPcs, OFFLINE_AFTER_MS } from "./myPcs.ts";
 import { accountProvidersOf, AccountService, AccountServiceError, accountServiceOf, pcAccountServiceOf, shellAccountServiceOf, SignedOutError } from "./service.ts";
 import { beginSignIn, finishOwnSignIn, finishSignIn, SignInError, signInReturn } from "./signin.ts";
-import { memoryAccountStore, memoryLock } from "./store.ts";
+import { memoryAccountStore, memoryLock, newKey } from "./store.ts";
 import { desktopProviders } from "./desktop.ts";
 
 const SERVICE = "https://account.example";
@@ -108,6 +110,31 @@ describe("signing in", () => {
   });
 });
 
+it("T60: posts a safety record to the account service that retains the signed block", async () => {
+  const service = serviceWithSignIn();
+  service.fake.opensAll = true;
+  const { store, session } = await signIn(service);
+  const [older, newer] = await Promise.all([newKey(), newKey()]);
+  const signerNo = service.fake.registerDevice(session.account, older.public_spki, "Phone");
+  const targetNo = service.fake.registerDevice(session.account, newer.public_spki, "Laptop");
+  const signed = { v: 1 as const, account: session.account, signer: older.public_spki, signer_no: signerNo, signed_at: new Date().toISOString() };
+  const block = await signSafetyRecord({
+    ...signed, kind: "block", target: newer.public_spki, target_no: targetNo, nonce: newRecordId(),
+  }, older.private_key);
+  const client = new AccountService({ store, fetch: service.fetch });
+
+  await client.postSafetyRecord(block);
+
+  // Only a block the fake kept under this id can be lifted.
+  const lift = await signSafetyRecord({ ...signed, kind: "lift", target: block.id }, older.private_key);
+  const lifted = await service.fetch(new URL("/v1/safety-records", SERVICE), {
+    method: "POST",
+    headers: { authorization: `Bearer ${session.access_token}`, "content-type": "application/json" },
+    body: JSON.stringify({ record: lift }),
+  });
+  expect({ status: lifted.status, body: await lifted.json() }).toEqual({ status: 200, body: { id: lift.id } });
+});
+
 describe("a sign-in shared by tabs", () => {
   it("refreshes once when two tabs find the access token run out together, and stays signed in", async () => {
     const service = serviceWithSignIn();
@@ -201,6 +228,24 @@ describe("a sign-in shared by tabs", () => {
     expect(await new AccountService({ store: full, fetch: service.fetch, lock: memoryLock() }).session()).toEqual(old);
   });
 
+  it("S32-1: signing out keeps every unsent block, also one stored while the sign-out was on its way", async () => {
+    const service = serviceWithSignIn();
+    const { store, session } = await signIn(service, memoryAccountStore());
+    const record = { id: "r1" } as unknown as BlockRecord;
+    const late = { id: "r2" } as unknown as BlockRecord;
+    await store.set("unsent_blocks", { r1: { account: session.account, sign_in_id: session.sign_in_id, records: [record] } });
+    const answered = Promise.withResolvers<void>();
+    const signOut = new AccountService({ store, fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(input instanceof Request ? input.url : String(input)).pathname === "/v1/signout") await answered.promise;
+      return service.fetch(input, init);
+    }) as typeof fetch }).signOut();
+    await store.update("unsent_blocks", (current) => ({ ...current, r2: { account: session.account, sign_in_id: session.sign_in_id, records: [late] } }));
+    answered.resolve();
+    await signOut;
+    expect(await store.get("session")).toBeUndefined();
+    expect(Object.keys(await store.get("unsent_blocks") ?? {}).sort()).toEqual(["r1", "r2"]);
+  });
+
   it("ends the sign-in on the service even when its access token has run out", async () => {
     const service = serviceWithSignIn();
     let now = Date.now();
@@ -250,6 +295,13 @@ describe("a sign-in shared by tabs", () => {
     answer.resolve();
     await leaving;
     expect(await store.get("session")).toEqual(session);
+  });
+
+  it("keeps a listed PC whose new window does not read as a time, as one with none", async () => {
+    const store = memoryAccountStore();
+    await store.set("session", { service: SERVICE, account: "acct_1", provider: "github", access_token: "t", refresh_token: "r", expires_at: Date.now() + 3600_000 });
+    const listing = async () => Response.json({ pcs: [{ server_id: PC_A, label: "p620", added_at: "2026-11-05T12:00:00.000Z", last_seen_at: null, new_until: "soon" }] });
+    expect((await new AccountService({ store, fetch: listing }).listPcs()).map(({ label, new_until }) => [label, new_until])).toEqual([["p620", null]]);
   });
 
   it("keeps the service's own words out of its errors, which could echo a token", async () => {
@@ -553,14 +605,14 @@ describe("My PCs", () => {
   const stale = new Date(now - OFFLINE_AFTER_MS - 1).toISOString();
 
   it("marks a listed PC this device is not paired with as needing approval, and keeps a paired PC the account does not list", () => {
-    const rows = myPcs([{ server_id: PC_B, label: "nuc", added_at: recent, last_seen_at: recent, public_key: null, relay: null }], [paired(PC_A, "p620")], { now });
+    const rows = myPcs([{ server_id: PC_B, label: "nuc", added_at: recent, last_seen_at: recent, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null }], [paired(PC_A, "p620")], { now });
     expect(rows.map(({ name, state, listed }) => [name, state, listed])).toEqual([["p620", "paired", false], ["nuc", "needs-approval", true]]);
   });
 
   it("calls a PC offline once it stops coming by the service, and never one it has not seen", () => {
     const rows = myPcs([
-      { server_id: PC_A, label: "p620", added_at: recent, last_seen_at: stale, public_key: null, relay: null },
-      { server_id: PC_B, label: "nuc", added_at: recent, last_seen_at: null, public_key: null, relay: null },
+      { server_id: PC_A, label: "p620", added_at: recent, last_seen_at: stale, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null },
+      { server_id: PC_B, label: "nuc", added_at: recent, last_seen_at: null, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null },
     ], [paired(PC_A, "p620"), paired(PC_B, "nuc")], { now });
     expect(rows.map(({ name, state }) => [name, state])).toEqual([["nuc", "paired"], ["p620", "offline"]]);
   });
@@ -572,10 +624,26 @@ describe("My PCs", () => {
     const real = generateKeyPair().publicKey;
     const other = generateKeyPair().publicKey;
     const id = deriveServerId(real);
-    const listed = (key: Uint8Array) => myPcs([{ server_id: id, label: "nuc", added_at: recent, last_seen_at: recent, public_key: hex(key), relay: "wss://relay.example" }], [], { now })[0];
+    const listed = (key: Uint8Array) => myPcs([{ server_id: id, label: "nuc", added_at: recent, last_seen_at: recent, new_until: null, admitted_at: null, admitted_before_you: false, public_key: hex(key), relay: "wss://relay.example" }], [], { now })[0];
     expect(listed(real)?.join?.relay).toBe("wss://relay.example");
     // a directory that hands out another key for this id gets no way in
     expect(listed(other)?.join).toBeUndefined();
+  });
+
+  // docs/account.md, "Adding a PC over SSH": a listing or an admission alone never shows as added
+  it("counts a listed PC as in the account only once it completed its add or came by as the account's PC", () => {
+    const row = (fields: { last_seen_at: string | null; completed_at?: string | null; admitted_at?: string | null }) =>
+      myPcs([{ server_id: PC_B, label: "nuc", added_at: recent, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null, ...fields }], [], { now })[0]?.joined === true;
+    // listed, and admitted, but the PC never took the admission: not in the account
+    expect(row({ last_seen_at: null, completed_at: null })).toBe(false);
+    expect(row({ last_seen_at: null, completed_at: null, admitted_at: recent })).toBe(false);
+    // an older service that does not say: listed alone is not in the account either
+    expect(row({ last_seen_at: null })).toBe(false);
+    // the PC said it is bound by this listing's add
+    expect(row({ last_seen_at: null, completed_at: recent })).toBe(true);
+    // it pulled the account's mailbox, which only a PC in the account does (one that joined by a device's pairing too)
+    expect(row({ last_seen_at: recent, completed_at: null })).toBe(true);
+    expect(row({ last_seen_at: recent })).toBe(true);
   });
 
   it("says a PC needs an update when its Ovis has no accounts", () => {
@@ -584,9 +652,9 @@ describe("My PCs", () => {
   });
 
   it("names a paired PC by its own name, never the directory's label, even when it has none", () => {
-    const rows = myPcs([{ server_id: PC_A, label: "renamed by anyone", added_at: recent, last_seen_at: recent, public_key: null, relay: null }], [paired(PC_A, "p620")], { now });
+    const rows = myPcs([{ server_id: PC_A, label: "renamed by anyone", added_at: recent, last_seen_at: recent, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null }], [paired(PC_A, "p620")], { now });
     expect(rows[0]?.name).toBe("p620");
     const { name: _unnamed, ...nameless } = paired(PC_A, "p620");
-    expect(myPcs([{ server_id: PC_A, label: "renamed by anyone", added_at: recent, last_seen_at: recent, public_key: null, relay: null }], [nameless], { now })[0]?.name).toBe(PC_A.slice(0, 8));
+    expect(myPcs([{ server_id: PC_A, label: "renamed by anyone", added_at: recent, last_seen_at: recent, new_until: null, admitted_at: null, admitted_before_you: false, public_key: null, relay: null }], [nameless], { now })[0]?.name).toBe(PC_A.slice(0, 8));
   });
 });

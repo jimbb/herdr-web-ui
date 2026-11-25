@@ -75,13 +75,15 @@ try {
           assert.deepEqual(requests, [{ destination: "fixture-only" }]);
           assert.equal(await dialog.getByRole("button", { name: "Retry connection", exact: true }).count(), 0);
           const settled = () => page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+          const fold = dialog.locator("form details");
+          const advanced = async (): Promise<void> => { if (!await fold.evaluate((details: HTMLDetailsElement) => details.open)) await fold.locator("summary").click(); };
           await destination.fill("");
           await update.click();
           await settled();
           assert.equal(await destination.evaluate((input: HTMLInputElement) => input.validity.valueMissing), true);
           assert.equal(requests.length, 1, "update click obeys the required destination");
           await destination.fill("fixture-only");
-          await dialog.locator("summary").click();
+          await advanced();
           const port = dialog.getByRole("spinbutton", { name: "SSH port", exact: true });
           await port.fill("70000");
           await update.click();
@@ -89,6 +91,8 @@ try {
           assert.equal(await port.evaluate((input: HTMLInputElement) => input.validity.rangeOverflow), true);
           assert.equal(requests.length, 1, "update click obeys the SSH port range");
           await port.fill("2222");
+          const herdr = dialog.getByRole("checkbox", { name: "Use the default herdr session instead of Ovis", exact: true });
+          assert.equal(await herdr.isChecked(), false, "Ovis is the default");
           await destination.press("Enter");
           const approve = dialog.getByRole("button", { name: "Install and connect", exact: true });
           await approve.waitFor();
@@ -120,7 +124,11 @@ try {
             await reload();
             await destination.fill("fixture-only");
             await destination.press("Enter");
-            await dialog.getByRole("button", { name: choice, exact: true }).waitFor();
+            const ovis = dialog.getByRole("button", { name: "Use Ovis on this PC (herdr-core)", exact: true });
+            await ovis.waitFor();
+            // beside the PC's Ovis its herdr sessions wait, closed, in the form's Advanced settings: the card offers the Ovis alone
+            assert.equal(await fold.evaluate((details: HTMLDetailsElement) => details.open), false);
+            assert.equal(await dialog.getByRole("button", { name: "Use work", exact: true }).count(), 0, "a session is not offered until Advanced settings opens");
             assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
             const shots = join(process.env.UI_EVIDENCE_DIR || join(repo, "evidence"), "found-herdr"); mkdirSync(shots, { recursive: true });
             for (const theme of ["light", "dark"]) {
@@ -131,8 +139,10 @@ try {
             assert.equal(await dialog.getByText("Connection failed").count(), 0, "a needed choice does not read as a failed connection");
             await dialog.getByText("Choose this PC's Ovis server or a running herdr session.", { exact: true }).waitFor();
             const answers = dialog.locator(".machine-action button");
-            assert.deepEqual(await answers.allTextContents(), ["Use Ovis on this PC (herdr-core)", "Use work", "Use Default session", "Start a new herdr here"]);
+            assert.deepEqual(await answers.allTextContents(), ["Use Ovis on this PC (herdr-core)"]);
             assert.equal(await answers.first().evaluate((button) => button.classList.contains("btn-primary")), true);
+            await advanced();
+            assert.deepEqual(await fold.locator(".machine-action-buttons button").allTextContents(), ["Use work", "Use Default session", "Start a new herdr here"]);
             await dialog.getByRole("button", { name: choice, exact: true }).click();
             await dialog.getByRole("button", { name: "Open PC", exact: true }).waitFor();
             assert.deepEqual(selected, [{ destination: "fixture-only" }, choice === "Use work"
@@ -157,12 +167,14 @@ try {
               await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job!) });
             });
             await reload(); await destination.fill("fixture-only"); await destination.press("Enter");
+            await dialog.getByRole("button", { name: "Use Ovis on this PC (herdr-core)", exact: true }).waitFor();
+            if (choice !== "Use Ovis on this PC (herdr-core)") await advanced();
             await dialog.getByRole("button", { name: choice, exact: true }).click();
             await dialog.getByText("Attempt failed", { exact: true }).waitFor();
             assert.equal(selected.length, 2);
             if (changed === "address") await destination.fill("another-pc");
             else {
-              await dialog.locator("summary").click();
+              await advanced();
               if (changed === "port") await dialog.getByRole("spinbutton", { name: "SSH port", exact: true }).fill("2222");
               else await dialog.getByRole("textbox", { name: "herdr session name", exact: true }).fill("different");
             }
@@ -254,6 +266,26 @@ try {
             await page.unroute("**/api/machines/setup**");
           }
           console.log(`PASS ${width}px: polling never restores session choices for a different form identity`);
+          {
+            const sent: SetupRequest[] = [];
+            await page.route("**/api/machines/setup**", async (route) => {
+              if (route.request().method() === "POST") {
+                sent.push(route.request().postDataJSON());
+                job = { id: "herdr", machine_id: "fixture", target: sent.at(-1)!, phase: "connected", step: "Connected", action_required: null, installations: [], challenge: null, error: null, ssh_output: null };
+              }
+              await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job!) });
+            });
+            await reload(); await advanced();
+            // ticked first: editing the address or port afterwards keeps it
+            await dialog.getByRole("checkbox", { name: "Use the default herdr session instead of Ovis", exact: true }).check();
+            await destination.fill("fixture-only");
+            await dialog.getByRole("spinbutton", { name: "SSH port", exact: true }).fill("");
+            await destination.press("Enter");
+            await dialog.getByRole("button", { name: "Open PC", exact: true }).waitFor();
+            assert.deepEqual(sent, [{ destination: "fixture-only", start_new_herdr: true }]);
+            await page.unroute("**/api/machines/setup**");
+          }
+          console.log(`PASS ${width}px: Advanced settings' herdr opt-out sends the PC's herdr instead of its Ovis`);
           for (const decision of ["early_close", "cancel", "close", "start_headless"] as const) {
             const actions: unknown[] = [];
             await page.route("**/api/machines/setup**", async (route) => {
@@ -292,6 +324,45 @@ try {
           }
           assert.deepEqual(errors, []);
           console.log(`PASS ${width}px: Windows login waits without consent → cancel or explicit headless start`);
+        } finally { await context.close(); }
+      }
+      // owner test #19: a PC whose own Ovis is older, offered a prerelease, in a Korean window
+      for (const width of [1280, 390]) {
+        const context = await browser.newContext({ viewport: { width, height: 844 }, isMobile: width === 390, hasTouch: width === 390, locale: "ko-KR" });
+        try {
+          await context.addInitScript(() => localStorage.setItem("ovis:settings", JSON.stringify({ language: "ko", theme: "light" })));
+          const page = await context.newPage();
+          const errors: string[] = [];
+          page.on("pageerror", (error) => errors.push(error.message));
+          // the first answer is a step on its way, the polls after it the failure: each is worded from its code
+          let answers = 0;
+          await page.route("**/api/machines/setup**", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(answers++ === 0 ? {
+            id: "older", machine_id: "fixture", target: { destination: "old-desktop" }, phase: "installing", step: "Installing verified linux-x64 bundle…",
+            step_code: { code: "install_bundle", platform: "linux-x64" }, error: null, action_required: null, installations: [], challenge: null, ssh_output: null, progress: null,
+          } satisfies SetupJob : {
+            id: "older", machine_id: "fixture", target: { destination: "old-desktop" }, phase: "failed", step: "Connection failed", step_code: { code: "failed" },
+            error: "This PC runs its own Ovis v0.5.1, older than this app. Update it to v0.5.10-beta.2 to reconnect; it updates itself, and herdr sessions keep running.",
+            error_code: { code: "own_ovis_older", version: "0.5.1", target: "0.5.10-beta.2" }, action_required: "update_bridge",
+            remote_ovis: { version: "0.5.1", latest_version: "0.5.10-beta.2", updatable: true, reason: null, address: "old-desktop:7317", url: null },
+            installations: [], challenge: null, ssh_output: null, progress: null,
+          } satisfies SetupJob) }));
+          await page.goto(`http://127.0.0.1:${server.port}/`);
+          const dialog = page.getByRole("dialog", { name: "PC 추가", exact: true });
+          const destination = dialog.getByRole("textbox", { name: "SSH 별칭 또는 user@주소", exact: true });
+          await destination.fill("old-desktop");
+          await destination.press("Enter");
+          const card = dialog.locator(".machine-progress");
+          await card.locator("strong", { hasText: "검증된 linux-x64 번들을 설치하는 중…" }).waitFor();
+          await card.locator("strong", { hasText: "연결 실패" }).waitFor();
+          assert.deepEqual(await card.locator("p").allTextContents(), [
+            "이 PC에서 도는 자체 Ovis(v0.5.1)가 이 앱보다 오래됐습니다. 다시 연결하려면 미리보기 버전(v0.5.10-beta.2)으로 업데이트하세요.",
+            "미리보기 버전은 정식 출시 전의 테스트 빌드입니다.",
+          ], "the card says the older Ovis and the preview it updates to in Korean, with the line that a preview is a test build");
+          assert.equal(await card.getByText(/older than this app|Connection failed/).count(), 0, "no English is left in the card");
+          await dialog.getByRole("button", { name: "이 PC의 Ovis를 미리보기 버전으로 업데이트하고 연결", exact: true }).waitFor();
+          if (process.env["UI_EVIDENCE_DIR"]) { mkdirSync(process.env["UI_EVIDENCE_DIR"], { recursive: true }); await page.screenshot({ path: join(process.env["UI_EVIDENCE_DIR"], `fix19-after-${width}-ko.png`) }); }
+          assert.deepEqual(errors, []);
+          console.log(`PASS ${width}px: a step on its way and an older own Ovis offered a prerelease are worded in Korean from their codes, the failure as a preview update with its test-build line and the preview button`);
         } finally { await context.close(); }
       }
     } finally { await browser.close(); }

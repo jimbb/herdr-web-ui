@@ -1,12 +1,14 @@
 import type { AgentInfo, AgentSessionInfo, AgentStatus, PaneInfo, PaneLayoutSnapshot, PaneProcessInfo, SessionSnapshot, TabInfo, WorkspaceInfo } from "../../shared/herdr-api.generated.ts";
 import { HC_OTHER_WORKSPACE_ID } from "../../shared/machines.ts";
-import type { HerdrPane } from "../../shared/protocol.ts";
+import { planSummary } from "../../shared/plans.ts";
+import type { AcpHold, HerdrPane } from "../../shared/protocol.ts";
 import type { Foreground, Status, Terminal } from "./hc-api.generated.ts";
 import { clampRatio, type Grouping, type LayoutNode, LAYOUT_AREA, parseOvisLayout, place, reconcile, sideBySide } from "./layout-doc.ts";
 import { worktreeOfLabels } from "./worktrees.ts";
 import { paneAgent, type ProgramPlatform, reportedAgent, reportedStatus } from "../agent-identity.ts";
-import { catalogPlatform, type CatalogPlatform } from "../../shared/agent-catalog.ts";
+import { AGENT_CATALOG, catalogPlatform, type CatalogPlatform } from "../../shared/agent-catalog.ts";
 import type { JobProcess } from "../foreground-job.ts";
+import { shownStatusOfWord } from "../../shared/attention.ts";
 
 /**
  * hc has no workspaces, tabs or panes. The Herdr desktop app keeps its own (spaces, tabs and split
@@ -27,11 +29,7 @@ export const TAB_LABEL = "herdr.tab";
 export const WORKSPACE_NAME_LABEL = "ovis.workspace";
 export const TAB_NAME_LABEL = "ovis.tab";
 export const PANE_NAME_LABEL = "ovis.pane";
-/**
- * The last turn a person looked at, shared by every Herdr client (herdr-app docs/labels.md): an
- * agent at rest whose turn is past it is done, one at or below it idle.
- */
-export const SEEN_LABEL = "herdr.seen";
+export { SEEN_LABEL, seenTurnOf } from "../../shared/attention.ts";
 
 /**
  * One OSC 7501 report (hc's `Status`): the program's own words. `kind` (permission, question, auth)
@@ -44,7 +42,7 @@ export type HcForeground = Pick<Foreground, "pid" | "name"> & Partial<Pick<Foreg
 /** hc's `parent` is the terminal that started it (`t3`), set once at its start. */
 export type HcTerminal = Pick<Terminal, "address" | "cols" | "rows" | "cwd" | "state"> &
   Partial<Pick<Terminal, "argv" | "pid" | "name" | "title" | "labels" | "turn" | "parent" | "records">> &
-  { status?: HcStatus | null; foreground?: HcForeground | null };
+  { acp?: { agent: string | null; status: AgentStatus; plan: import("../../shared/plans.ts").PlanStep[] | null; hold?: AcpHold }; status?: HcStatus | null; foreground?: HcForeground | null };
 
 /**
  * A terminal on another machine the core reaches (`hc machine add vps`): hc lists and reports it
@@ -61,29 +59,22 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * agy reports `blocked` "Approve plan" (OSC 7501) when a turn ends on an artifact for review, while its own input box
- * takes the reply as at any rest: at rest here, so no card holds the composer and queued messages go to it.
+ * agy reports `blocked` permission "Approve plan" (OSC 7501) when a turn ends on an artifact for review, while its own input box
+ * takes the reply as at any rest: at rest here, so no card holds the composer and queued messages go to it. A question
+ * in those words is still a question.
  */
 export function agyPlanReview(status: HcStatus | null | undefined): boolean {
-  return status?.app === "antigravity" && status.state === "blocked" && status.msg === "Approve plan";
+  return status?.app === "antigravity" && status.state === "blocked" && status.kind === "permission" && status.msg === "Approve plan";
 }
 
 export function agentStatusOf(status: HcStatus | null | undefined): AgentStatus {
   return agyPlanReview(status) ? "done" : reportedStatus(status?.state);
 }
 
-export function seenTurnOf(labels: Readonly<Record<string, string>> | undefined): number | null {
-  const value = labels?.[SEEN_LABEL];
-  if (value === undefined || !/^\d{1,15}$/.test(value)) return null;
-  return Number(value);
-}
-
+/** The status a terminal shows (shared/attention.ts `shownStatusOfWord`), from its program's report. */
 export function shownStatusOf(status: HcStatus | null | undefined, turn: number | undefined, labels: Readonly<Record<string, string>> | undefined, firstTurn?: number): AgentStatus {
   const word = agentStatusOf(status);
-  if (word !== "idle" && word !== "done") return word;
-  const seen = seenTurnOf(labels);
-  if (seen !== null) return (turn ?? 0) > seen ? "done" : "idle";
-  return firstTurn !== undefined && (turn ?? 0) > firstTurn ? "done" : word;
+  return shownStatusOfWord(word, turn, labels, firstTurn);
 }
 
 export function agentOfStatus(status: HcStatus | null | undefined): string | null {
@@ -221,15 +212,40 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
-interface ShownTab { id: string; label: string; terminals: HcTerminal[]; root: LayoutNode | null; kept: boolean }
+/** `appNamed`: the label is the Herdr app's name for the tab (its layout's, or a `where` label's), not one given through Ovis. */
+interface ShownTab { id: string; label: string; terminals: HcTerminal[]; root: LayoutNode | null; kept: boolean; appNamed?: boolean }
+
+const nameKey = (name: string): string => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+/**
+ * The Herdr app names a tab after its program until someone names it, and such a tab shows its agent's
+ * session title (herdr-app defaults/mods/tabs/main.js): no name of its own here either. The app's program
+ * names are its own ("Copilot", "oh-my-pi"), so the agent's id and catalog name are read without case
+ * or punctuation. Only the app's names: one given through Ovis (`ovis.tab`) is a name someone gave, an
+ * agent's name typed as one included. As in the app, only the tab's first agent counts, known as a pane's is.
+ */
+function namedAfterAgent(name: string, terminals: readonly HcTerminal[], host: CoreHost): boolean {
+  const agent = terminals.map((terminal) => agentOf(terminal, host)).find((found) => found !== null);
+  if (agent === undefined) return false;
+  const entry = AGENT_CATALOG.find((candidate) => candidate.id === agent);
+  return [agent, entry?.name].some((said) => said !== undefined && nameKey(said) === nameKey(name));
+}
 interface Group { id: string; label: string; folder?: string; tabs: ShownTab[] }
 
 function besides(root: LayoutNode | null, count: number, address: string): LayoutNode | null {
   return root && { split: "right", ratio: clampRatio(count / (count + 1)), first: root, second: { leaf: address } };
 }
 
+/**
+ * A terminal's `where` label from the Herdr app. An unnamed tab's part is its number in the app's own list
+ * (herdr-app src/model.rs `tab_name`), which counts tabs whose terminals are gone: no name.
+ */
+function whereOf(terminal: HcTerminal): string[] | undefined {
+  return terminal.labels?.["where"]?.split(" / ").map((part) => part.trim()).map((part, index) => index === 1 && /^\d+$/.test(part) ? "" : part);
+}
+
 // the Herdr app labels its terminals `where`: `<space> / <tab>`
-function groups(terminals: readonly HcTerminal[], layout: unknown): Group[] {
+function groups(terminals: readonly HcTerminal[], layout: unknown, host: CoreHost = coreHost(false)): Group[] {
   const own = layout === null || layout === undefined;
   const live = new Map(terminals.filter((terminal) => terminal.state === "live" && !onOtherMachine(terminal.address)).map((terminal) => [terminal.address, terminal]));
   const placed = new Set<string>();
@@ -247,16 +263,17 @@ function groups(terminals: readonly HcTerminal[], layout: unknown): Group[] {
     if (!isRecord(space) || !fresh(space["id"]) || !Array.isArray(space["tabs"])) continue;
     ids.add(space["id"]);
     const group: Group = { id: space["id"], label: "", tabs: [] };
-    for (const [index, tab] of space["tabs"].entries()) {
+    for (const tab of space["tabs"]) {
       if (!isRecord(tab) || !fresh(tab["id"])) continue;
       ids.add(tab["id"]);
       const held: HcTerminal[] = [];
       const tree = appTree(tab["root"], take, held);
       const tabName = tab["name"];
-      if (held.length === 0) { group.tabs.push({ id: tab["id"], label: typeof tabName === "string" ? tabName : "", terminals: [], root: null, kept: false }); continue; }
+      if (held.length === 0) { group.tabs.push({ id: tab["id"], label: typeof tabName === "string" ? tabName : "", terminals: [], root: null, kept: false, appNamed: true }); continue; }
       const first = held[0]!;
-      const where = first.labels?.["where"]?.split(" / ").map((part) => part.trim());
-      group.tabs.push({ id: tab["id"], label: typeof tabName === "string" && tabName ? tabName : where?.[1] || first.labels?.[TAB_NAME_LABEL] || String(index + 1), terminals: held, root: tree && resolve(tree, LAYOUT_AREA), kept: false });
+      const where = whereOf(first);
+      const appName = typeof tabName === "string" && tabName ? tabName : where?.[1] || "";
+      group.tabs.push({ id: tab["id"], label: appName || first.labels?.[TAB_NAME_LABEL] || "", terminals: held, root: tree && resolve(tree, LAYOUT_AREA), kept: false, appNamed: appName !== "" });
       if (!group.label) {
         const spaceName = space["name"];
         const folder = space["folder"];
@@ -272,7 +289,7 @@ function groups(terminals: readonly HcTerminal[], layout: unknown): Group[] {
   // its own (an agent's worker, a terminal Ovis started): in that space, as the app will adopt it
   const rest: HcTerminal[] = [];
   for (const terminal of [...live.values()].filter((candidate) => !placed.has(candidate.address))) {
-    const where = terminal.labels?.["where"]?.split(" / ").map((part) => part.trim());
+    const where = whereOf(terminal);
     const spaceId = terminal.labels?.[SPACE_LABEL];
     let group = spaceId ? result.find((candidate) => candidate.id === spaceId) : undefined;
     if (!spaceId || (!group && ids.has(spaceId))) { rest.push(terminal); continue; }
@@ -288,15 +305,19 @@ function groups(terminals: readonly HcTerminal[], layout: unknown): Group[] {
     let tabId = labeled && !(ids.has(labeled) && !group.tabs.some((candidate) => candidate.id === labeled)) ? labeled : `${spaceId}:${terminal.address}`;
     for (let n = 2; tabId !== labeled && ids.has(tabId) && !group.tabs.some((candidate) => candidate.id === tabId); n++) tabId = `${spaceId}:${terminal.address}:${n}`;
     const tab = group.tabs.find((candidate) => candidate.id === tabId);
-    if (tab && !tab.label) tab.label = where?.[1] || terminal.labels?.[TAB_NAME_LABEL] || String(group.tabs.indexOf(tab) + 1);
+    if (tab && !tab.label) {
+      tab.label = where?.[1] || terminal.labels?.[TAB_NAME_LABEL] || "";
+      tab.appNamed = Boolean(where?.[1]);
+    }
     if (tab) {
       tab.root = besides(tab.root, tab.terminals.length, terminal.address);
       tab.terminals.push(terminal);
     } else {
       ids.add(tabId);
-      group.tabs.push({ id: tabId, label: where?.[1] || terminal.labels?.[TAB_NAME_LABEL] || String(group.tabs.length + 1), terminals: [terminal], root: null, kept: own && tabId === labeled });
+      group.tabs.push({ id: tabId, label: where?.[1] || terminal.labels?.[TAB_NAME_LABEL] || "", terminals: [terminal], root: null, kept: own && tabId === labeled, appNamed: Boolean(where?.[1]) });
     }
   }
+  for (const group of result) for (const tab of group.tabs) if (tab.appNamed && namedAfterAgent(tab.label, tab.terminals, host)) tab.label = "";
   const tabOf = new Map<string, { group: Group; tab: Group["tabs"][number] }>();
   for (const group of result) for (const tab of group.tabs) for (const terminal of tab.terminals) tabOf.set(terminal.address, { group, tab });
   const under = new Map<Group["tabs"][number], Group["tabs"][number]>();
@@ -364,19 +385,23 @@ export function reportedFacts(status: HcStatus | null | undefined): Pick<HerdrPa
 
 function paneOf(terminal: HcTerminal, workspaceId: string, tabId: string, shown: ReadonlySet<string>, host: CoreHost, firstTurn?: FirstTurn, sessionOf?: SessionOf): HerdrPane {
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
-  const session = sessionOf?.(terminal) ?? null;
+  const session = terminal.acp ? null : sessionOf?.(terminal) ?? null;
+  const plan = planSummary(terminal.acp?.plan ?? null);
   return {
     ...(session ? { agent_session: session } : {}),
+    ...(terminal.acp ? { acp_child: true as const } : {}),
+    ...(terminal.acp?.hold ? { acp_hold: terminal.acp.hold } : {}),
     ...(terminal.parent && terminal.parent !== terminal.address && shown.has(terminal.parent) ? { parent_pane_id: terminal.parent } : {}),
     ...(terminal.labels?.[SPACE_LABEL] === workspaceId && terminal.labels?.[TAB_LABEL] === tabId ? {} : { own_tab: true as const }),
-    ...reportedFacts(terminal.status),
+    ...(terminal.acp ? (terminal.acp.status === "blocked" ? { agent_kind: "permission" } : {}) : reportedFacts(terminal.status)),
+    ...(plan ? { plan } : {}),
     pane_id: terminal.address,
     terminal_id: terminal.address,
     grid: { cols: terminal.cols, rows: terminal.rows },
     workspace_id: workspaceId,
     tab_id: tabId,
-    agent: agentOf(terminal, host),
-    agent_status: shownStatusOf(terminal.status, terminal.turn, terminal.labels, firstTurn?.(terminal)),
+    agent: terminal.acp ? terminal.acp.agent : agentOf(terminal, host),
+    agent_status: terminal.acp?.status ?? shownStatusOf(terminal.status, terminal.turn, terminal.labels, firstTurn?.(terminal)),
     cwd,
     foreground_cwd: cwd,
     title: terminal.title ?? null,
@@ -453,7 +478,7 @@ export function buildSnapshot(terminals: readonly HcTerminal[], layout: unknown,
   const panes: PaneInfo[] = [];
   const layouts: PaneLayoutSnapshot[] = [];
   const own = layout === null || layout === undefined;
-  const grouped = groups(terminals, layout);
+  const grouped = groups(terminals, layout, host);
   const { groups: placed, zoomed } = own ? arranged(grouped, ovisDoc) : { groups: grouped, zoomed: new Map<string, string>() };
   const shown = new Set(placed.flatMap((group) => group.tabs.flatMap((tab) => tab.terminals.map((terminal) => terminal.address))));
   for (const [index, group] of placed.entries()) {
@@ -465,7 +490,8 @@ export function buildSnapshot(terminals: readonly HcTerminal[], layout: unknown,
       groupPanes.push(...tabPanes);
       const alone = zoomed.get(tab.id);
       const focused = alone ?? tabPanes[0]!.pane_id;
-      tabs.push({ tab_id: tab.id, workspace_id: group.id, label: tab.label, number: tabIndex + 1, agent_status: rollUp(tabPanes.map((pane) => pane.agent_status)), focused: false, pane_count: tabPanes.length });
+      // an unnamed tab is named by its place among the tabs shown, as herdr names one
+      tabs.push({ tab_id: tab.id, workspace_id: group.id, label: tab.label || String(tabIndex + 1), number: tabIndex + 1, agent_status: rollUp(tabPanes.map((pane) => pane.agent_status)), focused: false, pane_count: tabPanes.length });
       layouts.push({
         workspace_id: group.id,
         tab_id: tab.id,

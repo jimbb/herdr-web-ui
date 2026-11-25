@@ -1,7 +1,8 @@
 import { Fragment, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Compass, Cpu, Eye, EyeOff, Gauge, History, KeyRound, Network, Plus, RotateCw, Shield, ShieldCheck, SquareTerminal, Users, Zap } from "lucide-react";
+import { CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Compass, Cpu, Eye, EyeOff, Gauge, Globe, History, KeyRound, Network, Plus, RotateCw, Shield, ShieldCheck, SquareTerminal, Users, Zap } from "lucide-react";
 
 import type { AgentCatalogRow } from "../../shared/agent-catalog.ts";
+import { BROWSER_TOOL_IDS, BROWSER_TOOLS, browserToolCommand, isBrowserToolAgent, type BrowserToolAgent, type BrowserToolId } from "../../shared/browser-tools.ts";
 import type { AgentIntegration, CLIProxyStatus, ProviderUsage, UsageProviderId } from "../../shared/protocol.ts";
 import type { UsageLoginRequest } from "../../shared/usage-login.ts";
 
@@ -18,6 +19,7 @@ import { useSettings } from "../lib/settings.ts";
 import { openSetupGuide } from "../lib/setupGuide.ts";
 import { canSignInAgain, glanceWindow, isHubAccount, isSignIn, meterText, moveInOrder, orderProviders, PROVIDER_MARK, PROVIDER_NAME, recordedBy, recordedNote, usageName, useStatuslineSwitch, useUsage, windowLabel } from "../lib/usage.ts";
 import { userErrorMessage, type UserError } from "../lib/userError.ts";
+import { AgentCallsRows } from "./AgentCallsRows.tsx";
 import { AgentMark } from "./AgentMark.tsx";
 import { AgentTile } from "./AgentTile.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
@@ -34,6 +36,8 @@ type Translate = ReturnType<typeof useT>;
 export interface AgentsSettingsProps {
   /** a watching device reads the page, but installs, signs in and adds nothing */
   watching: boolean;
+  /** this PC serves herdr-core, whose agents Ovis can give the tool to start other agents */
+  agentCalls?: boolean;
   onLocalLogin: (paneId: string) => void;
   onOpenPane: (machineId: string, paneId: string) => void;
   onOpenGuide: () => void;
@@ -78,6 +82,33 @@ function LaunchDefaultRows({ agent, model, effort, efforts, onModel, onEffort }:
   </>;
 }
 
+/**
+ * The browser tool this PC's server adds when it starts the agent (shared/browser-tools.ts). The choice is kept on
+ * the PC whose page this is, so another PC's agents are not offered it here.
+ */
+function BrowserToolRow({ agent }: { agent: BrowserToolAgent }) {
+  const { settings, update } = useSettings();
+  const t = useT();
+  const local = useMachineId() === "local";
+  if (!local) return null;
+  const tool = settings.agentBrowserTools[agent];
+  const id = `settings-${agent}-browser-tool`;
+  const choose = (next: BrowserToolId | ""): void => {
+    const { [agent]: _was, ...rest } = settings.agentBrowserTools;
+    update({ agentBrowserTools: next === "" ? rest : { ...rest, [agent]: next } });
+  };
+  return (
+    <SettingsRow icon={Globe} label={t("Browser tool")} htmlFor={id} wide
+      description={t("A browser the agent can drive: Ovis adds an MCP server at a fixed version when it starts this agent. That browser uses a profile of its own, without your sign-ins, and Ovis does not watch or limit it. Applies from the next start; an agent started from a terminal is not changed.")}
+      condition={tool === undefined ? undefined : <code className="settings-integration-command">{browserToolCommand(tool, "").join(" ")}</code>}>
+      <SettingsSelect id={id} value={tool ?? ""} onChange={(event) => choose(BROWSER_TOOL_IDS.find((known) => known === event.target.value) ?? "")}>
+        <option value="">{t("None")}</option>
+        {BROWSER_TOOL_IDS.map((known) => <option key={known} value={known}>{BROWSER_TOOLS[known].name}</option>)}
+      </SettingsSelect>
+    </SettingsRow>
+  );
+}
+
 function AgentOwnRows({ agentId }: { agentId: string }) {
   const { settings, update } = useSettings();
   const t = useT();
@@ -90,6 +121,7 @@ function AgentOwnRows({ agentId }: { agentId: string }) {
       </SettingsRow>
       <LaunchDefaultRows agent="claude" model={settings.claudeLaunchModel} effort={settings.claudeLaunchEffort} efforts={CLAUDE_EFFORTS}
         onModel={(claudeLaunchModel) => update({ claudeLaunchModel })} onEffort={(effort) => update({ claudeLaunchEffort: CLAUDE_EFFORTS.find((level) => level === effort) ?? "" })} />
+      <BrowserToolRow agent="claude" />
     </>;
     case "codex": return <>
       <SettingsRow icon={Shield} label={t("Sandbox and approvals")} description={t("The sandbox and approval preset a new Codex starts with when you open it from New workspace, New tab or New worktree. Agent default leaves it to Codex's own settings, and a running agent is not changed.")} htmlFor="settings-codex-launch-mode" reset={["codexLaunchMode"]}>
@@ -99,7 +131,9 @@ function AgentOwnRows({ agentId }: { agentId: string }) {
       </SettingsRow>
       <LaunchDefaultRows agent="codex" model={settings.codexLaunchModel} effort={settings.codexLaunchEffort} efforts={CODEX_EFFORTS}
         onModel={(codexLaunchModel) => update({ codexLaunchModel })} onEffort={(effort) => update({ codexLaunchEffort: CODEX_EFFORTS.find((level) => level === effort) ?? "" })} />
+      <BrowserToolRow agent="codex" />
     </>;
+    case "copilot": return <BrowserToolRow agent="copilot" />;
     default: return null;
   }
 }
@@ -268,7 +302,7 @@ function AgentItem({ entry, open, onToggle, allProviders, removed, read, limitsO
         {provider === null && signIn !== null && (local && signIn.provider === null
           ? <p className="agents-detail-note">{signIn.in_agent !== null ? t("{agent} signs in inside the agent ({how}). Ovis cannot read that sign-in, so it shows none here.", { agent: agent.name, how: signIn.in_agent }) : t("Ovis cannot read {agent}'s sign-in, so it shows none here.", { agent: agent.name })}</p>
           : !local && signIn.provider !== null ? <p className="agents-detail-note">{t("Accounts are read on the PC Ovis runs on: they are under Other accounts.")}</p> : null)}
-        {OWN_ROWS.has(agent.id) && <div className="settings-card agents-detail-card"><AgentOwnRows agentId={agent.id} /></div>}
+        {(OWN_ROWS.has(agent.id) || (isBrowserToolAgent(agent.id) && local)) && <div className="settings-card agents-detail-card"><AgentOwnRows agentId={agent.id} /></div>}
         {entry.integration !== null
           ? <div className="settings-card agents-detail-card"><IntegrationRow integration={entry.integration} label={t("Session resume")} /></div>
           : integrationsRead && <p className="agents-detail-note">{t("herdr has no session resume for {agent}.", { agent: agent.name })}</p>}
@@ -307,7 +341,7 @@ function SectionHead({ children }: { children?: ReactNode }) {
   return <div className="agents-head">{children}</div>;
 }
 
-export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide }: AgentsSettingsProps) {
+export function AgentsSettings({ watching, agentCalls = false, onLocalLogin, onOpenPane, onOpenGuide }: AgentsSettingsProps) {
   const t = useT();
   const { settings } = useSettings();
   const searching = useContext(SettingsQuery).length > 0;
@@ -315,7 +349,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
   const machineId = useMachineId();
   const local = machineId === "local";
 
-  const [catalog, setCatalog] = useState<{ machineId: string; agents: AgentCatalogRow[]; pathProblem: string | null } | null>(null);
+  const [catalog, setCatalog] = useState<{ machineId: string; agents: AgentCatalogRow[]; pathProblem: string | null; windows: boolean } | null>(null);
   const [catalogError, setCatalogError] = useState<UserError | null>(null);
   const [reads, setReads] = useState(0);
   const [checking, setChecking] = useState(false);
@@ -326,7 +360,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
     setCatalogError(null);
     setChecking(true);
     fetchAgentCatalog(machineId, abort.signal, reads > 0).then(
-      (answer) => setCatalog({ machineId, agents: answer.agents, pathProblem: answer.path_problem ?? null }),
+      (answer) => setCatalog({ machineId, agents: answer.agents, pathProblem: answer.path_problem ?? null, windows: answer.platform === "windows" }),
       (reason: unknown) => {
         if (abort.signal.aborted) return;
         setCatalogError(reason instanceof ApiError && reason.status === 404 ? { message: t("This PC's Ovis cannot install agents yet. Update it, then try again."), detail: null } : userErrorMessage(reason));
@@ -387,6 +421,7 @@ export function AgentsSettings({ watching, onLocalLogin, onOpenPane, onOpenGuide
   const otherIntegrations = page?.otherIntegrations ?? [];
   return (
     <SettingsBare.Provider value={true}>
+      {local && agentCalls && catalog?.windows !== true && <AgentCallsRows agents={agents ?? []} watching={watching} />}
       {/* the first-run guide again (lib/setupGuide.ts): it sets up this PC, and a watching device is never shown it */}
       {!watching && local && <SettingsGroup section="guide">
         <SettingsRow icon={Compass} label={t("Setup guide")} description={t("Opens the first-run guide again, from its first step, to install coding agents on this PC and connect them. What was set up before stays as it is.")}>

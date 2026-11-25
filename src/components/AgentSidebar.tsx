@@ -1,15 +1,16 @@
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Bell, BellOff, ChevronDown, ChevronRight, Ellipsis, FolderInput, FolderOutput, Lock, LockOpen, Pin, PinOff, Terminal } from "lucide-react";
+import { Bell, BellOff, ChevronDown, ChevronRight, Ellipsis, FolderInput, FolderOutput, Lock, LockOpen, Pause, Pin, PinOff, Terminal } from "lucide-react";
 
 import type { Machine } from "../../shared/machines.ts";
 import { paneStorageId } from "../../shared/machines.ts";
 import { paneTokenValues } from "../../shared/pane-tokens.ts";
 import type { AgentStatus, HerdrPane, PaneContext, PlanSummary, TabInfo } from "../../shared/protocol.ts";
 import { currentAgentRowTokens, subscribeAgentRowTokens } from "../lib/agentRowTokens.ts";
+import { holdAcpChildren } from "../lib/api.ts";
 import { useT } from "../lib/i18n.ts";
 import { useAnnouncedText } from "../lib/useAnnouncedText.ts";
 import { useEdgeFades } from "../lib/useEdgeFades.ts";
-import { AGENT_GROUPS, agentGroup, agentRoster, groupAgentRows, splitBackgroundRows, type AgentGroup, type AgentRow } from "../lib/agentRoster.ts";
+import { AGENT_GROUPS, agentFamilies, agentGroup, agentRoster, groupAgentRows, splitBackgroundRows, type AgentGroup, type AgentRow } from "../lib/agentRoster.ts";
 import { stampState, stateSince } from "../lib/agentStateSince.ts";
 import { useAgentStateStamps } from "../lib/useAgentStateSince.ts";
 import { knownStatus } from "../lib/status.ts";
@@ -58,6 +59,8 @@ interface AgentRowBodyProps {
   progress?: number;
   helper?: boolean;
   since?: string | null;
+  /** a person stopped this ACP child (HerdrPane `acp_hold`) */
+  held?: boolean;
 }
 
 /** How long a row has been in its state, as herdr-app's agent rows say it: under a minute, minutes, hours, days. */
@@ -83,7 +86,7 @@ export function blockedLabel(pane: Pick<HerdrPane, "agent_kind" | "agent_message
   return pane.agent_message?.trim() || null;
 }
 
-function AgentRowBody({ mark, markKind, title, name, context, tokens, backgroundTasks, plan, paneContext, status, note = null, muted, locked = false, blockedNote: blocked = null, blockedLabel: blockedShort = null, progress, helper = false, since = null }: AgentRowBodyProps) {
+function AgentRowBody({ mark, markKind, title, name, context, tokens, backgroundTasks, plan, paneContext, status, note = null, muted, locked = false, blockedNote: blocked = null, blockedLabel: blockedShort = null, progress, helper = false, since = null, held = false }: AgentRowBodyProps) {
   const t = useT();
   const showProgress = progress !== undefined && (status === "working" || status === "blocked");
   return <>
@@ -95,6 +98,7 @@ function AgentRowBody({ mark, markKind, title, name, context, tokens, background
           <span className="agent-title">{title}</span>
           {status === "blocked" && blockedShort && <span className="agent-blocked" aria-hidden={blocked !== null && blocked !== blockedShort ? "true" : undefined}>{blockedShort}</span>}
           {status === "blocked" && blocked !== null && blocked !== blockedShort && <span className="visually-hidden">{blocked}</span>}
+          {held && <span className="agent-held" title={t("Stopped by you. The agent that called it cannot give it new work.")}>{t("Stopped")}</span>}
           {/* how far the agent says it is, while it works or waits: its percent after the title, and in words for a
               screen reader (a role inside the row's button would not be read) */}
           {showProgress && <>
@@ -190,6 +194,7 @@ function groupLabel(group: AgentGroup, t: (key: string) => string): string {
 
 const DRAWER_QUERY = "(max-width: 768px)";
 const FOLD_KEY = "ovis:agents-collapsed";
+const STOP_ERROR_MS = 5000;
 
 const RESTING_OPEN_KEY = "ovis:agents-resting-open";
 
@@ -305,13 +310,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   };
   const people = useMemo(() => {
     if (settings.agentOrder !== "waiting" || groups !== null || named !== null) return parts.people;
-    const families: AgentRow[][] = [];
-    for (const row of parts.people) {
-      const family = families.at(-1);
-      const parent = row.entry.pane.parent_pane_id;
-      if (family && parent !== undefined && family.some((member) => member.machine.id === row.machine.id && member.entry.pane.pane_id === parent)) family.push(row);
-      else families.push([row]);
-    }
+    const families = agentFamilies(parts.people);
     const waits = (family: AgentRow[]) => family.some((row) => rowStatus(row) === "blocked");
     return [...families.filter(waits), ...families.filter((family) => !waits(family))].flat();
   }, [settings.agentOrder, groups, named, parts, rowStatus]);
@@ -366,13 +365,29 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const busy = (row: AgentRow) => { const status = rowStatus(row); return status === "blocked" || status === "working" || status === "waiting"; };
   useEffect(() => {
     if (holding) return;
-    held.current = { readerKey, order: people.map(rowKey), active: new Set(people.filter(busy).map(rowKey)) };
+    // what stands above the resting line is held by family: a helper leaving or ending keeps its agent in place
+    held.current = { readerKey, order: people.map(rowKey), active: new Set(agentFamilies(people).filter((family) => family.some(busy)).flat().map(rowKey)) };
   });
-  const heldOrder = holding ? held.current?.order ?? [] : [];
-  const shownPeople = !holding ? people : [...people].sort((a, b) => {
-    const at = (row: AgentRow) => { const index = heldOrder.indexOf(rowKey(row)); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
-    return at(a) - at(b);
-  });
+  const heldOrder = holding ? held.current?.order : undefined;
+  // the order drawn, which the tree lines below are read from too
+  const shownPeople = useMemo(() => {
+    if (heldOrder === undefined) return people;
+    // a row that came during the hold takes the place of its nearest held ancestor, so a new helper stands with its agent
+    const byKey = new Map(people.map((row) => [rowKey(row), row]));
+    const at = (row: AgentRow): number => {
+      const passed = new Set<AgentRow>();
+      for (let up: AgentRow | undefined = row; up && !passed.has(up); up = up.entry.pane.parent_pane_id === undefined ? undefined : byKey.get(sidebarPinKey(up.machine.id, up.entry.pane.parent_pane_id))) {
+        const index = heldOrder.indexOf(rowKey(up));
+        if (index >= 0) return index;
+        passed.add(up);
+      }
+      return Number.MAX_SAFE_INTEGER;
+    };
+    const places = new Map(people.map((row) => [row, at(row)]));
+    const sorted = [...people].sort((a, b) => places.get(a)! - places.get(b)!);
+    // the same order is the same list: the tree lines and folds below are not drawn again for a hold alone
+    return sorted.every((row, index) => row === people[index]) ? people : sorted;
+  }, [people, heldOrder]);
   useEffect(() => {
     if (foldRequest === null || foldRequest.folded === folded) return;
     if (filter.active) { setFilterFold(foldRequest.folded); return; }
@@ -481,7 +496,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     const restLines = new Map<AgentRow, { more: boolean; through: boolean }>();
     const helpersOf = new Map<AgentRow, AgentRow[]>();
     const foldedHelpers = new Set<AgentRow>();
-    for (const list of [...named ? named.map((group) => group.rows) : groups ? groups.map((group) => group.rows) : [people], parts.background]) {
+    for (const list of [...named ? named.map((group) => group.rows) : groups ? groups.map((group) => group.rows) : [shownPeople], parts.background]) {
       const listDepths = depths(list);
       for (const [row, depth] of listDepths) restDepths.set(row, depth);
       if (foldHelpers) {
@@ -499,7 +514,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
       for (const [row, line] of treeLines(shown, listDepths)) restLines.set(row, line);
     }
     return { restDepths, restLines, helpersOf, foldedHelpers };
-  }, [parts, people, groups, named, foldHelpers, openHelpers, selectedMachineId, selectedPaneId, rowStatus]);
+  }, [parts, shownPeople, groups, named, foldHelpers, openHelpers, selectedMachineId, selectedPaneId, rowStatus]);
   useLayoutEffect(() => {
     const active = document.activeElement;
     const inList = Boolean(active && sectionRef.current?.contains(active));
@@ -579,7 +594,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
           event.dataTransfer.setData(PANE_DRAG_TYPE, paneDragData({ machineId: machine.id, paneId: pane.pane_id }));
         }}>
         {missingContext && <span className="visually-hidden">{missingContext} · </span>}
-        <AgentRowBody mark={mark} markKind={markKind} title={title} name={name} context={context} tokens={tokens} backgroundTasks={online ? pane.background_tasks : 0} plan={online ? pane.plan : undefined} paneContext={online && settings.sidebarContext ? pane.context : undefined} status={status} note={filterContext && selected ? t("Selected") : null} muted={muted?.includes(paneMuteKey(machine.id, pane.pane_id)) === true} locked={locked.has(pinKey)} blockedNote={blocked} blockedLabel={blockedShort} progress={online ? pane.agent_progress : undefined} helper={depth > 0} since={since} />
+        <AgentRowBody mark={mark} markKind={markKind} title={title} name={name} context={context} tokens={tokens} backgroundTasks={online ? pane.background_tasks : 0} plan={online ? pane.plan : undefined} paneContext={online && settings.sidebarContext ? pane.context : undefined} status={status} note={filterContext && selected ? t("Selected") : null} muted={muted?.includes(paneMuteKey(machine.id, pane.pane_id)) === true} locked={locked.has(pinKey)} blockedNote={blocked} blockedLabel={blockedShort} progress={online ? pane.agent_progress : undefined} helper={depth > 0} since={since} held={online && pane.acp_hold !== undefined} />
       </button>
       <div className="agent-actions">
         <button type="button" className="sidebar-row-action row-menu-toggle" aria-label={t("More for {title}", { title })} aria-haspopup={sheet ? "dialog" : "menu"} aria-expanded={menuOpen} onClick={(event) => toggleMenu(event.currentTarget)}>
@@ -602,6 +617,18 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   const menuGroup = menuRow === undefined || groupNames.length === 0 ? null : rowAgentGroup(menuRow, settings.agentGroupOf, groupNames, allRows);
   const menuBackground = menuRow !== undefined && groupNames.length > 0 && splitBackgroundRows([menuRow], () => undefined, allRows).background.length > 0;
   const menuOwnGroup = menu === null ? undefined : settings.agentGroupOf[menu.key];
+  // the ACP children the menu's agent started that still take new work from it: a person's Stop holds them all
+  const menuCalled = menuRow === undefined ? 0 : (menuRow.machine.snapshot?.panes ?? []).filter((pane) => pane.acp_child === true && pane.acp_hold === undefined && pane.parent_pane_id === menuRow.entry.pane.pane_id).length;
+  const [stopError, setStopError] = useState<string | null>(null);
+  useEffect(() => {
+    if (stopError === null) return;
+    const timer = window.setTimeout(() => setStopError(null), STOP_ERROR_MS);
+    return () => window.clearTimeout(timer);
+  }, [stopError]);
+  const stopCalled = (row: AgentRow): void => {
+    const failed = t("Some agents it called were not stopped. Try again.");
+    void holdAcpChildren(row.entry.pane.pane_id, row.machine.id).then(({ failed: panes }) => { if (panes.length > 0) setStopError(failed); }, () => setStopError(failed));
+  };
   const setGroup = (key: string, name: string | null): void => {
     const kept = liveGroupKeys(settings.agentGroupOf, machines, hidden);
     const next = assignAgentGroup(settings.agentGroupOf, key, name, (held) => kept.has(held));
@@ -650,10 +677,15 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         ...groupRows.flatMap((row) => listItems([row], groupFolded && !isSelected(row), group)),
       ];
     }) : restingFold && named === null && groups === null ? (() => {
+      // a helper stays with the agent that started it: a family is above the line while any of it is
       const inActive = (row: AgentRow) => holding ? held.current?.active.has(rowKey(row)) === true : busy(row);
-      const active = shownPeople.filter(inActive);
-      const resting = shownPeople.filter((row) => !inActive(row));
-      const restingCount = shownPeople.filter((row) => !busy(row)).length;
+      const families = agentFamilies(shownPeople);
+      const activeFamilies = (rowActive: (row: AgentRow) => boolean) => new Set(families.filter((family) => family.some(rowActive)).flat());
+      const above = activeFamilies(inActive);
+      const active = shownPeople.filter((row) => above.has(row));
+      const resting = shownPeople.filter((row) => !above.has(row));
+      const busyNow = activeFamilies(busy);
+      const restingCount = shownPeople.filter((row) => !busyNow.has(row)).length;
       if (resting.length === 0) return listItems(shownPeople);
       return [...listItems(active),
         <li className="agent-background-label agent-resting-label" key="resting">
@@ -713,6 +745,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         </ul>}
       </>}
     </div>
+    {stopError !== null && <p className="sidebar-inline-error" role="alert">{stopError}</p>}
     {menu && menuShown && <RowMenu anchor={menu.anchor} point={menu.point} restoreFocusTo={menu.previousFocus} title={menuShown.title} subtitle={menuShown.place} alert={menuBlocked ?? undefined} detail={menuShown.tokens.join(" · ") || undefined} onClose={closeMenu}
       header={<span className="row-menu-target"><span className="row-menu-target-name" title={menuShown.title}>{menuShown.title}</span>{menuShown.place && <span className="row-menu-target-place" title={menuShown.place}>{menuShown.place}</span>}</span>}
       items={[
@@ -734,6 +767,10 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         run: () => setGroup(menu.key, null),
       }]),
       // one switch for every alert channel and every browser (lib/paneMutes.ts); a watching device sees its state and cannot flip it
+      ...(menuRow === undefined || menuCalled === 0 ? [] : [{
+        id: "stop-called", label: t("Stop agents it called ({count})", { count: menuCalled }), icon: Pause, disabled: watching || menuRow.machine.view_only === true,
+        run: () => stopCalled(menuRow),
+      }]),
       ...(muted === null || menuRow === undefined ? [] : [{
         id: "mute", label: menuMuted ? t("Unmute alerts") : t("Mute alerts"), icon: menuMuted ? Bell : BellOff, checked: menuMuted, disabled: watching,
         run: () => toggleMute(menuRow.machine.id, menuRow.entry.pane.pane_id),

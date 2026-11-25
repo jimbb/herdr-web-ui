@@ -1,12 +1,12 @@
 /** Agy's append-only step ledger, reduced in physical order before shared paging. */
-import { constants as sqliteConstants, Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, fstatSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { ConversationPart, ConversationTurn } from "../shared/protocol.ts";
 import { ConversationReadPending } from "./conversation-shared.ts";
+import { readSqliteSnapshot, type SnapshotCache } from "./sqlite-snapshot.ts";
+import type { AgyPendingStep } from "./dialogs/agy-record.ts";
 import { FileBusyError, fileTask } from "./file-pool.ts";
 import { agyInvokedSkills } from "./skill-invocations/agy.ts";
 import { skillDocument } from "./skill-activity.ts";
@@ -24,16 +24,14 @@ const CATALOG_BYTES = AGY_CATALOG_BYTES;
 const hash = (value: string): string => createHash("sha256").update(value).digest("base64url");
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export class AgyUnavailable extends Error { constructor() { super("Agy history is unavailable"); } }
-interface Step { index: number; start: number; end: number; type: string; status: string; digest: string; activity?: "working" | "idle" }
+interface StepModel { model: string; reasoning_effort: string | null; source: "settings" | "planner" }
+interface Step { index: number; start: number; end: number; type: string; status: string; digest: string; activity?: "working" | "idle"; model?: StepModel }
 interface Index { identity: string; size: number; changed: string; scanned: number; revision: string; steps: Step[]; visible: Step[]; retired: Set<number> }
 const indexes = new Map<string, Index>();
 const catalogs = new Map<string, { key: string; rows: number[] }>();
 const MAX_CATALOGS = 32;
-// Timestamps tick coarsely, so a same-size rewrite just after a read can keep both of them. Only a
-// read this long after the files' last change may be reused (git's "racy" rule).
-const CATALOG_SETTLED_MS = 2000;
 export function forgetAgyState(path?: string): void {
-  if (path === undefined) { indexes.clear(); catalogs.clear(); } else { indexes.delete(path); catalogs.delete(agyDatabasePath(path)); }
+  if (path === undefined) { indexes.clear(); catalogs.clear(); pendings.clear(); } else { indexes.delete(path); catalogs.delete(agyDatabasePath(path)); pendings.delete(agyDatabasePath(path)); }
 }
 
 export function agyDatabasePath(path: string): string {
@@ -41,105 +39,54 @@ export function agyDatabasePath(path: string): string {
   return join(dirname(dirname(sessionDir)), "conversations", `${basename(sessionDir)}.db`);
 }
 
+/** `read` on Antigravity's conversation database (sqlite-snapshot.ts), whose every refusal is AgyUnavailable. */
+function readAgyDatabase<T>(dbPath: string, read: (db: Database) => T, cache: SnapshotCache<T> | null, beforeOpen?: () => void, copy?: "always"): T {
+  try { return readSqliteSnapshot(dbPath, read, cache, CATALOG_BYTES, beforeOpen, copy); } catch { throw new AgyUnavailable(); }
+}
+
 export function agyCatalog(path: string, beforeOpen?: () => void): Set<number> {
   const dbPath = agyDatabasePath(path);
-  let db: Database | undefined;
-  let fd: number | undefined;
-  const sideFds: number[] = [];
-  let snapshot: string | undefined;
-  let catalogKey: string | undefined;
-  let reused: number[] | undefined;
-  const began = Date.now();
-  try {
-    if (realpathSync(dbPath) !== dbPath) throw new AgyUnavailable();
-    const readFlags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-    fd = openSync(dbPath, readFlags);
-    const before = fstatSync(fd, { bigint: true });
-    if (!before.isFile()) throw new AgyUnavailable();
-    const header = Buffer.alloc(20);
-    const walBefore = existsSync(`${dbPath}-wal`), shmBefore = existsSync(`${dbPath}-shm`);
-    const wal = readSync(fd, header, 0, 20, 0) === 20 && header[18] === 2 && header[19] === 2;
-    const files = [{ path: dbPath, fd, stat: before }];
-    beforeOpen?.();
-    // Every source open is immutable, even if a writer switches journal modes
-    // after the header read. Only the private snapshot may create side files.
-    // An incomplete WAL pair therefore exposes checkpointed rows only.
-    let immutable = true;
-    const descriptor = process.platform === "linux" || (process.platform === "darwin" && immutable) ? `/dev/fd/${fd}` : null;
-    let name = descriptor ?? dbPath;
-    if (wal && walBefore && shmBefore) {
-      // A readonly SQLite open can create -wal even with readonly_shm=1. Never open
-      // a live source that way: recover its WAL only beside a bounded private copy.
-      for (const suffix of ["-wal", "-shm"]) {
-        const path = `${dbPath}${suffix}`;
-        const sideFd = openSync(path, readFlags);
-        sideFds.push(sideFd);
-        const stat = fstatSync(sideFd, { bigint: true });
-        if (!stat.isFile()) throw new AgyUnavailable();
-        files.push({ path, fd: sideFd, stat });
-      }
-      const snapshotFiles = files.slice(0, 2);
-      if (snapshotFiles.reduce((bytes, file) => bytes + file.stat.size, 0n) > BigInt(CATALOG_BYTES)) throw new AgyUnavailable();
-      const key = snapshotFiles.map(({ stat }) => `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`).join("|");
-      const cached = catalogs.get(dbPath);
-      if (cached?.key === key) { reused = cached.rows; catalogKey = key; }
-      else if (snapshotFiles.every(({ stat }) => began - Number(stat.mtimeNs / 1_000_000n) >= CATALOG_SETTLED_MS
-        && began - Number(stat.ctimeNs / 1_000_000n) >= CATALOG_SETTLED_MS)) catalogKey = key;
-      // macOS: tmpdir() is under the /var symlink, which SQLITE_OPEN_NOFOLLOW refuses
-      if (reused === undefined) {
-        snapshot = mkdtempSync(join(tmpdir(), "ovis-agy-catalog-"));
-        snapshot = realpathSync(snapshot);
-        name = join(snapshot, "catalog.db");
-        for (const [index, file] of snapshotFiles.entries()) {
-          const target = openSync(index === 0 ? name : `${name}-wal`, "wx", 0o600);
-          try {
-            const bytes = Buffer.alloc(64 * 1024);
-            const size = Number(file.stat.size);
-            let offset = 0;
-            while (offset < size) {
-              const read = readSync(file.fd, bytes, 0, Math.min(bytes.length, size - offset), offset);
-              if (!read) throw new AgyUnavailable();
-              writeFileSync(target, bytes.subarray(0, read));
-              offset += read;
-            }
-          } finally { closeSync(target); }
-        }
-      }
-      immutable = false;
-    }
-    let rows: { idx: number }[];
-    if (reused !== undefined) rows = reused.map((idx) => ({ idx }));
-    else {
-      const flags = sqliteConstants.SQLITE_OPEN_READONLY | sqliteConstants.SQLITE_OPEN_URI;
-      db = new Database(immutable ? `${pathToFileURL(name).href}?immutable=1` : name,
-        descriptor === null || snapshot !== undefined ? flags | sqliteConstants.SQLITE_OPEN_NOFOLLOW : flags);
-      const opened = statSync(dbPath, { bigint: true });
-      if (opened.dev !== before.dev || opened.ino !== before.ino || realpathSync(dbPath) !== dbPath) throw new AgyUnavailable();
-      db.exec("PRAGMA busy_timeout = 100");
-      rows = db.query<{ idx: number }, []>(`SELECT idx FROM steps ORDER BY idx LIMIT ${MAX_ENTRIES + 1}`).all();
-    }
-    for (const file of files) {
-      const after = statSync(file.path, { bigint: true }), pinned = fstatSync(file.fd, { bigint: true });
-      if (after.dev !== file.stat.dev || after.ino !== file.stat.ino || realpathSync(file.path) !== file.path
-        || pinned.size !== file.stat.size || pinned.mtimeNs !== file.stat.mtimeNs || pinned.ctimeNs !== file.stat.ctimeNs) throw new AgyUnavailable();
-    }
-    if (existsSync(`${dbPath}-wal`) !== walBefore || existsSync(`${dbPath}-shm`) !== shmBefore
-      || (!wal && existsSync(`${dbPath}-journal`))) throw new AgyUnavailable();
-    if (rows.length > MAX_ENTRIES || rows.some((row) => !Number.isSafeInteger(row.idx) || row.idx < 0)) throw new AgyUnavailable();
-    const indices = rows.map((row) => row.idx);
-    if (catalogKey !== undefined) {
+  const cache: SnapshotCache<number[]> = {
+    get: (key) => { const cached = catalogs.get(dbPath); return cached?.key === key ? cached.rows : undefined; },
+    set: (key, rows) => {
       catalogs.delete(dbPath);
-      catalogs.set(dbPath, { key: catalogKey, rows: indices });
+      catalogs.set(dbPath, { key, rows });
       if (catalogs.size > MAX_CATALOGS) catalogs.delete(catalogs.keys().next().value!);
-    }
-    return new Set(indices);
-  } catch { throw new AgyUnavailable(); }
-  finally {
-    db?.close();
-    for (const sideFd of sideFds) closeSync(sideFd);
-    if (fd !== undefined) closeSync(fd);
-    if (snapshot !== undefined) rmSync(snapshot, { recursive: true, force: true });
-  }
+    },
+  };
+  return new Set(readAgyDatabase(dbPath, (db) => {
+    const rows = db.query<{ idx: number }, []>(`SELECT idx FROM steps ORDER BY idx LIMIT ${MAX_ENTRIES + 1}`).all();
+    if (rows.length > MAX_ENTRIES || rows.some((row) => !Number.isSafeInteger(row.idx) || row.idx < 0)) throw new AgyUnavailable();
+    return rows.map((row) => row.idx);
+  }, cache, beforeOpen));
+}
+
+const pendings = new Map<string, { key: string; steps: AgyPendingStep[] }>();
+
+/**
+ * The tool calls that wait on the user (dialogs/agy-record.ts), as the conversation database holds them now; a step
+ * with no payload stays among them, empty, as one whose command is not known. Asked on every look at a card, so a copy
+ * of files unchanged (and settled) since the last is not made again.
+ */
+export function agyPendingSteps(path: string): AgyPendingStep[] {
+  const dbPath = agyDatabasePath(path);
+  const cache: SnapshotCache<AgyPendingStep[]> = {
+    get: (key) => { const cached = pendings.get(dbPath); return cached?.key === key ? cached.steps : undefined; },
+    set: (key, steps) => {
+      pendings.delete(dbPath);
+      pendings.set(dbPath, { key, steps });
+      if (pendings.size > MAX_CATALOGS) pendings.delete(pendings.keys().next().value!);
+    },
+  };
+  return readAgyDatabase(dbPath, (db) =>
+    db.query<{ idx: number; payload: Uint8Array | null }, []>("SELECT idx, step_payload AS payload FROM steps WHERE step_type = 132 AND status = 9 LIMIT 8").all()
+      .map(({ idx, payload }) => ({ idx, payload: payload instanceof Uint8Array ? payload : new Uint8Array() })), cache, undefined, "always");
+}
+
+/** `agyPendingSteps` on a file thread, as `agyCatalogOffThread`: it copies the same database. */
+export async function agyPendingStepsOffThread(path: string): Promise<AgyPendingStep[]> {
+  try { return await fileTask<AgyPendingStep[]>({ op: "agy-pending", path }); }
+  catch (error) { throw error instanceof FileBusyError ? error : new AgyUnavailable(); }
 }
 
 function entry(line: string): Record<string, unknown> {
@@ -160,7 +107,46 @@ export async function agyCatalogOffThread(path: string): Promise<Set<number>> {
   return new Set(rows);
 }
 
-export interface AgyProjection { segments: { start: number; end: number }[]; promptStarts: number[]; revision: string; indices: number[]; activity: "working" | "idle" }
+export interface AgyProjection { segments: { start: number; end: number }[]; promptStarts: number[]; revision: string; indices: number[]; activity: "working" | "idle"; model: string | null; reasoning_effort: string | null }
+const SETTINGS_OPEN = "<USER_SETTINGS_CHANGE>";
+const SETTINGS_CLOSE = "</USER_SETTINGS_CHANGE>";
+// display names hold dots (`Gemini 3.8 Flash (High)`): the value ends at the sentence's period
+const AGY_SETTINGS_MODEL = /^The user changed setting `Model Selection` from [^\n]+? to ([^\n]+?)\.(?: |$)/mu;
+const AGY_PAREN_EFFORT = /^(.*\S)\s+\((none|minimal|extra-low|low|medium|high|xhigh|max)\)$/iu;
+const AGY_ID_EFFORT = /^(.+?)-(extra-low|minimal|low|medium|high|xhigh|max)$/u;
+const normalizeModelKey = (name: string): string => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+/** Agy appends its settings block last, after every skill body and mentioned item it expands: a block inside one of those is text. */
+function agySettingsBlock(metadata: string): string | null {
+  const trimmed = metadata.trimEnd();
+  if (!trimmed.endsWith(SETTINGS_CLOSE)) return null;
+  const open = trimmed.lastIndexOf(SETTINGS_OPEN);
+  return open < 0 ? null : trimmed.slice(open + SETTINGS_OPEN.length, -SETTINGS_CLOSE.length);
+}
+
+function stepModel(value: Record<string, unknown>): StepModel | undefined {
+  if (value.status !== "DONE") return undefined;
+  if (value.type === "USER_INPUT" && typeof value.content === "string") {
+    const envelope = agyEnvelope(value.content);
+    const block = envelope === null ? null : agySettingsBlock(envelope.metadata);
+    const chosen = (block === null ? null : AGY_SETTINGS_MODEL.exec(block))?.[1]?.trim() ?? "";
+    if (!chosen || chosen === "None") return undefined;
+    const paren = AGY_PAREN_EFFORT.exec(chosen);
+    return paren
+      ? { model: paren[1]!.trim(), reasoning_effort: paren[2]!.toLowerCase(), source: "settings" }
+      : { model: chosen, reasoning_effort: null, source: "settings" };
+  }
+  if (value.type === "PLANNER_RESPONSE" && typeof value.model === "string") {
+    const raw = value.model.trim();
+    if (!raw) return undefined;
+    const suffixed = AGY_ID_EFFORT.exec(raw);
+    return suffixed
+      ? { model: suffixed[1]!, reasoning_effort: suffixed[2]!.toLowerCase(), source: "planner" }
+      : { model: raw, reasoning_effort: null, source: "planner" };
+  }
+  return undefined;
+}
+
 function agyScan(path: string, fd: number): Index {
   const stat = fstatSync(fd);
   const identity = `${stat.dev}:${stat.ino}`;
@@ -201,7 +187,7 @@ function agyScan(path: string, fd: number): Index {
         : value.type === "PLANNER_RESPONSE"
           ? (Array.isArray(value.tool_calls) && value.tool_calls.length > 0) || typeof value.content !== "string" || !value.content.trim() ? "working" : "idle"
           : undefined;
-      index.steps.push({ index: number, start: lineStart, end: lineEnd, type: value.type as string, status: String(value.status ?? ""), digest: hash(line), activity });
+      index.steps.push({ index: number, start: lineStart, end: lineEnd, type: value.type as string, status: String(value.status ?? ""), digest: hash(line), activity, model: stepModel(value) });
       if (index.steps.length > MAX_ENTRIES) throw new AgyUnavailable();
       index.scanned = lineEnd;
       start = newline + 1;
@@ -229,8 +215,24 @@ function agyReduce(index: Index, catalog: Set<number>): AgyProjection {
   const promptStarts: number[] = [], indices: number[] = [];
   let length = 0;
   let activity: AgyProjection["activity"] = "idle";
+  let model: string | null = null;
+  let reasoning_effort: string | null = null;
+  let display: { key: string; model: string; reasoning_effort: string | null } | null = null;
   for (const step of visible) {
     if (step.activity !== undefined) activity = step.activity;
+    if (step.model !== undefined) {
+      if (step.model.source === "settings") {
+        model = step.model.model;
+        reasoning_effort = step.model.reasoning_effort;
+        display = { key: normalizeModelKey(step.model.model), model: step.model.model, reasoning_effort: step.model.reasoning_effort };
+      } else if (display !== null && display.key === normalizeModelKey(step.model.model)) {
+        model = display.model;
+        reasoning_effort = step.model.reasoning_effort ?? display.reasoning_effort;
+      } else {
+        model = step.model.model;
+        reasoning_effort = step.model.reasoning_effort;
+      }
+    }
     indices.push(step.index);
     if (step.type === "USER_INPUT" && step.status === "DONE") promptStarts.push(length);
     const previous = segments.at(-1);
@@ -238,7 +240,7 @@ function agyReduce(index: Index, catalog: Set<number>): AgyProjection {
     else segments.push({ start: step.start, end: step.end });
     length += step.end - step.start;
   }
-  return { segments, promptStarts, revision: index.revision, indices, activity };
+  return { segments, promptStarts, revision: index.revision, indices, activity, model, reasoning_effort };
 }
 
 const historyReads = new Map<string, Promise<unknown>>();
@@ -301,12 +303,56 @@ export function parseAgyTranscript(text: string, path?: string): ConversationTur
   const steps = path ? new Map(indexes.get(path)?.visible.map((step) => [step.index, step])) : undefined;
   let idle = false;
   let woken = false;
+  type ToolPart = Extract<ConversationPart, { kind: "tool" }>;
+  let pendingBatch: { plannerIndex: number; calls: ToolPart[]; generics: { stepIndex: number; content: string; line: string; ts: string | null; step: Step | undefined }[] } | null = null;
+  const appendAssistant = (parts: ConversationPart[], ts: string | null, fromPlanner: boolean): void => {
+    if (!parts.length) return;
+    const previous = turns.at(-1);
+    const opens = woken && fromPlanner;
+    if (previous?.role === "assistant" && !opens) {
+      previous.parts.push(...parts);
+      if (!woken && (!idle || fromPlanner)) previous.end_ts = ts ?? undefined;
+    } else {
+      turns.push({ role: "assistant", ts, end_ts: ts ?? undefined, parts });
+      woken = false;
+    }
+  };
+  const flushBatch = (): void => {
+    if (pendingBatch === null) return;
+    const { plannerIndex, calls, generics } = pendingBatch;
+    pendingBatch = null;
+    if (generics.length === 0) return;
+    // Agy allocates sequential step indices to tool results in dispatch order right after the
+    // planner step. Pair them only when the count and indices match 1-to-1; otherwise keep each
+    // result independent rather than guessing.
+    if (generics.length === calls.length && generics.every((entry, idx) => entry.stepIndex === plannerIndex + 1 + idx)) {
+      for (let idx = 0; idx < calls.length; idx++) {
+        const result = generics[idx]!;
+        if (!result.content) continue;
+        trimOutput(calls[idx]!, result.content, path && result.step ? outputRef(path, result.step) : `agy:${hash(result.line)}`);
+        const previous = turns.at(-1);
+        if (previous?.role === "assistant" && !woken && !idle) previous.end_ts = result.ts ?? undefined;
+      }
+      return;
+    }
+    for (const result of generics) {
+      if (!result.content) continue;
+      const part: ToolPart = { kind: "tool", name: "Tool output", summary: `Step ${result.stepIndex}`, input: "", output: "" };
+      trimOutput(part, result.content, path && result.step ? outputRef(path, result.step) : `agy:${hash(result.line)}`);
+      appendAssistant([part], result.ts, false);
+    }
+  };
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const value = entry(line);
     if (value.status !== "DONE") continue;
     const content = typeof value.content === "string" ? value.content : "";
     const ts = typeof value.created_at === "string" ? value.created_at : null;
+    if (value.type === "GENERIC" && pendingBatch !== null) {
+      pendingBatch.generics.push({ stepIndex: value.step_index as number, content, line, ts, step: steps?.get(value.step_index as number) });
+      continue;
+    }
+    flushBatch();
     if (value.type === "USER_INPUT") {
       const envelope = agyEnvelope(content);
       const skills = envelope === null ? [] : agyInvokedSkills(envelope.request, envelope.metadata).map((skill) => ({ kind: "skill" as const, skill }));
@@ -322,10 +368,12 @@ export function parseAgyTranscript(text: string, path?: string): ConversationTur
     }
     if (value.type !== "PLANNER_RESPONSE" && value.type !== "GENERIC") continue;
     const parts: ConversationPart[] = [];
+    const callParts: ToolPart[] = [];
+    let malformedCall = false;
     if (value.type === "GENERIC") {
       if (!content) continue;
       // Native exports provide no call ID. Keep this result independent of planner calls.
-      const part: Extract<ConversationPart, { kind: "tool" }> = { kind: "tool", name: "Tool output", summary: `Step ${value.step_index}`, input: "", output: "" };
+      const part: ToolPart = { kind: "tool", name: "Tool output", summary: `Step ${value.step_index}`, input: "", output: "" };
       const step = steps?.get(value.step_index as number);
       trimOutput(part, content, path && step ? outputRef(path, step) : `agy:${hash(line)}`);
       parts.push(part);
@@ -333,29 +381,26 @@ export function parseAgyTranscript(text: string, path?: string): ConversationTur
       if (content) parts.push({ kind: "text", text: content });
       for (const call of Array.isArray(value.tool_calls) ? value.tool_calls : []) {
         const tool = record(call), input = record(tool.args);
-        if (typeof tool.name !== "string") continue;
+        if (typeof tool.name !== "string") { malformedCall = true; continue; }
         const mapped = { ...input, command: input.CommandLine, file_path: input.Path ?? input.AbsolutePath ?? input.TargetFile };
-        const part: Extract<ConversationPart, { kind: "tool" }> = { kind: "tool", name: tool.name, summary: toolSummary(tool.name, mapped), input: JSON.stringify(input), output: "" };
+        const part: ToolPart = { kind: "tool", name: tool.name, summary: toolSummary(tool.name, mapped), input: JSON.stringify(input), output: "" };
         // the ledger ties no output step to its call, so a read stays requested
         const skill = tool.name === "read_file" ? skillDocument(input.Path) : null;
         if (skill) part.skill = { ...skill, status: "requested" };
         parts.push(part);
+        callParts.push(part);
       }
     }
     if (!parts.length) continue;
     if (value.type === "PLANNER_RESPONSE") {
       idle = (!Array.isArray(value.tool_calls) || value.tool_calls.length === 0) && content.trim().length > 0;
+      if (callParts.length > 0 && !malformedCall) {
+        pendingBatch = { plannerIndex: value.step_index as number, calls: callParts, generics: [] };
+      }
     }
-    const previous = turns.at(-1);
-    const opens = woken && value.type === "PLANNER_RESPONSE";
-    if (previous?.role === "assistant" && !opens) {
-      previous.parts.push(...parts);
-      if (!woken && (!idle || value.type === "PLANNER_RESPONSE")) previous.end_ts = ts ?? undefined;
-    } else {
-      turns.push({ role: "assistant", ts, end_ts: ts ?? undefined, parts });
-      woken = false;
-    }
+    appendAssistant(parts, ts, value.type === "PLANNER_RESPONSE");
   }
+  flushBatch();
   return turns;
 }
 

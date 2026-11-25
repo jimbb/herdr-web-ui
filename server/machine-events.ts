@@ -1,11 +1,12 @@
 /** The authorized machine event document, shared by SSE and the terminal WebSocket. */
 import type { QueueSnapshot } from "../shared/agent-queue.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, Machine, MachineEvent, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
+import type { AgentToolPanesEvent, DevicePairedEvent, DevicePairedSeenEvent, DeviceRemovedEvent, PendingRedemptionsEvent, Machine, MachineEvent, RelayPairingsEvent, RemotePairingsEvent } from "../shared/machines.ts";
 import type { AgentRowTokens } from "../shared/pane-tokens.ts";
 import type { SharedPreferences } from "../shared/preferences.ts";
 import type { SeenFinish } from "../shared/seen.ts";
 import type { MachineManager } from "./machines.ts";
 import { decidedRowTokens, reportedTokenValues, snapshotWithoutHiddenTokens, withoutHiddenTokens } from "./herdr-sidebar.ts";
+import { preferencesForClient } from "./preferences.ts";
 
 export interface MachineEventDocument {
   manager: Pick<MachineManager, "subscribe">;
@@ -14,7 +15,7 @@ export interface MachineEventDocument {
   seen?: { list(): SeenFinish[]; subscribe(listener: (finish: SeenFinish) => void): () => void };
   agentQueue?: { cachedSnapshot(): QueueSnapshot; subscribe(listener: (queue: QueueSnapshot) => void): () => void };
   /** Filtered for the authenticated device and browser at the transport's admission boundary. */
-  pairings?: { subscribe(listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void): () => void };
+  pairings?: { subscribe(listener: (event: DevicePairedEvent | DevicePairedSeenEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent | PendingRedemptionsEvent | AgentToolPanesEvent) => void): () => void };
 }
 
 /** Initial documents and subsequent invalidations use exactly the same redaction on either transport. */
@@ -54,7 +55,7 @@ export function subscribeMachineEvents({ manager, preferences, herdrSidebar, see
         ? { ...event, message: { ...event.message, snapshot: snapshotWithoutHiddenTokens(rows, event.message.snapshot) } }
         : event);
     }));
-    const sendPreferences = (shared: SharedPreferences) => tell({ type: "preferences", preferences: shared });
+    const sendPreferences = (shared: SharedPreferences) => tell({ type: "preferences", preferences: preferencesForClient(shared) });
     if (preferences) {
       stops.push(preferences.subscribe(sendPreferences));
       sendPreferences(preferences.get());

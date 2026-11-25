@@ -4,7 +4,7 @@
  * components/TextFileView.tsx, components/TextFileEditor.tsx, components/FilePathLink.tsx, components/FilePanelResizer.tsx,
  * components/HighlightedCode.tsx, components/RepoDiffViewer.tsx, components/RepoChanges.tsx,
  * components/RepoDiff.tsx, lib/repoDiff.ts, lib/diffLineNotes.ts, components/WebPanel.tsx,
- * components/PullRequestPanel.tsx, lib/pullRequest.ts, components/MarkdownOutline.tsx.
+ * components/PullRequestPanel.tsx, lib/pullRequest.ts, components/MarkdownOutline.tsx, components/BrowserSidePanel.tsx.
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const FILES_ZH: Record<string, string> = {
@@ -18,8 +18,6 @@ export const FILES_ZH: Record<string, string> = {
   "Show source": "显示源代码",
   "Resize file panel": "调整文件面板宽度",
   "Show beside the pane": "在窗格旁显示",
-  "Reload page": "重新加载页面",
-  "Close page": "关闭页面",
   "Show as a popup": "以弹窗显示",
   "Close files": "关闭文件",
   "Showing the first {shown} of {total}.": "显示 {total} 项中的前 {shown} 项。",
@@ -131,12 +129,10 @@ export const FILES_ZH: Record<string, string> = {
   "Diff lines: the arrow keys pick a line, Enter adds a note on it": "差异行：用方向键选择一行，按 Enter 为其添加备注",
   "Note added. It goes first in the next message you send from this pane's Chat (not with a slash command, a ! line or an answer to a question).": "已添加备注。它会放在你从此窗格的聊天发出的下一条消息最前面（斜杠命令、! 行或对问题的回答不会带上它）。",
   "Pick a line to add a note.": "选择要添加备注的行。",
-  "Add a note": "添加备注",
   "This note would make your next message too long. Shorten the note or the message, or remove a waiting comment.": "加上此备注后下一条消息会太长。请缩短备注或消息，或删除一条等待中的评论。",
   "This note could not be saved on this device.": "无法在此设备上保存此备注。",
   "Note on {place}": "{place}的备注",
   "What should the agent know about this line?": "关于这一行，代理需要知道什么？",
-  "Note": "备注",
   "Add to next message": "添加到下一条消息",
   "Notes go to the pane this diff came from, and it has none.": "备注会发往打开此差异的窗格，但它没有窗格。",
   "The pane this diff came from has closed, so a note has nowhere to go.": "打开此差异的窗格已关闭，备注无处可去。",
@@ -228,4 +224,18 @@ export const FILES_ZH: Record<string, string> = {
   "Split": "并排",
   "The text size of a file you open, in its preview and its source. It follows the chat font size until you set one here.": "所打开文件的字号，预览和源码都适用。在这里设置之前，跟随聊天的字号。",
   "On a wide window, Browse files opens as a panel to the right of the pane and not as a popup. With Open files on Beside the pane, a file opened from the list takes its place, and closing the file brings the list back.": "在宽窗口中，“浏览文件”会作为窗格右侧的面板打开，而不是弹窗。当“打开文件”设为“在窗格旁”时，从列表打开的文件会显示在这个位置，关闭文件后列表恢复显示。",
+  "Browser panel": "浏览器面板",
+  "Results": "产出",
+  "Files the browser downloads, screenshots and published pages show here.": "浏览器下载的文件、截图和发布的页面会显示在这里。",
+  "Published page": "发布的页面",
+  "Tabs the agents use": "Agent 使用的标签页",
+  "No agent is using a tab.": "没有 Agent 在使用标签页。",
+  "Screenshot": "截图",
+  "Downloading…": "下载中…",
+  "Show in folder": "在文件夹中显示",
+  "Close page": "关闭页面",
+  "You have control": "由你控制",
+  "{agent} is using it": "{agent} · 使用中",
+  "An agent is using it": "Agent 使用中",
+  "Open {name}": "打开 {name}",
 };

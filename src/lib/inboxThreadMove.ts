@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { HerdrPane, HerdrWorkspace, SessionSnapshot } from "../../shared/protocol.ts";
 import { moveDestinations } from "./layoutTargets.ts";
 
@@ -24,4 +25,14 @@ export function inboxThreadMoveDestinations(state: ThreadMoveEligibility): Herdr
   const tabPaneCount = state.snapshot.panes.filter((item) => item.tab_id === state.pane!.tab_id).length;
   if (tabPaneCount !== 1) return [];
   return moveDestinations(state.snapshot.workspaces, state.pane, state.pane.workspace_id);
+}
+
+export function useInboxThreadMoveMenu(state: ThreadMoveEligibility, machineId: string) {
+  const [menu, setMenu] = useState<{ anchor: HTMLElement; machineId: string; tabId: string } | null>(null);
+  useLayoutEffect(() => { if (menu !== null && !menu.anchor.isConnected) setMenu(null); });
+  const destinations = inboxThreadMoveDestinations(state);
+  const active = menu !== null && destinations.length > 0 && state.pane !== null
+    && menu.machineId === machineId && menu.tabId === state.pane.tab_id;
+  useEffect(() => { if (menu !== null && !active) setMenu(null); }, [menu, active]);
+  return { menu, setMenu, destinations, active };
 }

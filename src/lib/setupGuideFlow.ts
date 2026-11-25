@@ -1,4 +1,5 @@
 import type { AgentCatalogEntry, AgentCatalogRow } from "../../shared/agent-catalog.ts";
+import type { SecuritySummary } from "../../shared/access.ts";
 import type { HealthAuth, PairedDevice, RelayStatus } from "../../shared/protocol.ts";
 import type { SetupStep } from "./agentSetup.ts";
 import type { ProviderUsage } from "../../shared/usage.ts";
@@ -74,6 +75,11 @@ export function phoneWay(relay: { unsupported: boolean; status: Pick<RelayStatus
   if (auth.role === "watch" || auth.via === "portal") return "other";
   if (relay.status === null) return "wait";
   return relay.status.blocked === null ? "relay" : "other";
+}
+
+/** Device table T70: other devices reach this PC only through the relay when it is bound to its loopback and this page came in on it directly; any other or unnamed ingress may be a route of its own (SSH this setup cannot see). */
+export function relayOnlyPc(summary: Pick<SecuritySummary, "bind_scope" | "observed_ingress">): boolean {
+  return summary.bind_scope === "loopback" && summary.observed_ingress === "direct";
 }
 
 export type PhoneBoxOpening = "tap" | "first-run";
@@ -225,6 +231,14 @@ export function saveGuide(storage: Pick<Storage, "setItem">, state: GuideState |
 
 export function otherDevice(devices: readonly PairedDevice[]): string | null {
   return devices.find((device) => !device.current)?.label ?? null;
+}
+
+/**
+ * The device a code shown since `known` was read paired here, if one did; null `known`: not read yet, so none. One the
+ * PC's account let in (`through_account`) came by no code, so it is not that one.
+ */
+export function pairedSince(devices: readonly PairedDevice[], known: ReadonlySet<string> | null): PairedDevice | undefined {
+  return known === null ? undefined : devices.find((device) => !device.through_account && !known.has(device.id));
 }
 
 export interface SetupFacts {

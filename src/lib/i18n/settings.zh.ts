@@ -1,10 +1,11 @@
 /**
  * Simplified Chinese for the keys only the settings files use:
  * components/SettingsDialog.tsx (with THEME_NAMES), components/SignOutRow.tsx, components/KeyBarSettings.tsx,
- * components/SettingsControls.tsx, components/TelemetryControls.tsx, lib/paletteSettings.ts.
+ * components/SettingsControls.tsx, components/TelemetryControls.tsx, components/LinkBrowserRow.tsx, components/TerminalCommandRow.tsx, lib/paletteSettings.ts.
  * Register and fixed terms follow ../i18n.zh.ts; a key another feature also uses goes there.
  */
 export const SETTINGS_ZH: Record<string, string> = {
+  "Forget": "忘记",
   "Finished": "完成",
   "Direct typing": "直接输入",
   "Microphone permission was denied": "麦克风权限已被拒绝",
@@ -133,7 +134,6 @@ export const SETTINGS_ZH: Record<string, string> = {
   "Auto ({language})": "自动（{language}）",
   "No OpenAI key: the browser's speech recognition is used": "未设置 OpenAI 密钥，将使用浏览器的语音识别",
   "Speech recognition": "语音识别",
-  "Browser": "浏览器",
   "API key": "API 密钥",
   "Save an API key to use the mic": "保存 API 密钥后才能使用麦克风",
   "No OpenAI key saved": "未保存 OpenAI 密钥",
@@ -170,7 +170,7 @@ export const SETTINGS_ZH: Record<string, string> = {
   "Anonymous usage counts": "匿名使用统计",
   "Turned off on this PC by OVIS_TELEMETRY=0, DO_NOT_TRACK or a CI environment.": "此电脑因 OVIS_TELEMETRY=0、DO_NOT_TRACK 或 CI 环境而已关闭。",
   "Send anonymous usage counts": "发送匿名使用统计",
-  "Once on install and once per update, with the last browser's app settings, and once a day you open the app, with the kinds of coding agents running in herdr (such as claude or codex), the kinds of screen the app was opened on, how they reached this PC (this PC itself, the local network, Tailscale, Funnel, a device paired through the Ovis relay (through the relay or directly), Portal or another proxy), and how many prompt answers were sent and alerts delivered and tapped. After each day, how often the app's buttons were used that day (chat sends, the composer's buttons, the agent inbox, and switches between chat and terminal by kind of agent and how) and, for a few actions, whether a button, a menu, a shortcut or the command palette was used, each count only as a rough range, with the list of which of these controls were shown, on narrow and wide screens apart, never what was typed, which pane or what time of day. Custom fonts, shortcuts and replies are reported only as customization flags or counts, never their text. Account identifiers, terminal content and files are excluded. The receiver stores the country, not the IP address.": "应用安装时发送一次，每次更新发送一次，并附带最后使用的浏览器中的应用设置；在你打开应用的每一天再发送一次，并附带 herdr 中正在运行的编码代理类型（例如 claude 或 codex）、打开应用的屏幕类型、这些屏幕连接到这台电脑的方式（这台电脑本身、本地网络、Tailscale、Funnel、通过 Ovis 中继配对的设备（经由中继或直接连接）、Portal 或其他代理），以及发送的提示回答数量和送达、被点开的提醒数量。每天结束后，还会发送当天应用各按钮的使用频率（聊天发送、输入框按钮、代理收件箱，以及按代理类型和操作方式划分的聊天与终端切换），以及部分操作是通过按钮、菜单、快捷键还是命令面板完成的，每个次数只以大致区间上报；这些控件中哪些曾显示，则以名称列表发送。区分窄屏和宽屏，绝不包含输入的内容、哪个窗格或具体时间。自定义字体、快捷键和快捷回复仅以自定义标记或数量的形式上报，绝不包含其文本。不包含账户标识、终端内容和文件。接收端只保存国家，不保存 IP 地址。",
+  "Once on install and once per update, with the last browser's app settings, and once a day you open the app, with the kinds of coding agents running in herdr (such as claude or codex), the kinds of screen the app was opened on, how they reached this PC (this PC itself, the local network, Tailscale, Funnel, a device paired through the Ovis relay (through the relay or directly), Portal or another proxy), how many prompt answers were sent and alerts delivered and tapped, how many panes of each kind of agent Ovis started and how many were started otherwise, the agents' versions (such as 2.1), and how answers to agents went (through the agent's own channel, as keys, or at the terminal), in ranges. After each day, how often the app's buttons were used that day (chat sends, the composer's buttons, the agent inbox, and switches between chat and terminal by kind of agent and how) and, for a few actions, whether a button, a menu, a shortcut or the command palette was used, each count only as a rough range, with the list of which of these controls were shown, on narrow and wide screens apart, never what was typed, which pane or what time of day. Custom fonts, shortcuts and replies are reported only as customization flags or counts, never their text. Account identifiers, terminal content and files are excluded. The receiver stores the country, not the IP address.": "应用安装时发送一次，每次更新发送一次，并附带最后使用的浏览器中的应用设置；在你打开应用的每一天再发送一次，并附带 herdr 中正在运行的编码代理类型（例如 claude 或 codex）、打开应用的屏幕类型、这些屏幕连接到这台电脑的方式（这台电脑本身、本地网络、Tailscale、Funnel、通过 Ovis 中继配对的设备（经由中继或直接连接）、Portal 或其他代理），发送的提示回答数量和送达、被点开的提醒数量，每种代理由 Ovis 启动的窗格数和以其他方式启动的窗格数、代理版本（例如 2.1），以及回答发给代理的途径（代理自身的通道、按键或终端）的大致区间。每天结束后，还会发送当天应用各按钮的使用频率（聊天发送、输入框按钮、代理收件箱，以及按代理类型和操作方式划分的聊天与终端切换），以及部分操作是通过按钮、菜单、快捷键还是命令面板完成的，每个次数只以大致区间上报；这些控件中哪些曾显示，则以名称列表发送。区分窄屏和宽屏，绝不包含输入的内容、哪个窗格或具体时间。自定义字体、快捷键和快捷回复仅以自定义标记或数量的形式上报，绝不包含其文本。不包含账户标识、终端内容和文件。接收端只保存国家，不保存 IP 地址。",
   "Once a day you open the app:": "在你打开应用的每一天发送一次：",
   "After a day has ended:": "每天结束后：",
   "The receiver adds the country this message comes from (two letters, such as KR). It does not store the address.": "接收端会附加这条消息来自的国家（两个字母，例如 KR）。不保存地址。",
@@ -182,6 +182,10 @@ export const SETTINGS_ZH: Record<string, string> = {
   "Beside the pane": "在窗格旁",
   "In a new tab": "在新标签页中",
   "Reuse tab for external links": "重复使用外部链接标签页",
+  "Browser for links": "打开链接的浏览器",
+  "The browser a web link you click in Ovis opens in, on this computer. Sign-in pages always open in the system's default browser.": "在这台电脑上点击 Ovis 中的网页链接时使用的浏览器。登录页面始终在系统默认浏览器中打开。",
+  "System default": "系统默认",
+  "System default ({name})": "系统默认 ({name})",
   "theme themes palette dark light mode colors density language sidebar logos": "主题 调色板 palette 深色 浅色 模式 颜色 密度 语言 侧边栏 徽标",
   "chat message width composer enter send thinking code": "聊天 消息 宽度 输入框 回车 发送 思考 代码",
   "terminal key bar keyboard clipboard": "终端 按键栏 键盘 剪贴板",
@@ -240,7 +244,6 @@ export const SETTINGS_ZH: Record<string, string> = {
   "agents hooks claude codex install": "Agent 钩子 claude codex 安装",
   "onboarding first run getting started welcome": "入门 首次运行 开始使用 欢迎",
   "Agent integrations": "代理集成",
-  "This page shows one PC. The front page lists every PC this phone is paired with.": "此页面只显示一台电脑。首页列出与此手机配对的所有电脑。",
   "Deletes this phone's key for this PC. Pairing again takes a new QR code from the PC.": "删除此手机对应这台电脑的密钥。重新配对需要电脑上新的二维码。",
 
   "Through Portal": "经由 Portal",
@@ -288,4 +291,27 @@ export const SETTINGS_ZH: Record<string, string> = {
 
   "Could not read this PC's alert destination ({error}). Close Settings and open it again.": "无法读取此 PC 的外部提醒设置（{error}）。请关闭设置后重新打开。",
   "queue tasks schedule batch": "队列 任务 调度 批量 排队",
+  "Built-in browser": "内置浏览器",
+  "Blocked sites": "屏蔽的网站",
+  "Opens web pages in tabs inside this app: they are listed under Browser in the sidebar and open beside the pane. Its tabs are signed in to nothing you use elsewhere, and an agent's tabs keep cookies of their own.": "在此应用内的标签页中打开网页：标签页列在侧边栏的“浏览器”下，并在窗格旁打开。这些标签页不使用你在别处的登录，Agent 的标签页使用各自的 Cookie。",
+  "The built-in browser never loads these sites or their subdomains, in your tabs or an agent's. One site per line.": "内置浏览器不会在你的标签页或 Agent 的标签页中加载这些网站及其子域名。每行一个网站。",
+  "Density": "密度",
+  "Comfortable": "宽松",
+  "Compact": "紧凑",
+  "Language": "语言",
+  "Interface font size": "界面字号",
+  "Decrease interface font size": "减小界面字号",
+  "Increase interface font size": "增大界面字号",
+  "Forget this PC?": "忘记这台电脑？",
+  "This phone's key for it is deleted here, and the PC keeps listing this phone until it is revoked there. Pairing again takes a new QR code from the PC.": "此手机上的对应密钥将被删除；在电脑上撤销之前，它仍会列出这部手机。重新配对需要电脑上新的二维码。",
+  "Terminal command": "终端命令",
+  "Use ovis in a terminal": "在终端中使用 ovis",
+  "Adds the ovis command for this app: in a new terminal window, ovis login, ovis status and ovis approve work on this app's Ovis.": "为此应用添加 ovis 命令：在新的终端窗口中，ovis login、ovis status 和 ovis approve 将作用于此应用的 Ovis。",
+  "Add the command": "添加命令",
+  "Adding the command…": "正在添加命令…",
+  "Couldn't add the ovis command.": "无法添加 ovis 命令。",
+  "{path} is the ovis command of another Ovis install: it stays as it is, and this app adds none.": "{path} 是另一个 Ovis 安装的 ovis 命令：保持原样，此应用不添加命令。",
+  "{path} comes first on your terminal's PATH, so ovis runs that one.": "终端的 PATH 中 {path} 排在前面，因此 ovis 会运行它。",
+  "{dir} is not on your terminal's PATH: add it there to run ovis.": "{dir} 不在终端的 PATH 中：将其加入 PATH 才能运行 ovis。",
+  "Added ~/.local/bin to your PATH in {path}: open a new terminal window to run ovis.": "已在 {path} 中将 ~/.local/bin 加入 PATH：请打开新的终端窗口运行 ovis。",
 };

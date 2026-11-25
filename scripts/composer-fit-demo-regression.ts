@@ -25,6 +25,35 @@ try {
         await page.evaluate(() => (window as any).fitReply(true));
         await page.locator(".composer-stop").waitFor();
       });
+      // Claude Code's plan mode is the one mode drawn: an icon named for it, whole in the row at every width, with or
+      // without the plan chip, also with the chip's step in progress (which steps out where the icon needs its room);
+      // every other mode draws nothing
+      for (const width of [320, 360, 390, 1280]) for (const chip of ["none", "idle", "step"] as const) for (const mode of ["plan", "default", "acceptEdits", "auto", "bypassPermissions", "dontAsk"]) {
+        if (mode !== "plan" && (width !== 390 || chip !== "idle")) continue;
+        await withCard(browser, width, { agent: "claude", model: "claude-opus-5-5", status: "idle", pending: false, mode, noChip: chip === "none", step: chip === "step" }, async (page) => {
+          const what = `${mode} at ${width}px, plan chip ${chip}`;
+          await page.waitForFunction((want) => (document.querySelector(".bg-tasks-toggle") !== null) === (want !== "none")
+            && (want !== "step" || document.querySelector(".bg-tasks-current") !== null), chip, { timeout: 5_000 });
+          const icon = () => page.evaluate(() => {
+            const item = document.querySelector<HTMLElement>(".composer-mode");
+            if (!item) return null;
+            const box = item.getBoundingClientRect(), status = document.querySelector(".composer-status")!.getBoundingClientRect();
+            const svg = item.querySelector("svg")!.getBoundingClientRect();
+            return { name: item.getAttribute("aria-label"), width: svg.width, inRow: svg.left >= status.left - 0.5 && svg.right <= status.right + 0.5 && svg.top >= status.top - 0.5 && svg.bottom <= status.bottom + 0.5 };
+          });
+          if (mode === "plan") {
+            // the fit answers a frame after the chip's step is drawn: wait for the icon to stand whole, never a fixed time
+            await page.waitForFunction(() => {
+              const svg = document.querySelector(".composer-mode svg")?.getBoundingClientRect(), status = document.querySelector(".composer-status")!.getBoundingClientRect();
+              return svg !== undefined && svg.width > 1.5 && svg.left >= status.left - 0.5 && svg.right <= status.right + 0.5;
+            }, undefined, { timeout: 5_000 }).catch(async () => assert.fail(`${what}: the plan icon is not drawn whole in the row: ${JSON.stringify(await icon())}`));
+            assert.equal((await icon())?.name, "Plan mode", `${what}: the icon is named for the mode`);
+          } else assert.equal(await icon(), null, `${what}: no mode is drawn`);
+          const row = await measure(page);
+          assert.deepEqual(row.overlaps, [], `${what}: nothing overlaps its neighbour`);
+          assert.equal(row.overflowing, false, `${what}: the page does not scroll sideways`);
+        });
+      }
       // Typography is applied by SettingsProvider after the render. At this fixed card width,
       // the larger interface font must step effort out without needing a viewport resize.
       await withCard(browser, 1075, { agent: "codex", model: LONG_MODEL }, async (page) => {
@@ -51,6 +80,19 @@ try {
         assert.equal(restored.effort?.clipped, false);
       });
       console.log("PASS live interface typography changes refit status labels at a fixed card width");
+
+      await withCard(browser, 330, { agent: "claude", model: "claude-opus-5-5", status: "idle", pending: false, uiFontSize: 15 }, async (page) => {
+        const draws = new Set<string>();
+        for (let width = 330; width >= 304; width -= 2) {
+          await page.setViewportSize({ width, height: 844 });
+          await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => done())))));
+          const row = await measure(page);
+          await drawn(page, row.draw as Draw, `${width}px at a 15px interface font, whose 3ch floor of 23.78px clientWidth reads as 24`);
+          draws.add(row.draw);
+        }
+        assert.ok(draws.has("no-effort") && draws.has("out"), `the name is cut toward its floor, then the label steps out: ${[...draws].join(", ")}`);
+      });
+      console.log("PASS a name cut to a fractional floor steps the label out, so the pill never cuts the ring");
 
       for (const width of [390, 1440]) await withCard(browser, width, { model: LONG_MODEL }, async (page) => {
         const box = page.getByRole("textbox", { name: "Message", exact: true });
@@ -125,14 +167,31 @@ try {
       for (const agent of ["claude", "codex"] as const) for (const width of [350, 390, 800, 1440]) for (const mic of [false, true]) await withCard(browser, width, { agent, model: "gpt-5.6", mic }, async (page) => {
         const rest = await measure(page);
         assert.ok(rest.stop && !rest.send && !rest.sendOptions && !rest.queue, JSON.stringify(rest));
-        assert.equal(await page.locator(".composer-context").evaluate((node) =>
-          node.tagName === "SPAN" && node.getAttribute("title")?.includes("%") === true && !node.hasAttribute("aria-expanded") && !node.hasAttribute("tabindex")), true, "the context ring is display-only");
+        assert.equal(await page.locator(".composer-context").evaluate((node, desktop) =>
+          node.tagName === "SPAN" && node.getAttribute("title")?.includes("%") === true && !node.hasAttribute("aria-expanded") && node.hasAttribute("tabindex") === desktop && (!desktop || node.tabIndex === 0), width >= 800), true,
+          width >= 800 ? "the context ring is keyboard-focusable without expanding inline" : "a phone keeps the context ring out of the tab order");
         await draft(page);
         const row = await measure(page);
         await drawn(page, row.draw as Draw, `${agent} ${width}px, a written follow-up`);
         assert.ok(row.send && !row.stop && !row.sendOptions && !row.queue && row.ring, JSON.stringify(row));
         assert.equal(row.card.height, rest.card.height, "Send replaces Stop on the same row");
         if (width >= 800) {
+          // reached as a keyboard reaches it, back from Send, so its focus is a visible one
+          await page.locator(".composer-send").focus();
+          await page.keyboard.press("Shift+Tab");
+          assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("composer-context") === true), true, `${agent} ${width}px: desktop context ring is reachable by keyboard`);
+          assert.equal(await page.locator(".composer-context").evaluate((node) => {
+            if (!node.matches(":focus-visible") || getComputedStyle(node, "::after").content !== JSON.stringify(node.getAttribute("data-tooltip"))) return false;
+            for (let up = node.parentElement; up && !up.classList.contains("composer-surface"); up = up.parentElement) {
+              const style = getComputedStyle(up);
+              if (style.display !== "contents" && (style.overflowX !== "visible" || style.overflowY !== "visible")) return false;
+            }
+            return true;
+          }), true, `${agent} ${width}px: the focused ring draws its number above it, clipped by no box around it`);
+          const focused = await measure(page);
+          assert.equal(focused.draw, row.draw, `${agent} ${width}px: focusing the ring leaves the row as drawn`);
+          assert.equal(focused.card.height, row.card.height);
+          await page.locator(".composer-context").evaluate((node) => (node as HTMLElement).blur());
           await page.locator(".composer-context").click();
           const pressed = await measure(page);
           assert.equal(pressed.draw, row.draw, `${agent} ${width}px: a press on the ring leaves the row as drawn`);

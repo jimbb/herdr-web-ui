@@ -3,8 +3,16 @@
  * on this PC: `_redirects` is read in file order, the first matching rule wins, a 200 rewrites
  * the path and any other status redirects; `_headers` rules are applied in order, each matching
  * rule's `! Name` lines removing a header and its `Name: value` lines setting it (a header two
- * rules set is joined with a comma, as Pages joins it). Paths match as Pages matches them: one
- * `*` splat for anything, `:name` for one path segment.
+ * rules set is joined with a comma, as Pages joins it), on every answer, redirects included, by the
+ * address asked for. Paths match as Pages matches them: one `*` splat for anything, `:name` for one
+ * path segment. As workers-sdk does (pages-shared/asset-server/handler.ts, and parseRedirects in its
+ * metadata generator): a rule that rewrites a splat or a directory to /index or /index.html is
+ * ignored, as its html handling would loop; the path served, rewritten or not, goes through that
+ * html handling, which answers `x.html` with a 308 to `x` (`/index.html` with one to `/`) and serves
+ * `x` from x.html; a missing file is the nearest 404.html on the way up from the path as a 404, else
+ * index.html as a 200 (Pages' single-page-app mode), else a bare 404; any 404 carries
+ * `Cache-Control: no-store` in place of whatever the rules set. scripts/pages-dev-check.ts
+ * holds this to `wrangler pages dev` on the built shell.
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -27,11 +35,16 @@ export function pathPattern(rule: string): RegExp {
   return new RegExp(`^${splat.replace(/:([A-Za-z]\w*)/g, (_, name: string) => `(?<${name}>[^/]+)`)}$`);
 }
 
+/** Whether Pages ignores the rule from `from` to `to` as an infinite loop: a relative rewrite of a splat or a directory to an index. */
+function loops(from: string, to: string): boolean {
+  return !/^[a-z][a-z0-9+.-]*:/i.test(to) && (from.endsWith("/*") || from.endsWith("/")) && /\/index(\.html)?$/.test(to);
+}
+
 export function parseRedirects(text: string): RedirectRule[] {
-  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#")).map((line) => {
+  return text.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#")).flatMap((line) => {
     const [from, to, status] = line.split(/\s+/);
     if (!from || !to) throw new Error(`_redirects: not a rule: ${line}`);
-    return { from: pathPattern(from), to, status: status === undefined ? 302 : Number(status) };
+    return loops(from, to) ? [] : [{ from: pathPattern(from), to, status: status === undefined ? 302 : Number(status) }];
   });
 }
 
@@ -92,28 +105,79 @@ export function loadPagesSite(dir: string): PagesSite {
   return { dir, redirects: parseRedirects(read("_redirects")), headers: parseHeaders(read("_headers")) };
 }
 
+/** The file at `served` (decoded), not a folder, or null. */
+function fileAt(site: PagesSite, served: string): string | null {
+  if (served === "/_headers" || served === "/_redirects") return null;
+  const relative = normalize(served).replace(/^(\.\.[/\\])+/, "");
+  const path = join(site.dir, relative);
+  return path.startsWith(site.dir) && existsSync(path) && !statSync(path).isDirectory() ? path : null;
+}
+
+/**
+ * Pages' 308 to `path`, each segment encoded, with the query asked for, and never a protocol-relative address: like
+ * workers-sdk's stripLeadingDoubleSlashes, a run of leading slashes (encoded, backslashes, tabs and spaces too)
+ * becomes one, so `/%2Frender.html` leads to `/render`, not to the host `render`.
+ */
+function redirectTo(path: string, search: string): Response {
+  const location = `${path.split("/").map(encodeURIComponent).join("/")}${search}`.replace(/^(\/|%2F|%2f|%5C|%5c|%09|\s|\\)+(.*)/, "/$2");
+  return new Response(null, { status: 308, headers: { location } });
+}
+
+/** What Pages' html handling (its default, auto-trailing-slash) answers for the decoded path `served`. */
+function htmlHandled(site: PagesSite, served: string, search: string): Response {
+  if (served.endsWith("/")) {
+    const index = fileAt(site, `${served}index.html`);
+    if (index !== null) return fileResponse(index);
+    if (served.endsWith("/index/")) return redirectTo(served.slice(0, -"index/".length), search);
+    if (fileAt(site, served.replace(/\/$/, ".html")) !== null) return redirectTo(served.slice(0, -1), search);
+    return notFound(site, served);
+  }
+  const file = fileAt(site, served);
+  if (file !== null) {
+    if (!served.endsWith(".html")) return fileResponse(file);
+    const extensionless = served.slice(0, -".html".length);
+    if (extensionless.endsWith("/index")) return redirectTo(extensionless.replace(/\/index$/, "/"), search);
+    return fileAt(site, extensionless) !== null || extensionless === "/" ? fileResponse(file) : redirectTo(extensionless, search);
+  }
+  if (served.endsWith("/index")) return redirectTo(served.slice(0, -"index".length), search);
+  const page = fileAt(site, `${served}.html`);
+  if (page !== null) return fileResponse(page);
+  if (fileAt(site, `${served}/index.html`) !== null) return redirectTo(`${served}/`, search);
+  return notFound(site, served);
+}
+
+function fileResponse(path: string, status = 200): Response {
+  const dot = path.lastIndexOf(".");
+  return new Response(Bun.file(path), { status, headers: { "content-type": MIME[path.slice(dot)] ?? "application/octet-stream" } });
+}
+
+function notFound(site: PagesSite, served: string): Response {
+  for (let dir = served.slice(0, served.lastIndexOf("/")); ; dir = dir.slice(0, dir.lastIndexOf("/"))) {
+    const page = fileAt(site, `${dir}/404.html`);
+    if (page !== null) return fileResponse(page, 404);
+    if (dir === "") break;
+  }
+  const index = fileAt(site, "/index.html");
+  return index !== null ? fileResponse(index) : new Response("Not found", { status: 404 });
+}
+
 /** The response Pages would give `request` from `site`: redirects and rewrites, then the file, then the headers. */
 export async function pagesResponse(site: PagesSite, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const requested = url.pathname;
   const redirect = redirectFor(site.redirects, requested);
-  if (redirect !== null && redirect.status !== 200) {
-    return new Response(null, { status: redirect.status, headers: { location: redirect.to + url.search } });
-  }
-  const served = redirect === null ? requested : redirect.to;
   let response: Response;
-  if (served === "/_headers" || served === "/_redirects") response = new Response("Not found", { status: 404 });
-  else {
-    const relative = normalize(decodeURIComponent(served)).replace(/^(\.\.[/\\])+/, "");
-    let path = join(site.dir, relative);
-    if (existsSync(path) && statSync(path).isDirectory()) path = join(path, "index.html");
-    if (!path.startsWith(site.dir) || !existsSync(path) || statSync(path).isDirectory()) response = new Response("Not found", { status: 404 });
-    else {
-      const dot = path.lastIndexOf(".");
-      response = new Response(Bun.file(path), { headers: { "content-type": MIME[path.slice(dot)] ?? "application/octet-stream" } });
-    }
+  if (redirect !== null && redirect.status !== 200) {
+    response = new Response(null, { status: redirect.status, headers: { location: redirect.to + url.search } });
+  } else if (request.method !== "GET" && request.method !== "HEAD") {
+    response = new Response(null, { status: 405 });
+  } else {
+    let served = redirect === null ? requested : new URL(redirect.to, url).pathname;
+    try { served = decodeURIComponent(served); } catch {}
+    response = htmlHandled(site, served, url.search);
   }
   applyHeaders(site.headers, requested, response.headers);
+  if (response.status === 404) response.headers.set("cache-control", "no-store");
   return response;
 }
 

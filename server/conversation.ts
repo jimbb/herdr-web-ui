@@ -40,12 +40,13 @@ import { authorizedTranscript } from "./transcript-store.ts";
 import type { ConversationMetadata, ConversationTurn, HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
 import { herdrRpc, herdrSocketPath, paneProcessInfo, paneRead, paneScrollInfo, sessionSnapshot, type ProcessInfo } from "./herdr/client.ts";
 import { resolveAgent } from "./pane-context.ts";
-import { codexFreshSession, codexHistorySegments, createCodexTranscriptParser, type HistorySegment, codexOutputText, codexTranscriptPath, defaultCodexHome, forgetAllCodexState, forgetCodexStateFor, paneCodexHomePlaced, paneCodexProcess, parseCodexTranscript, readRange } from "./codex.ts";
+import { servedStatus } from "./approvals/codex.ts";
+import { codexFreshSession, codexHistorySegments, createCodexTranscriptParser, type HistorySegment, codexOutputText, codexTranscriptPath, defaultCodexHome, forgetAllCodexState, forgetCodexStateFor, paneCodexHomePlaced, paneCodexProcess, parseCodexTranscript, readRange, rolloutThread } from "./codex.ts";
 import { awaited, CODEX_IMAGE_REF, CODEX_TOOL_IMAGE_REF, codexOutputPicture, codexTranscriptImage, DataUrlPictureScan, finish, finishAsync, forgetOmpBlobTypes, InlinePictureScan, MAX_IMAGE_BYTES, ompBlobAnchor, ompBlobDigest, ompBlobPictureSteps, type Steps } from "./codex-images.ts";
 import { type Held, heldOpenPlatform, openHeldDirectory } from "./held-open.ts";
 import { AmbiguousClaudeStore, claudeAttachSession, claudeProcessSession, claudeTranscriptFile, darwinProcess, defaultClaudeConfigDir, forgetClaudeSessionFile, forgetClaudeSessions, hintedClaudeConfigDir, isClaudeProcess, jobClaude, processClaudeConfigDir, windowsShellClaude } from "./claude-store.ts";
-import { coreSocket } from "./herdr-core/discovery.ts";
-import { coreSocketPath } from "./herdr-core/runtime.ts";
+import { coreSocket } from "./herdr-core/core-socket.ts";
+import { coreAcp, coreSocketPath } from "./herdr-core/runtime.ts";
 import { capabilities } from "./runtime/capabilities.ts";
 import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcTranscriptFileForPane, isGjcProcess, recentProcessTable, storeRelative } from "./gjc-runtime.ts";
 import { isOmoProcess, omoProcessIdentity, omoSessionForPane, processEnviron, processInfo as omoPaneProcessInfo, withOmoDescendants, type ProcessInfo as OmoProcessInfo } from "./omo.ts";
@@ -74,12 +75,15 @@ import { copilotApiTranscript, copilotExplicitResume, copilotHandoffSession, cop
 import { forgetCopilotForeground, readCopilotForeground } from "./copilot-foreground.ts";
 import { claudeSetting, type MetadataFold, parseConversationMetadata } from "./conversation-metadata.ts";
 import { catalogVersion, piCatalogVersion } from "./pi-models.ts";
+import type { ToldMode } from "./approvals/hub.ts";
 import { answerVersion, bindFile, boundSteps, checkBoundFile, ConversationNotStarted, ConversationReadPending, ConversationUnavailable, copilotRecoverable, type FileIdentity, openBound, readBound, type ConversationPage, HistoryChanged, type RecognizedConversation, type StreamSource, TRANSCRIPT_WINDOW_BYTES } from "./conversation-shared.ts";
 import { forgetHermesTranscriptState, hermesConversationPage, hermesToolOutput, hermesTranscriptForPane } from "./hermes.ts";
 
 import { createOmpTranscriptParser, isContextClear, MAX_TURNS, omoTaskResults, parseOmpTranscript, PI_IMAGE_REF, PI_PROMPT_IMAGE_REF, piImageBlock, piMessage, piNotice, piPromptImages, piResults, type TranscriptParser, withHcNotes } from "./transcript-records.ts";
+import { omoAnswerEntry, type OmoAskState, omoAskUpdates } from "./omo-ask.ts";
 import { skillPromptMessage } from "./skill-activity.ts";
 import { CLAUDE_IMAGE_REF, claudeImageType, claudeResultText, createClaudeTranscriptParser, entryHostToolResults, isHostHandoff, parseClaudeTranscript, type TranscriptEntry } from "./claude-transcript.ts";
+import { POLL_TOOL, REPL_TOOL, replDeliveries, replDispatched, replOutput, virtualCallOutput } from "./claude-code-mode.ts";
 import { forgetSubagents, lineNotifications, subagentDetails, type SubagentDetail } from "./claude-subagents.ts";
 import { launchedAgents } from "./launched-agents.ts";
 import { readsStartScreen, startScreenMetadata } from "./start-screen.ts";
@@ -125,6 +129,21 @@ const METADATA_HEAD_BYTES = 64 * 1024;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const writtenSessions = new Set<string>();
+
+/** The permission mode the hook of a Claude Ovis started in a pane last told, and in which session (the approval hub's). */
+let toldMode: (paneId: string) => ToldMode | null = () => null;
+export function readToldModes(read: ((paneId: string) => ToldMode | null) | null): void {
+  toldMode = read ?? (() => null);
+}
+
+/**
+ * `answer` with the permission mode a hook told in `session`, the session the answer's transcript is: a mode told in
+ * another one (before a /resume or a /clear, or by an agent no longer running there) leaves the transcript's.
+ */
+export function withToldMode<T extends Pick<RecognizedConversation, "metadata" | "version">>(answer: T, told: ToldMode | null, session: string): T {
+  if (told === null || told.session !== session || told.mode === answer.metadata.permission_mode) return answer;
+  return { ...answer, metadata: { ...answer.metadata, permission_mode: told.mode }, version: answerVersion(answer.version, told.mode) };
+}
 
 const cache = new Map<string, { source: RecognizedConversation["source"]; signature: string; turns: ConversationTurn[]; metadata: ConversationMetadata; cursor: string | null; abandoned?: { count: number; branches: number; summary: string | null } }>();
 
@@ -574,7 +593,8 @@ type SettingType = "model_change" | "thinking_level_change" | "copilot_model" | 
  * `branch.answers` does) and a small line that sets the same value again, shared while it repeats.
  */
 type ClaudeSettings = Record<"model" | "effort", { line: string; start: number; end: number }[]>;
-const clearScans = new Map<string, { id: string; scanned: number; floor: number; tail: string; settings: Partial<Record<SettingType, { offset: number; end: number; line: string }>>; branch?: ClaudeBranch; claude?: ClaudeSettings; pictures?: PictureIndex; undo?: KimiUndo }>();
+interface OmoAskIndex { open: Map<string, OmoAskState>; events: { at: number; kind: "open" | "cancelled" | "close"; id: string }[] }
+const clearScans = new Map<string, { id: string; source: RecognizedConversation["source"]; scanned: number; floor: number; tail: string; settings: Partial<Record<SettingType, { offset: number; end: number; line: string }>>; branch?: ClaudeBranch; claude?: ClaudeSettings; pictures?: PictureIndex; undo?: KimiUndo; omoAsks?: OmoAskIndex }>();
 
 interface PictureIndex { at: Map<string, IndexedPicture>; loose: UuidMarks; blind: number | null; unread: [number, number][]; bytes: PictureBytes; vouched: ({ key: string } & PictureRead) | null }
 interface PictureRead { began: number; wall: number }
@@ -721,6 +741,7 @@ function countBefore<T>(items: readonly T[], value: (item: T) => number, bound: 
   return low;
 }
 const CLAUDE_CARRY_BYTES = Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 1024 * 1024;
+const OMO_CARRY_BYTES = 4 * 1024 * 1024;
 function applyHistoryBoundary(path: string, stream: TranscriptStream, source: RecognizedConversation["source"]): void {
   finish(applyHistoryBoundarySteps(path, stream, source, false));
 }
@@ -730,8 +751,8 @@ function* applyHistoryBoundarySteps(path: string, stream: TranscriptStream, sour
   const previous = clearScans.get(path);
   const previousScanned = previous?.scanned;
   let scan = fresh ? undefined : previous;
-  if (!scan || scan.id !== stream.id || scan.scanned > stream.length || (yield* bytesBeforeSteps(stream, scan.scanned)) !== scan.tail) {
-    scan = { id: stream.id, scanned: 0, floor: 0, tail: "", settings: {}, ...(source === "claude-transcript" ? { branch: { last: null, ends: new Map(), answers: [], forks: [] }, claude: { model: [], effort: [] }, pictures: noPictures(0, stream) } : {}), ...(source === "kimi-transcript" ? { undo: { anchors: [], undone: [] } } : {}) };
+  if (!scan || scan.id !== stream.id || scan.source !== source || scan.scanned > stream.length || (yield* bytesBeforeSteps(stream, scan.scanned)) !== scan.tail) {
+    scan = { id: stream.id, source, scanned: 0, floor: 0, tail: "", settings: {}, ...(source === "claude-transcript" ? { branch: { last: null, ends: new Map(), answers: [], forks: [] }, claude: { model: [], effort: [] }, pictures: noPictures(0, stream) } : {}), ...(source === "kimi-transcript" ? { undo: { anchors: [], undone: [] } } : {}), ...(source === "omo-transcript" ? { omoAsks: { open: new Map<string, OmoAskState>(), events: [] } } : {}) };
   } else if (apart) scan = structuredClone(scan);
   const branch = scan.branch;
   let position = scan.scanned;
@@ -757,6 +778,7 @@ function* applyHistoryBoundarySteps(path: string, stream: TranscriptStream, sour
         if (scan.claude) scan.claude = { model: [], effort: [] };
         // what lies before the /clear is never judged
         if (scan.pictures) scan.pictures = noPictures(base + offset, stream);
+        if (scan.omoAsks) scan.omoAsks = { open: new Map<string, OmoAskState>(), events: [] };
       }
       else if (!skipping && source !== "claude-transcript" && (source === "copilot-transcript" ? COPILOT_SETTING_TYPES : source === "kimi-transcript" ? KIMI_SETTING_TYPES : SETTING_TYPES).some((type) => line.includes(type))) {
         try {
@@ -791,6 +813,29 @@ function* applyHistoryBoundarySteps(path: string, stream: TranscriptStream, sour
         }
       }
       if (!skipping && scan.undo) followKimiUndo(scan.undo, line, base + offset, base + newline + 1);
+      if (!skipping && scan.omoAsks) {
+        const mayOpen = line.includes("ask_user_question") || line.includes("request_user_input") || line.includes("ask-user:");
+        const mayClose = scan.omoAsks.open.size > 0 && (line.includes("toolResult") || line.includes("[Answer to question "));
+        if (mayOpen || mayClose) {
+          try {
+            const entry: unknown = JSON.parse(line.toString("utf8"));
+            const { open, close } = omoAskUpdates(entry);
+            for (const item of open) {
+              scan.omoAsks.open.set(item.id, item.state);
+              scan.omoAsks.events.push({ at: base + offset, kind: item.state, id: item.id });
+            }
+            for (const id of close) {
+              if (scan.omoAsks.open.delete(id)) scan.omoAsks.events.push({ at: base + offset, kind: "close", id });
+            }
+            if (scan.omoAsks.open.size > 0) {
+              const answered = omoAnswerEntry(entry, scan.omoAsks.open);
+              if (answered !== null && scan.omoAsks.open.delete(answered.id)) {
+                scan.omoAsks.events.push({ at: base + offset, kind: "close", id: answered.id });
+              }
+            }
+          } catch {}
+        }
+      }
       if (!skipping && scan.pictures && mayBeUnread(line)) scan.pictures.unread.push([base + offset, base + newline]);
       skipping = false;
       offset = newline + 1;
@@ -799,11 +844,18 @@ function* applyHistoryBoundarySteps(path: string, stream: TranscriptStream, sour
     }
     if (scan.pictures) digestPictureBytes(scan.pictures.bytes, bytes, base);
     carry = bytes.subarray(offset);
-    if (carry.length > (branch ? CLAUDE_CARRY_BYTES : METADATA_HEAD_BYTES)) {
+    if (carry.length > (branch ? CLAUDE_CARRY_BYTES : scan.omoAsks ? OMO_CARRY_BYTES : METADATA_HEAD_BYTES)) {
       if (scan.pictures && scan.pictures.blind === null) scan.pictures.blind = base + offset;
       // a user's message (Kimi names a record's type and a message's role first) may be a prompt: an
       // /undo counting back over it would take back another
       if (scan.undo && carry.subarray(0, 512).includes('"context.append_message"') && carry.subarray(0, 512).includes('"role":"user"')) scan.undo.anchors = [];
+      if (scan.omoAsks && scan.omoAsks.open.size > 0) {
+        const prefix = carry.subarray(0, 1024).toString("utf8");
+        const framed = /\[Answer to question ([^\]\r\n"\\]+)\\n/.exec(prefix)?.[1];
+        if (framed !== undefined && !prefix.includes('"inputSource":"interactive"') && !prefix.includes('"inputSource":"person"') && scan.omoAsks.open.delete(framed)) {
+          scan.omoAsks.events.push({ at: base + offset, kind: "close", id: framed });
+        }
+      }
       carry = Buffer.alloc(0);
       skipping = true;
     }
@@ -879,6 +931,7 @@ interface SettledTurns {
   metadata: ConversationMetadata;
   tail: string;
   taskTitles: Map<string, string>;
+  omoAsks: Map<string, OmoAskState>;
   noticed: Set<string>;
   inherited: Map<string, string>;
   observedEnd: number;
@@ -1041,7 +1094,21 @@ function subagentsOnPage(path: string, text: string): ReadonlyMap<string, Subage
   return ids.size === 0 ? undefined : subagentDetails(path, ids);
 }
 
-function parseTurns(source: RecognizedConversation["source"], path: string, text: string, taskTitles?: Map<string, string>, noticed?: Set<string>, baseOffset?: number): ConversationTurn[] {
+function omoAsksBefore(path: string, stream: TranscriptStream, before: number): Map<string, OmoAskState> {
+  const open = new Map<string, OmoAskState>();
+  const scan = clearScans.get(path);
+  const events = scan?.source === "omo-transcript" ? scan.omoAsks?.events : undefined;
+  if (!events) return open;
+  for (const event of events) {
+    if (event.at < stream.floor) continue;
+    if (event.at >= before) break;
+    if (event.kind === "close") open.delete(event.id);
+    else open.set(event.id, event.kind);
+  }
+  return open;
+}
+
+function parseTurns(source: RecognizedConversation["source"], path: string, text: string, taskTitles?: Map<string, string>, noticed?: Set<string>, baseOffset?: number, omoAskIds?: Map<string, OmoAskState>): ConversationTurn[] {
   if (source === "copilot-transcript") return parseCopilotTranscript(text, Infinity, baseOffset);
   if (source === "grok-transcript") {
     try { return parseGrokTranscript(text, path); } catch (error) {
@@ -1065,15 +1132,15 @@ function parseTurns(source: RecognizedConversation["source"], path: string, text
   }
   return source === "codex-transcript" ? parseCodexTranscript(text, Infinity)
     : source === "claude-transcript" ? parseClaudeTranscript(text, Infinity, { subagents: subagentsOnPage(path, text), noticed })
-      : parseOmpTranscript(text, Infinity, ompReading(source, path, taskTitles));
+      : parseOmpTranscript(text, Infinity, ompReading(source, path, taskTitles, omoAskIds));
 }
 
 /** How the omp record fold reads a source, the same for a one-shot parse and a live one: pi and omo keep a
  * picture inline (an omo tool's display() or image read, #3420) and omp in its blob store, and the image
  * endpoint answers all three; gjc is read the same way but would carry image refs nothing answers, so it
  * names none. */
-function ompReading(source: RecognizedConversation["source"], path: string, taskTitles?: Map<string, string>) {
-  return { images: source === "pi-transcript" || source === "cmd-transcript" || source === "omp-transcript" || source === "omo-transcript", blobs: source === "omp-transcript" ? ompBlobStore(path) : null, callIds: source === "gjc-transcript", taskTitles };
+function ompReading(source: RecognizedConversation["source"], path: string, taskTitles?: Map<string, string>, omoAskIds?: Map<string, OmoAskState>) {
+  return { images: source === "pi-transcript" || source === "cmd-transcript" || source === "omp-transcript" || source === "omo-transcript", blobs: source === "omp-transcript" ? ompBlobStore(path) : null, callIds: source === "gjc-transcript", taskTitles, ...(source === "omo-transcript" ? { omoAskIds: omoAskIds ?? new Map<string, OmoAskState>() } : {}) };
 }
 
 function turnBlobs(stream: TranscriptStream, source: StreamSource): string | null {
@@ -1141,7 +1208,7 @@ function incrementalLiveTurn(path: string, stream: TranscriptStream, source: Inc
     const subagents = source === "claude-transcript" ? { ids: new Set<string>(), details: new Map<string, SubagentDetail>() } : undefined;
     const parser = source === "codex-transcript" ? createCodexTranscriptParser()
       : source === "claude-transcript" ? createClaudeTranscriptParser({ subagents: subagents!.details, noticed: new Set(before.noticed) })
-      : createOmpTranscriptParser(ompReading(source, path, new Map(before.taskTitles)));
+      : createOmpTranscriptParser(ompReading(source, path, new Map(before.taskTitles), source === "omo-transcript" ? new Map(before.omoAsks) : undefined));
     cached = { source, id: stream.id, start, pageStart: before.start, prefixBoundary: before.tail, scanned: start,
       boundary: bytesBefore(stream, start), parser, metadata: before.metadata, fold: { ...before.fold }, piAgentDir: before.piAgentDir, catalogs: before.catalogs, subagents };
   }
@@ -1204,15 +1271,15 @@ function metadataHead(path: string, stream: TranscriptStream, source: Recognized
 
 function liveTurns(path: string, stream: TranscriptStream, source: RecognizedConversation["source"], start: number, starts: number[], piAgentDir?: string | null): { turns: ConversationTurn[]; metadata: ConversationMetadata } {
   const last = Math.max(start, starts[starts.length - 1] ?? start);
-  const key = `${path}\0${start}`;
+  const key = `${path}\0${source}\0${start}`;
   const catalogs = source === "pi-transcript" && piAgentDir !== null ? piCatalogVersion(piAgentDir)
     : source === "cmd-transcript" ? catalogVersion(cmdModelCatalogPath()) : undefined;
   let settled = settledTurns.get(key);
-  if (!settled || settled.id !== stream.id || settled.end > last || bytesBefore(stream, settled.end) !== settled.tail || settled.piAgentDir !== piAgentDir || settled.catalogs !== catalogs) {
+  if (!settled || settled.source !== source || settled.id !== stream.id || settled.end > last || bytesBefore(stream, settled.end) !== settled.tail || settled.piAgentDir !== piAgentDir || settled.catalogs !== catalogs) {
     const head = start > stream.floor ? metadataHead(path, stream, source, start) : "";
     let kept: SettledTurns | undefined;
     for (const [other, page] of settledTurns) {
-      if (other.startsWith(`${path}\0`) && page.id === stream.id && page.start < start && page.start > (kept?.start ?? -1)) kept = page;
+      if (other.startsWith(`${path}\0${source}\0`) && page.source === source && page.id === stream.id && page.start < start && page.start > (kept?.start ?? -1)) kept = page;
     }
     const inherited = new Map(kept === undefined ? [] : kept.end <= start ? kept.taskTitles : kept.inherited);
     if (kept !== undefined) {
@@ -1222,12 +1289,12 @@ function liveTurns(path: string, stream: TranscriptStream, source: RecognizedCon
     }
     const fold: MetadataFold = { piProvider: null };
     settled = { source, id: stream.id, start, end: start, turns: [], metadata: parseConversationMetadata(`${head}
-`, source, undefined, piAgentDir, fold), tail: bytesBefore(stream, start), taskTitles: new Map(inherited), noticed: new Set(), inherited, observedEnd: stream.length, piAgentDir, catalogs, fold };
+`, source, undefined, piAgentDir, fold), tail: bytesBefore(stream, start), taskTitles: new Map(inherited), omoAsks: source === "omo-transcript" ? omoAsksBefore(path, stream, start) : new Map(), noticed: new Set(), inherited, observedEnd: stream.length, piAgentDir, catalogs, fold };
   }
   if (settled.end < last) {
     const text = readStream(stream, settled.end, last).toString("utf8");
     const fold = { ...settled.fold };
-    settled = { ...settled, end: last, turns: [...settled.turns, ...parseTurns(source, path, text, settled.taskTitles, settled.noticed, settled.end)], metadata: parseConversationMetadata(text, source, settled.metadata, piAgentDir, fold), tail: bytesBefore(stream, last), fold };
+    settled = { ...settled, end: last, turns: [...settled.turns, ...parseTurns(source, path, text, settled.taskTitles, settled.noticed, settled.end, source === "omo-transcript" ? settled.omoAsks : undefined)], metadata: parseConversationMetadata(text, source, settled.metadata, piAgentDir, fold), tail: bytesBefore(stream, last), fold };
   }
   settled.observedEnd = stream.length;
   rememberPage(settledTurns, key, settled, 8);
@@ -1901,6 +1968,7 @@ type ResolvedTranscript =
 
 export type NativeTranscript =
   | ResolvedTranscript
+  | { source: "acp"; path: string }
   | { source: "devin-transcript"; path: string; session: string; cwd: string; binding?: string };
 
 /**
@@ -2072,6 +2140,8 @@ export async function paneTranscript(paneId: string, codexHome?: string, snapsho
   const panes = (snapshot ?? await sessionSnapshot()).panes;
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (pane === undefined) throw new ConversationUnavailable("pane_not_found");
+  const child = coreAcp()?.forPane(paneId);
+  if (child) return { source: "acp", path: child.client.history.path };
   if (typeof pane.cwd !== "string" || pane.cwd.length === 0) throw new ConversationUnavailable("no_recognized_transcript", undefined, pane.agent ? "agent_cwd_missing" : undefined);
 
   if (pane.agent === "devin" && !(await paneRunsOmo(paneId, known))) {
@@ -2134,7 +2204,7 @@ async function bottomViewport(paneId: string): Promise<string> {
 /** Read-only, same-user files only. The notes hc typed into the pane read as notices (withHcNotes). */
 export async function paneConversation(...args: Parameters<typeof readPaneConversation>): Promise<RecognizedConversation> {
   const conversation = await readPaneConversation(...args);
-  return { ...conversation, turns: withHcNotes(conversation.turns) };
+  return conversation.source === "acp" ? conversation : { ...conversation, turns: withHcNotes(conversation.turns) };
 }
 
 async function readPaneConversation(paneId: string, codexHome?: string, page: ConversationPage = {}, devinDbPath?: string, opencodeDb?: string, hermesHome?: string, grokHome?: string, museData?: string): Promise<RecognizedConversation> {
@@ -2210,6 +2280,11 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
     }
     if (page.before !== undefined || page.since !== undefined || page.from !== undefined) throw new HistoryChanged();
     return await notBegun(launch.source, launch.historyId);
+  }
+  if (resolved.source === "acp") {
+    const child = coreAcp()?.forPane(paneId);
+    if (!child || child.client.history.path !== resolved.path) throw new HistoryChanged();
+    return child.client.history.page(page);
   }
   if (resolved.source === "dsh-transcript") {
     rememberPaneRead(paneId, resolved.path);
@@ -2374,23 +2449,36 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
     try { revision = grokProjection(resolved.path, statSync(resolved.path)).revision; } catch {}
     if (revision === null || revision === "0") throw new ConversationUnavailable("transcript_missing");
   }
-  // The ledger never records the selected model. The live status row does, and a switch there
-  // writes no turn, so the answer is marked screen and the chat re-reads it on terminal output.
-  // A scroll or a failed read leaves the name unknown rather than one from an older frame, and is
-  // still marked screen so the next draw can fill it. The row is read before the store check below,
-  // so a pane that moved to another conversation during the read is refused, not given its model.
+  // The ledger records the model only with the next message. The live status row names it at once,
+  // and a switch there writes no turn, so the answer is marked screen and the chat re-reads it on
+  // terminal output. A scroll or a failed read keeps the ledger's model rather than one from an
+  // older frame, and is still marked screen so the next draw can fill it. The row is read before
+  // the store check below, so a pane that moved to another conversation during the read is
+  // refused, not given its model.
   const agyScreen = resolved.source === "agy-transcript" ? await screenMetadata("agy-transcript") : null;
   if (resolved.agy && !sameAgyStore(resolved.agy, await resolveAgyStore(snapshot.panes.find((pane) => pane.pane_id === paneId)!))) throw new ConversationUnavailable("no_session_path");
   // The screen read waits on herdr. A pane closed or bound to another session meanwhile has not
   // this conversation, nor the model its screen shows now, and nothing is recorded for it.
   if (agyScreen !== null && (!live() || rebound(paneId, transcript))) throw new ConversationUnavailable("no_session_id");
   if (identity !== null) { writtenSessions.add(`${resolved.source}\0${identity}`); rememberPaneSession(paneId, `${resolved.source}\0${identity}`); }
+  // a Claude Ovis started tells its permission mode with each hook, also between the prompts its transcript records it
+  // with: only for the session this transcript is (another one, resumed or cleared to, has its own)
+  if (resolved.source === "claude-transcript" && identity !== null) answer = withToldMode(answer, toldMode(paneId), identity);
   if (resolved.source === "claude-transcript" && identity !== null && answer.metadata.context) {
     const window = readStatuslineContext(userHome(), identity, answer.metadata.model, resolved.path);
     if (window !== null) return {
       ...answer,
       metadata: { ...answer.metadata, context: { ...answer.metadata.context, window } },
       version: answerVersion(answer.version, String(window)),
+    };
+  }
+  if (resolved.source === "codex-transcript") {
+    // Codex writes the model it was asked for; a turn it moved to another model is said only by its server
+    const served = servedStatus(paneId);
+    if (served?.model && rolloutThread(resolved.path) === served.threadId.toLowerCase() && served.model !== answer.metadata.model) return {
+      ...answer,
+      metadata: { ...answer.metadata, model: served.model },
+      version: answerVersion(answer.version, served.model),
     };
   }
   if (resolved.source === "cmd-transcript") {
@@ -2426,11 +2514,17 @@ async function readPaneConversation(paneId: string, codexHome?: string, page: Co
   }
   if (agyScreen !== null) {
     // Enrich the response, never the shared page.
+    // Live screen wins when readable (e.g. a /model switch before the next turn);
+    // otherwise keep the transcript's recorded model/effort (e.g. herdr-core or a scrolled pane).
+    const model = agyScreen.model ?? answer.metadata.model;
+    const reasoning_effort = agyScreen.model !== null
+      ? agyScreen.reasoning_effort
+      : (agyScreen.reasoning_effort ?? answer.metadata.reasoning_effort);
     return {
       ...answer,
       screen: true,
-      metadata: { ...answer.metadata, ...agyScreen },
-      version: answerVersion(answer.version, `${agyScreen.model}\0${agyScreen.reasoning_effort}`),
+      metadata: { ...answer.metadata, model, reasoning_effort },
+      version: answerVersion(answer.version, `${model}\0${reasoning_effort}`),
     };
   }
   return answer;
@@ -2603,7 +2697,22 @@ export function transcriptPage(source: Exclude<StreamSource, "agy-transcript">, 
 }
 
 export async function agyTranscriptPage(path: string, page: ConversationPage = {}, codexHome?: string, authorized?: { dev: number; ino: number }): Promise<RecognizedConversation> {
-  try { return await withAgyHistory(path, (projection, fd) => ({ ...transcriptPageRead("agy-transcript", path, page, codexHome, projection, fd), activity: projection.activity }), authorized); }
+  try {
+    return await withAgyHistory(path, (projection, fd) => {
+      const read = transcriptPageRead("agy-transcript", path, page, codexHome, projection, fd);
+      const model = projection.model ?? read.metadata.model;
+      const reasoning_effort = projection.model !== null ? projection.reasoning_effort : (projection.reasoning_effort ?? read.metadata.reasoning_effort);
+      const metadata = { ...read.metadata, model, reasoning_effort };
+      return {
+        ...read,
+        metadata,
+        activity: projection.activity,
+        version: model !== read.metadata.model || reasoning_effort !== read.metadata.reasoning_effort
+          ? answerVersion(read.version, `${model}\0${reasoning_effort}`)
+          : read.version,
+      };
+    }, authorized);
+  }
   catch (error) {
     // every file thread busy: worth another try soon (http.ts answers 503); another file than the
     // authorized one is pending (withAgyHistory)
@@ -2634,8 +2743,8 @@ function transcriptPageRead(source: StreamSource, path: string, page: Conversati
     throw new ConversationUnavailable("transcript_missing");
   }
   const key = page.before !== undefined
-    ? `${path}\0before:${page.before}:${page.since ?? ""}:${pagePrompts(page)}`
-    : `${path}\0from:${page.from ?? ""}:${pagePrompts(page)}`;
+    ? `${path}\0${source}\0before:${page.before}:${page.since ?? ""}:${pagePrompts(page)}`
+    : `${path}\0${source}\0from:${page.from ?? ""}:${pagePrompts(page)}`;
   const catalogs = piAgentDir === undefined ? "" : `:${piAgentDir}`;
   const signature = page.before !== undefined ? `${stream.id}${catalogs}` : `${stream.id}:${stream.length}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}${catalogs}`;
   const cached = cache.get(key);
@@ -2685,7 +2794,7 @@ function transcriptPageRead(source: StreamSource, path: string, page: Conversati
     throw new ConversationUnavailable("transcript_missing");
   }
 
-  const parsed = live?.turns ?? parseTurns(source, path, text, undefined, undefined, start);
+  const parsed = live?.turns ?? parseTurns(source, path, text, undefined, undefined, start, source === "omo-transcript" ? omoAsksBefore(path, stream, start) : undefined);
   const turns = parsed.some((turn, index) => turn.parts[0]?.kind === "goal_wait" && (page.before !== undefined || index < parsed.length - 1))
     ? parsed.filter((turn, index) => turn.parts[0]?.kind !== "goal_wait" || (page.before === undefined && index === parsed.length - 1))
     : parsed;
@@ -2699,6 +2808,11 @@ function transcriptPageRead(source: StreamSource, path: string, page: Conversati
 }
 
 export async function conversationImage(paneId: string, ref: string, codexHome?: string, opencodeDb?: string, grokHome?: string): Promise<{ mediaType: string; bytes: Uint8Array<ArrayBuffer> } | null> {
+  const child = coreAcp()?.forPane(paneId);
+  if (child) {
+    const asset = await child.client.history.asset(ref);
+    return typeof asset === "string" ? null : asset;
+  }
   if (!CLAUDE_IMAGE_REF.test(ref) && !CODEX_IMAGE_REF.test(ref) && !CODEX_TOOL_IMAGE_REF.test(ref) && !PI_IMAGE_REF.test(ref) && !PI_PROMPT_IMAGE_REF.test(ref) && !OPENCODE_IMAGE_REF.test(ref) && !GROK_IMAGE_REF.test(ref) && !COPILOT_IMAGE_REF.test(ref)) return null;
   const snapshot = await sessionSnapshot();
   const pane = snapshot.panes.find((candidate) => candidate.pane_id === paneId);
@@ -3244,6 +3358,11 @@ const TOOL_REF = /^[A-Za-z0-9_:.-]{1,128}$/;
 const TOOL_OUTPUT_MAX = 2_000_000;
 
 export async function toolOutput(paneId: string, ref: string, codexHome?: string, opencodeDb?: string, hermesHome?: string, grokHome?: string, museData?: string): Promise<string | null> {
+  const child = coreAcp()?.forPane(paneId);
+  if (child) {
+    const asset = await child.client.history.asset(ref);
+    return typeof asset === "string" ? asset : null;
+  }
   if (!TOOL_REF.test(ref) && !/^cp[0-9a-f]{16}\.[A-Za-z0-9_:.-]{1,128}(?:@[0-9a-z]+@[0-9a-z]+@[0-9a-f]{32})?$/.test(ref)) return null;
   const socket = herdrSocketPath();
   const forgetsBefore = forgets;
@@ -3630,7 +3749,27 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
   // a senpi host tool result names its call inside its header's text, not as a JSON string
   const hostNeedle = `id=${ref}):`;
   let native: string | null = null;
+  // Code Mode: a REPL call whose script ran on answered `(dispatched #N)`; its output is in the events after it
+  // (claude-code-mode.ts), under its number
+  let script: { eval: number; parts: string[]; seen: Set<string> } | null = null;
+  // the call's tool, from its tool_use: only a REPL's result is read as one
+  let name: unknown = null;
   for (const line of text.split("\n")) {
+    if (script !== null && line.includes("repl-eval")) {
+      let entry: TranscriptEntry;
+      try { entry = JSON.parse(line) as TranscriptEntry; } catch { continue; }
+      const content = entry.message?.content;
+      const delivered = entry.type === "attachment" && entry.attachment?.type === "poll_events"
+        ? (Array.isArray(entry.attachment.envelopes) ? entry.attachment.envelopes : []).flatMap((envelope: unknown) => typeof envelope === "string" ? replDeliveries(envelope, true).outputs : [])
+        : entry.type === "user" && Array.isArray(content) ? content.flatMap((block: unknown) => (block as { type?: unknown } | null)?.type === "tool_result" ? replDeliveries(claudeResultText((block as { content?: unknown }).content)).outputs : []) : [];
+      for (const output of delivered) {
+        const key = output.at ?? `${script.seen.size}`;
+        if (output.eval !== script.eval || script.seen.has(key)) continue;
+        script.seen.add(key);
+        if (output.output.length > 0) script.parts.push(output.output);
+      }
+      continue;
+    }
     if (!line.includes(needle) && !(source === "claude-transcript" && line.includes(hostNeedle))) continue;
     let entry: Record<string, unknown>;
     try { entry = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
@@ -3639,8 +3778,25 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
       const content = (entry.message as { content?: unknown } | undefined)?.content;
       const host = entryHostToolResults(entry, content).filter((result) => result.id === ref).at(-1);
       const result = Array.isArray(content) ? content.find((block) => (block as { type?: unknown; tool_use_id?: unknown } | null)?.type === "tool_result" && (block as { tool_use_id?: unknown }).tool_use_id === ref) : undefined;
+      const use = entry.type === "assistant" && Array.isArray(content) ? content.find((block) => (block as { type?: unknown; id?: unknown } | null)?.type === "tool_use" && (block as { id?: unknown }).id === ref) : undefined;
+      if (use !== undefined) name = (use as { name?: unknown }).name;
       if (host !== undefined) output = claudeResultText((content as unknown[]).slice(host.header + 1, host.end));
-      else if (result !== undefined && native === null && !isHostHandoff(result as { content?: unknown; is_error?: unknown })) native = claudeResultText((result as { content?: unknown }).content);
+      else if (result !== undefined && native === null && !isHostHandoff(result as { content?: unknown; is_error?: unknown })) {
+        native = claudeResultText((result as { content?: unknown }).content);
+        const repl = name === REPL_TOOL && (result as { is_error?: unknown }).is_error !== true;
+        const dispatched = repl ? replDispatched(native) : null;
+        const own = repl && dispatched === null ? replOutput(native) : null;
+        // a Code Mode Poll is drawn only for what it brought besides the scripts' output: that, as its row has it
+        const other = name === POLL_TOOL ? replDeliveries(native).other : [];
+        if (dispatched !== null) script = { eval: dispatched, parts: [], seen: new Set() };
+        // a REPL's own output element, whose script's late output follows under its number
+        else if (own !== null) {
+          native = own.output;
+          if (own.eval !== null) script = { eval: own.eval, parts: own.output.length > 0 ? [own.output] : [], seen: new Set() };
+        } else if (other.length > 0) native = other.join("\n\n");
+        // a script's call: its output is only in toolUseResult
+        else if (native.length === 0) native = virtualCallOutput(entry) ?? native;
+      }
     } else if (source === "codex-transcript") {
       const payload = entry.payload as { type?: unknown; call_id?: unknown; output?: unknown } | undefined;
       if ((payload?.type === "function_call_output" || payload?.type === "custom_tool_call_output") && payload.call_id === ref) output = codexOutputText(payload.output);
@@ -3650,6 +3806,7 @@ function outputInText(source: RecognizedConversation["source"], text: string, re
     }
     if (output !== null) return output.length > TOOL_OUTPUT_MAX ? `${output.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : output;
   }
+  if (script !== null && script.parts.length > 0) native = script.parts.join("\n");
   return native !== null && native.length > TOOL_OUTPUT_MAX ? `${native.slice(0, TOOL_OUTPUT_MAX)}\n… trimmed` : native;
 }
 

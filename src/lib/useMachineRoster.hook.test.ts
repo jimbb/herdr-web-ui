@@ -1,16 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createElement, useCallback, useRef, useState } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { Machine, MachineEvent } from "../../shared/machines.ts";
+import type { Machine, MachineEvent, PendingKey } from "../../shared/machines.ts";
+import { signPairProof } from "../../shared/pair-fingerprint.ts";
+import { memberRow, pairingPc, phone } from "../../server/account/pairing.test-helpers.ts";
+import { bounded } from "../../server/relay/test-helpers.ts";
+import { PendingKeys } from "../components/PendingKeys.tsx";
+import { declinePendingKey } from "./api.ts";
+import type { MachineEventSocket } from "./machineEventStream.ts";
 import type { MachineSessionRegistry } from "./machineSession.ts";
 import type { ServerMessage } from "../../shared/protocol.ts";
-import { getTransport, setTransport, type EventSourceLike } from "./transport.ts";
+import { SettingsProvider } from "./settings.ts";
+import { CarrierDownError, getTransport, setTransport, type EventSourceLike } from "./transport.ts";
+import { setCurrentLanguage } from "./i18n.ts";
 import { sameData, useRosterEvents, useRosterLoader } from "./useMachineRoster.ts";
 import { expandMachineEvent, wireMachineEvent } from "../../shared/compact-agents.ts";
+import { HerdrSocket } from "./ws.ts";
 
 const local = (state: Machine["state"] = "connected"): Machine => ({ id: "local", name: "This PC", kind: "local", enabled: true, state, error: null, snapshot: null });
 const noop = () => {};
 let said: string | null = null;
+let saids: (string | null)[] = [];
+let errorShown: string | null = null;
+let pendingShown: readonly PendingKey[] = [];
 let shown: Machine[] = [];
 describe("roster and health polling beside the event stream", () => {
   const saved = new Map<string, PropertyDescriptor | undefined>();
@@ -24,7 +37,7 @@ describe("roster and health polling beside the event stream", () => {
   let next: number;
   let timers: Map<number, { at: number; every: number; run(): void }>;
   let reads: string[];
-  let socketEvents: boolean | undefined;
+  let socketEvents: boolean | null;
   let socketListeners: Set<(message: ServerMessage) => void>;
   let disconnectListeners: Set<() => void>;
   const socket = {
@@ -32,9 +45,12 @@ describe("roster and health polling beside the event stream", () => {
     on(listener: (message: ServerMessage) => void) { socketListeners.add(listener); return () => { socketListeners.delete(listener); }; },
     onDisconnect(listener: () => void) { disconnectListeners.add(listener); return () => { disconnectListeners.delete(listener); }; },
   };
-  const machineSessions = { get: () => ({ socket }), closeAll: noop } as unknown as MachineSessionRegistry;
+  let eventSocket: MachineEventSocket;
+  let pendingChanged: (pending: readonly PendingKey[]) => void;
+  const machineSessions = { get: () => ({ socket: eventSocket }), closeAll: noop } as unknown as MachineSessionRegistry;
   let healthUp: boolean;
   let readState: Machine["state"];
+  let carrierUp: boolean;
   function Probe() {
     const lockedRef = useRef(locked); lockedRef.current = locked;
     const refetchTimer = useRef<number | null>(null);
@@ -45,8 +61,9 @@ describe("roster and health polling beside the event stream", () => {
     }, []);
     const [machines, setMachines] = useState<Machine[]>([]);
     const machinesRef = useRef(machines); machinesRef.current = machines; shown = machines;
-    const loader = useRosterLoader({ locked, healthFailing, lockedRef, refetchTimer, loadHealth, rosterIn: noop, setMachines, setMachineRosterLoaded: noop, setError: noop, setLocked: noop });
-    said = loader.rosterConnection;
+    const loader = useRosterLoader({ locked, healthFailing, lockedRef, refetchTimer, loadHealth, rosterIn: noop, setMachines, setMachineRosterLoaded: noop, setLocked: noop,
+      setError: (value) => { errorShown = typeof value === "function" ? value(errorShown) : value; } });
+    said = loader.rosterConnection; saids.push(said);
     useRosterEvents({
       ...loader, locked, machineSessions, onPaneMoved: noop, receivePreferencesRef: { current: noop }, onRoster: noop,
       setMachines, rosterIn: noop, setMachineRosterLoaded: noop, machinesRef, setRemotePairings: noop, setRemovedNotices: noop,
@@ -57,14 +74,17 @@ describe("roster and health polling beside the event stream", () => {
       setTerminalPeek: noop, setAutoSelected: noop, preferencesResubscribedRef: { current: noop },
       preferencesDisconnectedRef: { current: noop }, preferencesClosedRef: { current: noop },
       dropIn: noop, chime: noop, setPairedNotices: noop, setRelayPairings: noop, getTakeNotificationTargetRef: () => ({ current: noop }),
+      setPendingKeys: (pending) => { pendingShown = pending; pendingChanged(pending); },
     });
     return null;
   }
   beforeEach(async () => {
-    for (const key of ["window", "document", "IS_REACT_ACT_ENVIRONMENT"]) saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    for (const key of ["window", "document", "navigator", "IS_REACT_ACT_ENVIRONMENT"]) saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     locked = false; visibility = "visible"; now = 0; next = 1; timers = new Map(); reads = []; events = new EventTarget();
-    socketEvents = false; socketListeners = new Set(); disconnectListeners = new Set(); healthUp = true; readState = "connected";
+    socketEvents = false; socketListeners = new Set(); disconnectListeners = new Set(); healthUp = true; readState = "connected"; carrierUp = true; errorShown = null; saids = [];
+    eventSocket = socket; pendingShown = []; pendingChanged = noop;
     Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { languages: ["en"] } });
     Object.defineProperty(globalThis, "window", { configurable: true, value: {
       location: { hash: "" },
       setInterval(run: () => void, every: number) { const id = next++; timers.set(id, { at: now + every, every, run }); return id; },
@@ -74,11 +94,13 @@ describe("roster and health polling beside the event stream", () => {
     } });
     Object.defineProperty(globalThis, "document", { configurable: true, value: {
       get visibilityState() { return visibility; },
+      querySelector: () => null,
       addEventListener: events.addEventListener.bind(events), removeEventListener: events.removeEventListener.bind(events),
     } });
     source = { readyState: 0, onopen: null, onmessage: null, onerror: null, addEventListener: noop, close: noop };
     setTransport({ ...transport, openEventSource: () => source, async fetch(input) {
       const path = String(input); reads.push(path);
+      if (!carrierUp && path.startsWith("/api/machines")) throw new CarrierDownError();
       if (path === "/api/machines?compact_agents=1" || path === "/api/machines") return Response.json({ machines: [local(readState)] });
       return path === "/api/health" && !healthUp ? Response.json({ error: { code: "down" } }, { status: 500 }) : Response.json({ ok: true });
     } });
@@ -122,6 +144,181 @@ describe("roster and health polling beside the event stream", () => {
   }
   async function healthyStream() { await stream("opened"); await stream([local()]); }
   const counts = () => ["/api/machines?compact_agents=1", "/api/health", "/api/health?scope=bridge"].map((path) => reads.filter((read) => read === path).length);
+
+  describe("a resume reconnect of the relay carrier", () => {
+    const rosterReads = () => reads.filter((read) => read === "/api/machines?compact_agents=1").length;
+    async function dropCarrier() {
+      await healthyStream();
+      saids = [];
+      carrierUp = false;
+      const before = rosterReads();
+      await stream("lost");
+      // the read the loss starts fails on the carrier
+      expect(rosterReads()).toBe(before + 1);
+    }
+    async function carrierBack(name: string) {
+      carrierUp = true;
+      readState = "connected";
+      const before = rosterReads();
+      await stream("opened");
+      // the read that failed is read again as soon as the carrier is back, not at the next poll
+      expect(rosterReads()).toBe(before + 1);
+      expect(shown.map((machine) => machine.name)).toEqual([name]);
+      await stream([local()]);
+    }
+
+    it("names nothing when it is over within a second: no card, no Reconnecting, no Connected", async () => {
+      await dropCarrier();
+      await advance(999);
+      await carrierBack("This PC");
+      await advance(5_000);
+      expect(errorShown).toBeNull();
+      expect(saids.filter((value) => value !== null)).toEqual([]);
+    });
+
+    it("says only Reconnecting from its first second to its tenth, keeping the last roster shown", async () => {
+      await dropCarrier();
+      await advance(999);
+      expect(said).toBeNull();
+      await advance(1);
+      expect(said).toBe("reconnecting");
+      await advance(2_000);
+      expect(said).toBe("reconnecting");
+      expect(errorShown).toBeNull();
+      expect(shown.map((machine) => machine.name)).toEqual(["This PC"]);
+      await carrierBack("This PC");
+      expect(said).toBe("connected");
+      await advance(15_000);
+      expect(errorShown).toBeNull();
+    });
+
+    it("shows the translated card once it has failed for ten seconds, and clears it when the carrier is back", async () => {
+      setCurrentLanguage("ko");
+      try {
+        await dropCarrier();
+        await advance(9_999);
+        expect(errorShown).toBeNull();
+        await advance(1);
+        expect(errorShown).toBe("PC에 연결할 수 없습니다. 연결을 확인한 뒤 다시 시도하세요.");
+        await carrierBack("This PC");
+        expect(errorShown).toBeNull();
+      } finally { setCurrentLanguage("en"); }
+    });
+
+    it("still shows another failure's message at once", async () => {
+      setTransport({ ...transport, openEventSource: () => source, async fetch(input) {
+        if (String(input).startsWith("/api/machines")) throw new TypeError("Load failed");
+        return Response.json({ ok: true });
+      } });
+      await advance(5_000);
+      expect(errorShown).toBe("Load failed");
+    });
+  });
+
+  it("keeps the socket's roster and shows no card when a PC from before account roster reads refuses the read as local_only", async () => {
+    let refused = false;
+    setTransport({ ...transport, openEventSource: () => source, async fetch(input) {
+      const path = String(input); reads.push(path);
+      if (path.startsWith("/api/machines") && !refused) throw new TypeError("Load failed");
+      if (path.startsWith("/api/machines")) return Response.json({ error: { code: "local_only", message: "An account-joined device cannot do this from afar" } }, { status: 403 });
+      return Response.json({ ok: true });
+    } });
+    await advance(5_000);
+    expect(errorShown).toBe("Load failed");
+    refused = true;
+    await stream("opened");
+    await stream([{ ...local(), name: "Pushed" }]);
+    const before = reads.filter((read) => read.startsWith("/api/machines")).length;
+    await advance(35_000);
+    expect(reads.filter((read) => read.startsWith("/api/machines")).length).toBeGreaterThan(before);
+    expect(errorShown).toBeNull();
+    expect(shown.map((machine) => machine.name)).toEqual(["Pushed"]);
+  });
+
+  it("T71: keeps the PC's list of keys waiting for its screen as each change comes", async () => {
+    await healthyStream();
+    const key: PendingKey = { id: "p1", label: "Pixel 9", fingerprint: "AB12-CD34", via: "relay", redeemed_at: "2026-11-20T04:00:00.000Z", slots: { used: 1, of: 5 } };
+    await act(async () => { source.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ type: "pending-redemptions", pending: [key] }) })); });
+    expect(pendingShown).toEqual([key]);
+    await act(async () => { source.onmessage?.(new MessageEvent("message", { data: JSON.stringify({ type: "pending-redemptions", pending: [] }) })); });
+    expect(pendingShown).toEqual([]);
+  });
+
+  it.each(["SSE", "WebSocket"])("T71: a real %s subscription replaces the list with the keys already waiting on the PC", async (carrier) => {
+    const made = await pairingPc({ rows: [(await memberRow("acct_1")).row], server: { accountOpensAll: true } });
+    const base = `http://127.0.0.1:${made.app.port}`;
+    const ws = new HerdrSocket(`ws://127.0.0.1:${made.app.port}/ws`);
+    const abort = new AbortController();
+    const waiting = Promise.withResolvers<readonly PendingKey[]>();
+    try {
+      const { pendingRedemptions: pending, relay, core } = made.app.context.services;
+      const serverId = relay.currentIdentity()?.server_id;
+      if (!pending || !serverId || !core.machines) throw new Error("The PC has no pending-key store, relay identity, or roster");
+      core.machines.list = () => [local()];
+      const device = await phone();
+      const { challenge } = pending.name(await made.offerCode(), "Waiting phone", device.spki, "relay");
+      const key = await pending.prove(challenge, await signPairProof(serverId, challenge, device.spki, device.keys.privateKey));
+      if (!key) throw new Error("Could not seed a proved key on the PC");
+
+      await act(async () => { renderer?.unmount(); });
+      pendingShown = [{ ...pending.view()[0]!, id: "stale", label: "Old phone" }];
+      pendingChanged = waiting.resolve;
+      if (carrier === "WebSocket") eventSocket = ws;
+      const fixtureTransport = getTransport();
+      setTransport({ ...fixtureTransport,
+        fetch: (input, init) => String(input) !== "/api/devices/pending/decline" ? fixtureTransport.fetch(input, init) : fetch(new URL(String(input), base), {
+          ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), origin: base },
+        }),
+        openEventSource: (url) => {
+          if (carrier !== "SSE") {
+            waiting.reject(new Error("WebSocket unexpectedly fell back to SSE"));
+            return source;
+          }
+          const stream: EventSourceLike = { readyState: 1, onopen: null, onmessage: null, onerror: null, addEventListener: noop, close: () => abort.abort() };
+          void (async () => {
+            const response = await fetch(new URL(url, base), { signal: abort.signal });
+            if (!response.ok || !response.body) throw new Error(`SSE returned ${response.status}`);
+            stream.onopen?.(new Event("open"));
+            const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+            let buffer = "";
+            try {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done) return;
+                buffer += value;
+                for (let end = buffer.indexOf("\n\n"); end !== -1; end = buffer.indexOf("\n\n")) {
+                  const block = buffer.slice(0, end);
+                  buffer = buffer.slice(end + 2);
+                  if (block.startsWith("data: ")) stream.onmessage?.(new MessageEvent("message", { data: block.slice(6) }));
+                }
+              }
+            } finally { reader.releaseLock(); }
+          })().catch((error: unknown) => { if (!abort.signal.aborted) waiting.reject(error); });
+          return stream;
+        },
+      });
+      await act(async () => { renderer = create(createElement(Probe)); });
+      await act(async () => { await bounded(waiting.promise, 2_000); });
+      expect(pendingShown).toEqual(pending.view());
+      const markup = renderToStaticMarkup(createElement(SettingsProvider, null, createElement(PendingKeys, { pending: pendingShown, onDecline: noop })));
+      expect(markup).toContain(key.fingerprint);
+      expect(markup).toContain(">Decline</button>");
+      expect(markup).not.toContain("Old phone");
+
+      const changed = Promise.withResolvers<readonly PendingKey[]>();
+      pendingChanged = changed.resolve;
+      await act(async () => {
+        expect(await declinePendingKey(key.id)).toEqual([]);
+        expect(await bounded(changed.promise, 2_000)).toEqual([]);
+      });
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+      renderer = undefined;
+      ws.close();
+      abort.abort();
+      await made.close();
+    }
+  });
 
   it("reads the roster in full, once, after a pushed compact snapshot that cannot be read", async () => {
     await stream("opened");
@@ -297,7 +494,7 @@ describe("roster and health polling beside the event stream", () => {
     await advance(60_000);
     expect(counts()).toEqual([2, 2, 2]);
     reads.length = 0;
-    socketEvents = undefined;
+    socketEvents = null;
     await onSocket("disconnect");
     expect(counts()).toEqual([1, 1, 1]);
     await advance(5_000);
@@ -351,6 +548,8 @@ describe("roster and health polling beside the event stream", () => {
     await healthyStream();
     expect(said).toBeNull();
     await stream("lost");
+    expect(said).toBeNull();
+    await advance(1_000);
     expect(said).toBe("reconnecting");
     await stream([local()]);
     expect(said).toBe("reconnecting");
@@ -362,8 +561,9 @@ describe("roster and health polling beside the event stream", () => {
     socketEvents = true;
     await onSocket({ type: "features", features: ["machine-events"] } as ServerMessage);
     expect(said).toBeNull();
-    socketEvents = undefined;
+    socketEvents = null;
     await onSocket("disconnect");
+    await advance(1_000);
     expect(said).toBe("reconnecting");
     socketEvents = true;
     await onSocket({ type: "features", features: ["machine-events"] } as ServerMessage);

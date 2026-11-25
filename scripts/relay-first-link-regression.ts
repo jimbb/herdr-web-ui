@@ -10,7 +10,7 @@
  *   owner listed, Pair does the same with no listing); when the account service refuses it (429), it stops before any
  *   relay connection and says why. No PC stands behind the relay here, so a pairing that goes on ends there.
  * - A PC's own page (createServer, its relay on a local Bun relay), signed in, in no account, with the account named
- *   for it as `ovis add` names it but the PC not listed in the account: Show the QR code draws the code and, beside
+ *   for it as `ovis add` names it but the PC not listed in the account: Phone QR code draws the code and, beside
  *   it, lists the PC in the account (PUT /v1/pcs/:id) from the code's own offer, when the account does not list it
  *   yet; it opens or closes no pairing window of the PC (POST /api/relay/link, /api/relay/link/close).
  *
@@ -37,6 +37,9 @@ import { deriveServerId } from "../shared/relay-server-proof.ts";
 import { chromePath } from "./chrome-path.ts";
 import { servePagesSite } from "./pages-static.ts";
 import { openSettingsPage } from "./settings-page.ts";
+
+/** What the signed-in page reads of its account by itself, whatever is pressed: the directory, and which signed list the account has. */
+const OWN_READS: ReadonlySet<string> = new Set(["GET /v1/pcs", "GET /v2/lists/mine"]);
 
 const APP = "https://app.ovis.sh";
 const ACCOUNT_SERVICE = "https://account.ovis.sh";
@@ -145,7 +148,7 @@ async function shellAt(browser: Browser, site: string, size: (typeof WIDTHS)[num
   // a marked code of a PC the account does not list: the press of Add and pair lists it, then the admission is taken,
   // and only then the relay
   const unlisted = await add(true, "marked-unlisted");
-  const unlistedCalls = log.filter((line) => line !== "GET /v1/pcs");
+  const unlistedCalls = log.filter((line) => !OWN_READS.has(line));
   assert.deepEqual(unlistedCalls.slice(0, 2), [`PUT /v1/pcs/${unlisted}`, "POST /v1/admissions"], `${size.width}: Add and pair lists the PC, then posts the admission (${unlistedCalls.join(", ")})`);
   assert.ok(fake.pcs(ACCOUNT).some((pc) => pc.server_id === unlisted), `${size.width}: the account lists the PC`);
   assert.ok(sockets.length > 0, `${size.width}: that pairing went on to the relay`);
@@ -153,7 +156,7 @@ async function shellAt(browser: Browser, site: string, size: (typeof WIDTHS)[num
   // a marked code of a PC its owner listed: the admission taken, and only then the relay
   const before2 = admissionsHeld();
   await add(true, "marked", true);
-  const calls = log.filter((line) => line !== "GET /v1/pcs");
+  const calls = log.filter((line) => !OWN_READS.has(line));
   assert.deepEqual(calls.slice(0, 1), ["POST /v1/admissions"], `${size.width}: a marked code posts the admission first, and lists nothing (${calls.join(", ")})`);
   assert.ok(sockets.length > 0, `${size.width}: the marked code's pairing went on to the relay`);
   assert.equal(sockets[0], before2 + 1, `${size.width}: the admission was taken before the first relay connection opened`);
@@ -205,7 +208,7 @@ async function pcPageAt(browser: Browser, origin: string, size: (typeof WIDTHS)[
   const listedBefore = new Set(fake.pcs(ACCOUNT).map((pc) => pc.server_id));
   // the listing, which runs beside the code: a PUT of the PC's entry
   const putAnswered = page.waitForResponse((response) => response.request().method() === "PUT" && /^\/v1\/pcs\/[0-9a-f]{32}$/.test(new URL(response.url()).pathname));
-  await part.getByRole("button", { name: "Show the QR code", exact: true }).click();
+  await part.getByRole("button", { name: "Phone QR code", exact: true }).click();
   await part.getByRole("img", { name: "QR code that pairs a phone through the relay" }).waitFor();
   const serverId = decodeOffer((await (await offered).json() as { url: string }).url)?.server_id;
   assert.ok(serverId !== undefined, `${size.width}: the QR code names a PC`);

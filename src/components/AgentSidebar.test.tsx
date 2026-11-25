@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, jest, setSystemTime } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, jest, setSystemTime, spyOn } from "bun:test";
 import { act, useLayoutEffect, useState } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 
@@ -241,6 +241,40 @@ describe("AgentSidebar phone sheet live row", () => {
     await act(async () => { (mounted.root.findByType(RowMenu).props.items as RowMenuItem[]).find((item) => item.id === "group:Agents")!.run(); });
     expect(mounted.root.findByProps({ "data-named-group": "Agents" }).findByType("button").props["aria-expanded"]).toBe(true);
     expect(row().props.hidden).toBeUndefined();
+  });
+
+  it("stops the agents a row called from its menu, counting those still taking its work, and marks a stopped one", async () => {
+    const sent: { url: string; body: unknown }[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return Response.json({ ok: true, held: [], failed: [] });
+    }, { preconnect: globalThis.fetch.preconnect }));
+    const called = roster().map((machine) => {
+      const parent = machine.snapshot?.panes.find((pane) => pane.pane_id === paneId);
+      if (!machine.snapshot || !parent) return machine;
+      const child = (id: string, held: boolean) => ({ ...parent, pane_id: id, terminal_id: id, agent: "opencode", label: "OpenCode", tokens: {}, acp_child: true as const, parent_pane_id: paneId,
+        ...(held ? { acp_hold: { child_id: "aaaaaaaaaaaa", generation: 2 } } : {}) });
+      return { ...machine, snapshot: { ...machine.snapshot, panes: [...machine.snapshot.panes, child("w1C:c1", false), child("w1C:c2", true)] } };
+    });
+    try {
+      await act(async () => { renderer = create(view(called), { createNodeMock: () => anchor }); });
+      const mounted = renderer!;
+      const held = (id: string) => mounted.root.findByProps({ "data-machine": "local", "data-pane": id }).findAllByProps({ className: "agent-held" }).length;
+      expect([held("w1C:c1"), held("w1C:c2")]).toEqual([0, 1]);
+      await act(async () => { mounted.root.findByProps({ "data-machine": "local", "data-pane": paneId }).findByProps({ className: "sidebar-row-action row-menu-toggle" }).props.onClick({ currentTarget: anchor }); });
+      const stop = (mounted.root.findByType(RowMenu).props.items as RowMenuItem[]).find((item) => item.id === "stop-called");
+      expect(stop?.label).toBe("Stop agents it called (1)");
+      await act(async () => { stop!.run(); });
+      expect(sent).toEqual([{ url: "/api/pane/turn/cancel-children", body: { pane_id: paneId } }]);
+      expect(mounted.root.findAllByProps({ role: "alert" })).toHaveLength(0);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("offers no stop for a row that called no agent", async () => {
+    const { mounted } = await open();
+    expect((mounted.root.findByType(RowMenu).props.items as RowMenuItem[]).map((item) => item.id)).not.toContain("stop-called");
   });
 
   it("updates the open sheet when a plugin value changes", async () => {
@@ -1039,6 +1073,90 @@ describe("AgentSidebar fold memory", () => {
 
     await act(async () => { section().props.onBlur({ target: focusedRow, currentTarget: { contains: () => false }, relatedTarget: null }); });
     expect(drawnEntries()).toEqual(["RESTING", "w1C:p1"]);
+  });
+
+  it("keeps a helper with the agent that started it across the resting line, whichever of the two is resting", async () => {
+    stored.set("ovis:settings", JSON.stringify({ agentOrder: "waiting" }));
+    // an ACP child that finished while the agent that asked it still works, then one still working under a resting agent
+    const family = (parent: AgentStatus, helper: AgentStatus) => roster().map((machine) => ({ ...machine, snapshot: machine.snapshot && {
+      ...machine.snapshot, panes: machine.snapshot.panes.map((pane) => pane.pane_id === "w1D:p1" ? { ...pane, agent_status: parent }
+        : pane.pane_id === "w1E:p1" ? { ...pane, agent_status: helper, parent_pane_id: "w1D:p1", acp_child: true as const } : pane),
+    } }));
+    const renderList = (machines: Machine[]) => <SettingsProvider>
+      <SidebarFilterProvider value={{ filter: inactive, reportBranches: () => {} }}>
+        <AgentSidebar machines={machines} selectedMachineId="local" selectedPaneId={null} stateWord={(machine) => machine.state} onSelect={() => {}} />
+      </SidebarFilterProvider>
+    </SettingsProvider>;
+    await act(async () => { renderer = create(renderList(family("working", "done"))); });
+    if (!renderer) throw new Error("sidebar did not mount");
+    const mounted = renderer;
+    const drawnEntries = () => mounted.root.findAll((node) => node.type === "li" && !node.props.hidden && (node.props["data-pane"] !== undefined || node.props.className === "agent-background-label agent-resting-label"))
+      .map((node) => [node.props["data-pane"] ?? "RESTING", node.props["data-depth"] ?? 0]);
+    const restingLabel = () => mounted.root.findByProps({ className: "agent-background-label agent-resting-label" }).findByType("span").children.join("");
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["w1E:p1", 1], ["RESTING", 0]]);
+    expect(restingLabel()).toBe("+1 resting");
+
+    await act(async () => { mounted.update(renderList(family("idle", "working"))); });
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["w1E:p1", 1], ["RESTING", 0]]);
+    expect(restingLabel()).toBe("+1 resting");
+  });
+
+  it("while the pointer is in the list, an agent kept above the resting line by its busy helper stays when the helper leaves, and a new helper stands with its agent", async () => {
+    stored.set("ovis:settings", JSON.stringify({ agentOrder: "waiting" }));
+    type Panes = NonNullable<Machine["snapshot"]>["panes"];
+    const scene = (edit: (panes: Panes) => Panes) => roster().map((machine) => ({ ...machine, snapshot: machine.snapshot && { ...machine.snapshot, panes: edit(machine.snapshot.panes) } }));
+    const helped = (helper: boolean) => scene((panes: Panes) => panes.flatMap((pane) => pane.pane_id === "w1D:p1" ? [{ ...pane, agent_status: "idle" as const }]
+      : pane.pane_id === "w1E:p1" ? helper ? [{ ...pane, agent_status: "working" as const, parent_pane_id: "w1D:p1" }] : [] : [pane]));
+    const working = (newHelper: boolean) => scene((panes: Panes) => panes.flatMap((pane) => pane.pane_id !== "w1D:p1" ? [pane]
+      : [{ ...pane, agent_status: "working" as const }, ...newHelper ? [{ ...pane, pane_id: "w1D:p9", terminal_id: "w1D:p9", agent_status: "done" as const, parent_pane_id: "w1D:p1", acp_child: true as const }] : []]));
+    const renderList = (machines: Machine[]) => <SettingsProvider>
+      <SidebarFilterProvider value={{ filter: inactive, reportBranches: () => {} }}>
+        <AgentSidebar machines={machines} selectedMachineId="local" selectedPaneId={null} stateWord={(machine) => machine.state} onSelect={() => {}} />
+      </SidebarFilterProvider>
+    </SettingsProvider>;
+    await act(async () => { renderer = create(renderList(helped(true))); });
+    if (!renderer) throw new Error("sidebar did not mount");
+    const mounted = renderer;
+    const section = () => mounted.root.findByType("section");
+    const drawnEntries = () => mounted.root.findAll((node) => node.type === "li" && !node.props.hidden && (node.props["data-pane"] !== undefined || node.props.className === "agent-background-label agent-resting-label"))
+      .map((node) => [node.props["data-pane"] ?? "RESTING", node.props["data-depth"] ?? 0]);
+    const restingLabel = () => mounted.root.findByProps({ className: "agent-background-label agent-resting-label" }).findByType("span").children.join("");
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["w1E:p1", 1], ["RESTING", 0]]);
+
+    await act(async () => { section().props.onPointerEnter(); });
+    await act(async () => { mounted.update(renderList(helped(false))); });
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["RESTING", 0]]);
+    await act(async () => { section().props.onPointerLeave(); });
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["RESTING", 0]]);
+
+    await act(async () => { mounted.update(renderList(working(false))); });
+    const before = restingLabel();
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["RESTING", 0]]);
+    await act(async () => { section().props.onPointerEnter(); });
+    await act(async () => { mounted.update(renderList(working(true))); });
+    expect(drawnEntries()).toEqual([["w1C:p1", 0], ["w1D:p1", 0], ["w1D:p9", 1], ["RESTING", 0]]);
+    expect(restingLabel()).toBe(before);
+  });
+
+  it("draws the tree lines of the order it shows while the pointer is in the list, a helper that came meanwhile included", async () => {
+    stored.set("ovis:settings", JSON.stringify({ agentOrder: "workspace" }));
+    type Panes = NonNullable<Machine["snapshot"]>["panes"];
+    const helpers = (ids: string[]) => roster().map((machine) => ({ ...machine, snapshot: machine.snapshot && { ...machine.snapshot, panes: machine.snapshot.panes.flatMap((pane): Panes => pane.pane_id !== "w1D:p1" ? [pane]
+      : [pane, ...ids.map((id) => ({ ...pane, pane_id: id, terminal_id: id, agent_status: "working" as const, parent_pane_id: "w1D:p1" }))]) } }));
+    const renderList = (machines: Machine[]) => <SettingsProvider>
+      <SidebarFilterProvider value={{ filter: inactive, reportBranches: () => {} }}>
+        <AgentSidebar machines={machines} selectedMachineId="local" selectedPaneId={null} stateWord={(machine) => machine.state} onSelect={() => {}} />
+      </SidebarFilterProvider>
+    </SettingsProvider>;
+    await act(async () => { renderer = create(renderList(helpers(["w1D:p7", "w1D:p8"]))); });
+    if (!renderer) throw new Error("sidebar did not mount");
+    const mounted = renderer;
+    const family = () => mounted.root.findAll((node) => node.type === "li" && typeof node.props["data-pane"] === "string" && node.props["data-pane"].startsWith("w1D:"))
+      .map((node) => [node.props["data-pane"], node.props["data-more"] === ""]);
+    expect(family()).toEqual([["w1D:p1", false], ["w1D:p7", true], ["w1D:p8", false]]);
+    await act(async () => { mounted.root.findByType("section").props.onPointerEnter(); });
+    await act(async () => { mounted.update(renderList(helpers(["w1D:p7", "w1D:p8", "w1D:p9"]))); });
+    expect(family()).toEqual([["w1D:p1", false], ["w1D:p9", true], ["w1D:p7", true], ["w1D:p8", false]]);
   });
 
   it("keeps rows still for one second after a touch ends, then applies the new order without changing selection", async () => {

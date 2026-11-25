@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { posix } from "node:path";
-import { fail, files, lineOf, read, stripComments } from "../scripts/source-scan.ts";
+import { existsSync } from "node:fs";
+import { join, posix } from "node:path";
+import { fail, files, importClosure, lineOf, read, repo, stripComments } from "../scripts/source-scan.ts";
 
 const serverCode = (): string[] => files("server/**/*.{ts,mjs,js}").filter((file) => !/\.test\.ts$|\.fake\.ts$/.test(file));
 
@@ -21,10 +22,10 @@ describe("PTY sidecar boundary", () => {
   const LOAD = /\bfrom\s*["'](?:@lydell\/)?node-pty[^"']*["']|\bimport\s*\(?\s*["'](?:@lydell\/)?node-pty[^"']*["']|\b(?:require|createRequire\s*\([^()]*(?:\([^()]*\))?[^()]*\))\s*\(\s*["'](?:@lydell\/)?node-pty[^"']*["']/;
 
   it("loads node-pty only in the Node sidecar", () => {
-    const code = [...files("{server,src,shared,scripts,site,telemetry}/**/*.{ts,tsx,mjs,cjs,js}"), "vite.config.ts"].filter((file) => file !== "server/conventions.test.ts");
+    const code = [...files("{server,src,shared,scripts,site,telemetry,tui}/**/*.{ts,tsx,mjs,cjs,js}"), "vite.config.ts"].filter((file) => file !== "server/conventions.test.ts");
     const loads = matches(code, LOAD);
     fail(loads.filter((load) => !NODE_SIDE.has(load.file)).map((load) => load.at),
-      "node-pty must never load inside Bun (AGENTS.md, Bridge invariants). PTY work goes through the Node sidecar server/pty/pty-host.mjs via PtySession (server/pty/session.ts).");
+      "node-pty must never load inside Bun: it panics the runtime (oven-sh/bun#18546). PTY work goes through PtySession (server/pty/session.ts): the Rust PTY host (crates/pty-sidecar), or the Node sidecar server/pty/pty-host.mjs as its fallback.");
     expect(loads.map((load) => load.file)).toContain("server/pty/pty-host.mjs");
   });
 
@@ -42,6 +43,14 @@ describe("web push", () => {
   it("never calls sendNotification", () => {
     fail(matches(files("{server,src,shared,scripts,telemetry}/**/*.{ts,tsx,mjs,js}").filter((file) => !file.endsWith(".test.ts")), /\bsendNotification\b/).map((match) => match.at),
       "Web push requests are built with webpush.generateRequestDetails and sent with fetch (server/push.ts); never call sendNotification (AGENTS.md, Bridge invariants).");
+  });
+});
+
+describe("account service fake", () => {
+  it("is imported by tests and their helpers only", () => {
+    const shipped = files("{server,src,shared,app}/**/*.{ts,tsx,mjs,js}").filter((file) => !/\.test\.tsx?$|\.test-helpers\.ts$/.test(file) && file !== "shared/account-service-fake.ts" && !file.includes("/node_modules/"));
+    fail(matches(shipped, /(?:from|import)\s*\(?\s*["'][^"']*account-service-fake(?:\.ts)?["']/).map((match) => match.at),
+      "shared/account-service-fake.ts is test support: import it from a test or a *.test-helpers.ts file only.");
   });
 });
 
@@ -132,6 +141,96 @@ function unixConnects(file: string, code: string): { file: string; at: string; b
   return found;
 }
 
+describe("herdr-core's socket transport", () => {
+  // The terminal screen reaches herdr-core through this file so that no core is ever started (hc
+  // connect starts one when none runs). A PATH stand-in sees only a spawn by name; this rule also
+  // sees one by absolute path, and every file the transport imports, however deep.
+  const ENTRY = "server/herdr-core/socket-transport.ts";
+  const RUNS_HC_OR_HERDR = new Set(["server/herdr-core/hc-connect.ts", "server/herdr-core/discovery.ts", "server/herdr/client.ts"]);
+  /**
+   * child_process, and any value import of "bun" (named, default, namespace, re-export or dynamic), spaces or none
+   * around the braces and `from`: only `import type` passes
+   */
+  const PROCESS_START = /["'](?:node:)?child_process["']|(?<![\w$.])(?:import|export)(?![\w$])(?!\s*type(?:\s*[{*]|\s+(?!from[\s"'])[\w$]))[^;]*?(?<![\w$])from\s*["']bun["']|\b(?:import|require)\s*\(\s*["']bun["']\s*\)/g;
+  /** the global Bun's members the closure uses; any other use of `Bun` (Bun.spawn, Bun.$, Bun["spawn"], `const B = Bun`) could start a process */
+  const BUN_MEMBERS = ["connect", "Socket", "TOML"];
+  const OTHER_BUN = new RegExp(`(?<![\\w$])Bun(?![\\w$])(?!\\s*\\.\\s*(?:${BUN_MEMBERS.join("|")})(?![\\w$]))`, "g");
+  const repoSource = (path: string) => (existsSync(join(repo, path)) ? read(path) : undefined);
+
+  /** Each import of a file that runs hc or herdr in `entry`'s import closure, and each process start there, as `file:line: text`. */
+  function processStarts(entry: string, source: (path: string) => string | undefined): string[] {
+    const { reached, offenders } = importClosure(entry, source, (path) => !RUNS_HC_OR_HERDR.has(path));
+    const starts = reached.filter((file) => /\.(?:ts|tsx|mjs|js)$/.test(file)).flatMap((file) => {
+      const code = stripComments(source(file) ?? "");
+      // `Bun` inside a string counts too: a template literal's `${...}` is code
+      const offsets = [...code.matchAll(PROCESS_START), ...code.matchAll(OTHER_BUN)].map((match) => match.index + match[0].search(/\S/));
+      return [...new Set(offsets.map((at) => lineOf(code, at)))].sort((a, b) => a - b).map((line) => `${file}:${line}: ${code.split("\n")[line - 1]!.trim().slice(0, 160)}`);
+    });
+    return [...offenders, ...starts];
+  }
+
+  it("starts no process anywhere in its import closure", () => {
+    expect(importClosure(ENTRY, repoSource).reached).toContain("server/herdr-core/connection.ts");
+    fail(processStarts(ENTRY, repoSource),
+      "server/herdr-core/socket-transport.ts must never start a core: nothing in its import closure may start a process (Bun.spawn, Bun.spawnSync, Bun.$, child_process, a value import of \"bun\", or Bun used as anything but Bun.connect, Bun.Socket or Bun.TOML) or import hc-connect.ts, discovery.ts or server/herdr/client.ts, which run hc or herdr. Take the process start out of the file named, or import what the transport needs from a file that starts nothing.");
+  });
+
+  it("finds a process start or an import of what runs hc in any file of the closure", () => {
+    const graph: Record<string, string> = {
+      [ENTRY]: "import { a } from \"./connection.ts\";\nimport { b } from \"./hc-connect.ts\";\nBun.spawn([\"hc\"]);",
+      "server/herdr-core/connection.ts": "import \"../../shared/x.ts\";\n// Bun.spawn in a comment\nconst p = Bun . spawnSync([\"sh\"]);",
+      "shared/x.ts": "import { spawn } from \"bun\";\nimport { execFile } from \"node:child_process\";\nimport \"./y.ts\";",
+      "server/herdr-core/hc-connect.ts": "Bun.spawn([\"hc\", \"connect\"]);",
+      // every other way to reach Bun's process starts; the members the closure really uses and a type import pass
+      "shared/y.ts": [
+        "import { $ } from \"bun\";",
+        "import * as b from \"bun\";",
+        "const B = Bun;",
+        "Bun[\"spawn\"]([\"hc\"]);",
+        "globalThis.Bun.spawn([\"hc\"]);",
+        "const run = await import(\"bun\");",
+        "import type { Socket } from \"bun\";",
+        "const s: Bun.Socket<undefined> = await Bun.connect({ unix: \"x\" }); Bun.TOML.parse(\"\");",
+        "const text = `${Bun.spawn([\"hc\"])}`;",
+        // the same imports written without spaces, after a brace, or across lines
+        "import{spawn}from\"bun\";",
+        "import {spawn}from \"bun\";",
+        "import{ spawn } from \"bun\";",
+        "import{spawnSync}from\"bun\";",
+        "{}import { spawn } from \"bun\";",
+        "import {",
+        "  spawn,",
+        "}from \"bun\";",
+        "import{$}from\"bun\";",
+        "export*from'bun';",
+        "import type{Socket}from\"bun\";",
+      ].join("\n"),
+    };
+    expect(processStarts(ENTRY, (path) => graph[path])).toEqual([
+      `${ENTRY}:2: ./hc-connect.ts (server/herdr-core/hc-connect.ts)`,
+      `${ENTRY}:3: Bun.spawn(["hc"]);`,
+      "server/herdr-core/connection.ts:3: const p = Bun . spawnSync([\"sh\"]);",
+      "shared/x.ts:1: import { spawn } from \"bun\";",
+      "shared/x.ts:2: import { execFile } from \"node:child_process\";",
+      "shared/y.ts:1: import { $ } from \"bun\";",
+      "shared/y.ts:2: import * as b from \"bun\";",
+      "shared/y.ts:3: const B = Bun;",
+      "shared/y.ts:4: Bun[\"spawn\"]([\"hc\"]);",
+      "shared/y.ts:5: globalThis.Bun.spawn([\"hc\"]);",
+      "shared/y.ts:6: const run = await import(\"bun\");",
+      "shared/y.ts:9: const text = `${Bun.spawn([\"hc\"])}`;",
+      "shared/y.ts:10: import{spawn}from\"bun\";",
+      "shared/y.ts:11: import {spawn}from \"bun\";",
+      "shared/y.ts:12: import{ spawn } from \"bun\";",
+      "shared/y.ts:13: import{spawnSync}from\"bun\";",
+      "shared/y.ts:14: {}import { spawn } from \"bun\";",
+      "shared/y.ts:15: import {",
+      "shared/y.ts:18: import{$}from\"bun\";",
+      "shared/y.ts:19: export*from'bun';",
+    ]);
+  });
+});
+
 describe("herdr socket", () => {
   // herdr closes the socket after each answer, so every RPC opens its own connection in
   // server/herdr/client.ts (no pooling), and only server/collector.ts holds a status
@@ -139,12 +238,18 @@ describe("herdr socket", () => {
   const UNIX_CONNECT_ALLOWED: Record<string, string> = {
     "server/herdr/client.ts": "the one herdr RPC client: one connection per call, plus subscribeEvents",
     "server/herdr-marker.ts": "a liveness probe: connects and ends at once, sends no request",
+    "server/account/recovery.ts": "ovis recover's own private recovery socket in this PC's state folder, not herdr's",
+    "server/herdr-core/socket-transport.ts": "herdr-core's socket, not herdr's: a line that never starts a core, for a client that must not",
   };
   const NET_CONNECT_ALLOWED: Record<string, string> = {
+    "server/line-call.ts": "one request to a private tool broker's socket, never herdr's",
     "server/ssh-askpass.ts": "the SSH askpass helper's own private socket, not herdr's",
+    "server/approvals/relay.ts": "an agent's approval hook reaching the approval hub's own socket or pipe, not herdr's",
     "server/herdr-core/adapter.ts": "a liveness probe of the core adapter's own socket before startup: sends no request",
     "server/herdr-core/runtime.ts": "a liveness probe of herdr-core's socket, not herdr's: connects and closes, sends nothing",
     "server/runtime-move-lock.ts": "the herdr-core move's own lock socket, not herdr's: asks which Ovis server holds it",
+    "server/omo-control.ts": "OmO's own terminal-control socket, the one the pane's OmO process listens on, not herdr's: one request per connection",
+    "server/acp/client.ts": "an ACP keeper's own socket in this server's state folder (crates/acp-keeper), not herdr's: one connection the keeper streams its log on",
   };
 
   it("opens herdr's socket only in server/herdr/client.ts", () => {
@@ -188,7 +293,9 @@ describe("herdr socket", () => {
 
   it("subscribes to status only in server/collector.ts", () => {
     const subscribers = matches(serverCode(), /\bsubscribeEvents\b/).filter((match) => match.file !== "server/herdr/client.ts" && match.file !== "server/collector.ts");
-    const HC_STREAM_TYPES = ["server/herdr-core/adapter.ts", "server/herdr-core/hc-api.generated.ts", "scripts/hc-types.ts", "server/herdr-core/connection.ts", "server/herdr-core/pin-label.ts", "server/herdr-core/machine-scope.ts"];
+    // server/herdr-core/core.fake.ts is the tests' stand-in for hc, answering the method as hc does
+    // server/herdr-core/event-stream.ts opens that hc stream for the adapter (and the terminal screen)
+    const HC_STREAM_TYPES = ["server/herdr-core/adapter.ts", "server/herdr-core/event-stream.ts", "server/herdr-core/hc-api.generated.ts", "scripts/hc-types.ts", "server/herdr-core/connection.ts", "server/herdr-core/pin-label.ts", "server/herdr-core/machine-scope.ts", "server/herdr-core/core.fake.ts"];
     const raw = matches(files("{server,src,shared,scripts}/**/*.{ts,tsx,mjs,js}").filter((file) => !file.endsWith(".test.ts")), /["']events\.subscribe["']/).filter((match) => match.file !== "server/herdr/client.ts" && !HC_STREAM_TYPES.includes(match.file));
     fail([...subscribers, ...raw].map((match) => match.at),
       "server/collector.ts is the only status subscription (startStatusCollector), and `events.subscribe` is sent only by subscribeEvents in server/herdr/client.ts: take pane status from the collector's callbacks (onStatus, onPaneEnded, onBaseline) in server/index.ts instead of subscribing again.");
@@ -273,7 +380,8 @@ describe("server entries", () => {
   };
 
   it("starts the server's own entries only through entryCommand", () => {
-    const starts = matches([...serverCode(), "scripts/plugin.ts"].filter((file) => file !== "server/entries.ts"), START_BY_PATH);
+    // a *.test-helpers.ts is test support, as a test is: it runs from a checkout, never in the compiled binary
+    const starts = matches([...serverCode(), "scripts/plugin.ts", "scripts/plugin-tui.ts"].filter((file) => file !== "server/entries.ts" && !file.endsWith(".test-helpers.ts")), START_BY_PATH);
     fail(starts.filter((start) => !(start.file in ALLOWED)).map((start) => start.at),
       "Start the server's own code with entryCommand(name) from server/entries.ts (add the entry to ENTRIES), never with process.execPath and a .ts path: the compiled binary has no such file.");
     const users = new Set(starts.map((start) => start.file));
@@ -287,5 +395,126 @@ describe("server entries", () => {
     expect(START_BY_PATH.test("run([process.execPath, \"install\", \"--frozen-lockfile\"])")).toBe(false);
     expect(START_BY_PATH.test("[process.execPath, \"-e\", SCRIPT, String(pid)]")).toBe(false);
     expect(START_BY_PATH.test("Bun.spawn(entryCommand(\"machine\"), {")).toBe(false);
+  });
+});
+
+describe("herdr focus", () => {
+  const SENDS: Record<string, number> = { "server/herdr/client.ts": 3 };
+  const CALLERS: Record<string, string> = {
+    "server/pane-routes.ts": "POST /api/pane/focus, the request a person's own action sends",
+  };
+  const RULE = "Selecting a pane or tab in the browser never moves herdr's own focus. `pane.focus` is sent by paneFocus (POST /api/pane/focus) and by the two restores in server/herdr/client.ts that put herdr's focus back after a swap or a move took it.";
+
+  it("sends pane.focus only from the focus route and the two restores", () => {
+    const code = files("{server,shared}/**/*.{ts,mjs,js}").filter((file) => !/\.test\.ts$|\.fake\.ts$|\.generated\.ts$/.test(file));
+    const sends = matches(code, /["']pane\.focus["']/);
+    const counts = new Map<string, number>();
+    for (const send of sends) counts.set(send.file, (counts.get(send.file) ?? 0) + 1);
+    fail(sends.filter((send) => counts.get(send.file) !== SENDS[send.file]).map((send) => send.at),
+      `${RULE} A new sender is an explicit action that needs herdr to show the pane: route it through paneFocus, or raise the file's count in SENDS in server/conventions.test.ts with that reason in the pull request.`);
+    fail(Object.keys(SENDS).filter((file) => counts.get(file) !== SENDS[file]),
+      "These files no longer send pane.focus that many times: set their count in SENDS in server/conventions.test.ts.");
+  });
+
+  it("calls paneFocus only from the focus route", () => {
+    const calls = matches(serverCode().filter((file) => file !== "server/herdr/client.ts"), /\bpaneFocus\s*\(/);
+    fail(calls.filter((call) => !(call.file in CALLERS)).map((call) => call.at),
+      `${RULE} A new caller is an explicit action that needs herdr to show the pane: list its file in CALLERS in server/conventions.test.ts with that action.`);
+    const users = new Set(calls.map((call) => call.file));
+    fail(Object.keys(CALLERS).filter((file) => !users.has(file)),
+      "These files no longer call paneFocus: remove them from CALLERS in server/conventions.test.ts.");
+  });
+});
+
+describe("herdr update", () => {
+  const REAL = "server/index.ts";
+  const STAND_IN = /^new HerdrUpdater\(\s*\{(?:[^}]*,)?\s*bin\s*[:,}]/;
+
+  it("builds a HerdrUpdater for the real herdr only in the server's own start", () => {
+    const code = files("{server,scripts,src,shared}/**/*.{ts,tsx,mjs,js}").filter((file) => file !== REAL && file !== "server/conventions.test.ts");
+    const builds = matches(code, /new HerdrUpdater\(/).filter((build) => !STAND_IN.test(build.code.slice(build.index, build.index + 400)));
+    fail(builds.map((build) => build.at),
+      "A test never runs the real `herdr update`: it would update the herdr of whoever runs the tests. Give the updater a stand-in, `new HerdrUpdater({ bin: <a script the test wrote> })`, as server/herdr-update.test.ts does. Only server/index.ts builds one for the real herdr.");
+  });
+
+  it("knows a stand-in binary from the real herdr", () => {
+    expect(STAND_IN.test("new HerdrUpdater({ bin: herdr.path, socketPath: \"/srv/herdr.sock\" })")).toBe(true);
+    expect(STAND_IN.test("new HerdrUpdater({ timeoutMs: 200, bin })")).toBe(true);
+    expect(STAND_IN.test("new HerdrUpdater()")).toBe(false);
+    expect(STAND_IN.test("new HerdrUpdater({ timeoutMs: 200 })")).toBe(false);
+    expect(STAND_IN.test("new HerdrUpdater({ socketPath: \"/tmp/bin/herdr.sock\" })")).toBe(false);
+  });
+});
+
+describe("test servers", () => {
+  const FROM_INDEX = /import\s*\{[^}]*\bcreateServer\b[^}]*\}\s*from\s*["'](?:\.\.?\/)+(?:server\/)?index\.ts["']/;
+  const CALL = /(?<![.\w$])createServer\(/g;
+  const OWN: Record<string, { calls: number; why: string }> = {
+    "server/copilot.contract.test.ts": { calls: 1, why: "node's net.createServer, inside the text of the stand-in Copilot script" },
+    "server/device-access.contract.test.ts": { calls: 1, why: "the default state folder, under an XDG_CONFIG_HOME the test made" },
+    "server/ipv6-loopback.contract.test.ts": { calls: 1, why: "a port the test took itself, to see the start fail" },
+  };
+
+  function closing(code: string, open: number): number {
+    let depth = 1;
+    let end = open + 1;
+    for (; depth > 0 && end < code.length; end++) depth += "({[".includes(code[end]!) ? 1 : ")}]".includes(code[end]!) ? -1 : 0;
+    return end;
+  }
+
+  function ownProperties(object: string): string {
+    let depth = 0;
+    let own = "";
+    for (const char of object) {
+      if ("({[".includes(char)) depth += 1;
+      if (depth <= 1) own += char;
+      if (")}]".includes(char)) depth -= 1;
+    }
+    return own;
+  }
+
+  function serverCalls(file: string, code: string): { at: string; isolated: boolean }[] {
+    if (!FROM_INDEX.test(code)) return [];
+    return [...code.matchAll(CALL)].map((match) => {
+      const open = match.index + match[0].length - 1;
+      const args = code.slice(open + 1, closing(code, open) - 1).trim();
+      const before = code.slice(0, match.index);
+      const declared = (name: string): string => {
+        const at = before.lastIndexOf(`const ${name} = {`);
+        return at < 0 ? "" : ownProperties(code.slice(code.indexOf("{", at), closing(code, code.indexOf("{", at))));
+      };
+      const literal = args.startsWith("{") ? ownProperties(args) : "";
+      const named = literal ? [...literal.matchAll(/\.\.\.([A-Za-z_$][\w$]*)/g)].map((spread) => declared(spread[1]!)).join("") : /^[A-Za-z_$][\w$]*$/.test(args) ? declared(args) : "";
+      const port = /\bport:\s*([^,}\s]+)/.exec(literal) ?? /\bport:\s*([^,}\s]+)/.exec(named);
+      const line = lineOf(code, match.index);
+      return { at: `${file}:${line}: ${code.split("\n")[line - 1]!.trim().slice(0, 160)}`, isolated: port?.[1] === "0" && /(?<![\w$.])stateDir\b/.test(literal + named) };
+    });
+  }
+
+  it("start on a free port with a state folder of their own", () => {
+    const tests = files("{server,scripts,src,shared}/**/*.{ts,tsx}").filter((file) => /\.test\.tsx?$|test-helpers\.ts$/.test(file) || file.startsWith("scripts/"));
+    const open = tests.flatMap((file) => serverCalls(file, stripComments(read(file))).filter((call) => !call.isolated).map((call) => ({ file, at: call.at })));
+    const counts = new Map<string, number>();
+    for (const call of open) counts.set(call.file, (counts.get(call.file) ?? 0) + 1);
+    fail(open.filter((call) => counts.get(call.file) !== OWN[call.file]?.calls).map((call) => call.at),
+      "A test's createServer takes `port: 0` and a `stateDir` the test made (`mkdtempSync(join(tmpdir(), \"ovis-…\"))`), in the call or in the `const` object it passes or spreads: without them it binds the port and reads and writes the state folder of whoever runs the tests. A call that cannot is counted in OWN in server/conventions.test.ts with its reason.");
+    fail(Object.keys(OWN).filter((file) => counts.get(file) !== OWN[file]!.calls),
+      "These files no longer hold that many createServer calls without port: 0 and a stateDir: set their count in OWN in server/conventions.test.ts, or remove them.");
+  });
+
+  it("reads a call's options, in place or from the const it names", () => {
+    const from = "import { createServer } from \"./index.ts\";\n";
+    const isolated = (code: string): boolean[] => serverCalls("x.test.ts", from + code).map((call) => call.isolated);
+    expect(isolated("createServer({ port: 0, stateDir: dir, token: \"\" });")).toEqual([true]);
+    expect(isolated("const base = { port: 0, token: \"\" } as const;\ncreateServer({ ...base, stateDir: tempDir() });")).toEqual([true]);
+    expect(isolated("const options = { port: 0, stateDir: root } as const;\ncreateServer(options);")).toEqual([true]);
+    expect(isolated("const options = {\n  port: 0,\n  stateDir: root,\n} as const;\ncreateServer(options);")).toEqual([true]);
+    expect(isolated("const base = { port: 0, stateDir: dir };\ncreateServer({ ...base, port: 7317 });")).toEqual([false]);
+    expect(isolated("const base = { port: 0, token: \"\" };\ncreateServer({ ...base, stateDir: dir, lanHttps: { port: 8443 } });")).toEqual([true]);
+    expect(isolated("createServer({ port: 0, siblingStateDir: legacy });")).toEqual([false]);
+    expect(isolated("createServer({ port: 7317, stateDir: dir });")).toEqual([false]);
+    expect(isolated("createServer(options);")).toEqual([false]);
+    expect(isolated("net.createServer((socket) => socket.end());")).toEqual([]);
+    expect(serverCalls("x.test.ts", "import { createServer } from \"node:net\";\ncreateServer();")).toEqual([]);
   });
 });

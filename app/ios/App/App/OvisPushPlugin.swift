@@ -27,18 +27,12 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
         let environment: String
     }
 
-    private static let endpointKeyPrefix = "ovis.push.endpoint."
-    private static var lastHandledNotificationId: String?
-
     private enum Failure: Error { case registration, relay, configuration }
     private var tokenWaiters: [CheckedContinuation<String, Error>] = []
     private var tokenTimeout: DispatchWorkItem?
 
     public override func load() {
-        if let router = bridge?.notificationRouter {
-            router.pushNotificationHandler = self
-            UNUserNotificationCenter.current().delegate = router
-        }
+        bridge?.notificationRouter.pushNotificationHandler = self
         NotificationCenter.default.addObserver(self, selector: #selector(registered(_:)),
                                                name: .capacitorDidRegisterForRemoteNotifications, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(registrationFailed(_:)),
@@ -51,40 +45,7 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
         [.banner, .list, .sound]
     }
 
-    public func didReceive(response: UNNotificationResponse) {
-        Self.handleNotificationResponse(response)
-    }
-
-    /// Opens a tapped alert's pane on the saved PC that sent it (reusing the open page when that
-    /// PC's app page is already shown). Decrypts the ciphertext in `userInfo["ovis"]` with this
-    /// phone's keys, so a tap works even if the notification service extension timed out, and
-    /// nothing unencrypted in `userInfo` can steer navigation.
-    static func handleNotificationResponse(_ response: UNNotificationResponse) {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-              let sealed = response.notification.request.content.userInfo["ovis"] as? String,
-              let message = Data(base64Encoded: sealed),
-              let keys = try? keyStore().read(),
-              let plain = try? WebPushDecrypt.decrypt(message, keys: keys),
-              let payload = AlertRouting.decodePayload(plain) else { return }
-        let notificationId = response.notification.request.identifier
-        let stored = payload.endpoint.flatMap { storedKey(forEndpoint: $0) }
-        let apply = {
-            if lastHandledNotificationId == notificationId { return }
-            lastHandledNotificationId = notificationId
-            HerdrBridgeViewController.openAlert(
-                storedKey: stored,
-                serverId: payload.serverId,
-                machine: payload.machineId,
-                workspace: payload.workspaceId,
-                pane: payload.paneId
-            )
-        }
-        if Thread.isMainThread {
-            apply()
-        } else {
-            DispatchQueue.main.async(execute: apply)
-        }
-    }
+    public func didReceive(response: UNNotificationResponse) {}
 
     private func permission(_ status: UNAuthorizationStatus) -> String {
         switch status {
@@ -112,8 +73,15 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
         }
     }
 
+    /// The PC whose page asks: the current one only where its own page is on screen. While the person chooses another
+    /// way the PC stays current, but the page asking is the hosted Connect a PC screen or the app's own, which get
+    /// what a page with no PC gets: no subscription to read, replace or forget.
+    private var shownPc: String? {
+        (bridge?.viewController as? HerdrBridgeViewController)?.showsPc == true ? PCStore.current : nil
+    }
+
     @objc func subscribe(_ call: CAPPluginCall) {
-        guard let origin = PCStore.current else {
+        guard let origin = shownPc else {
             call.reject("Push needs an open PC", "no_pc")
             return
         }
@@ -135,7 +103,7 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
                     call.reject("Notifications are off for Ovis", "permission")
                     return
                 }
-                let keys = try Self.keyStore().getOrCreate()
+                let keys = try keyStore().getOrCreate()
                 let token = try await deviceToken()
                 let environment = try apnsEnvironment()
                 let saved = savedEndpoint(origin)
@@ -147,7 +115,7 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
                     endpoint = try await register(token: token, vapidKey: vapidKey, environment: environment)
                 }
                 let entry = Endpoint(endpoint: endpoint, token: token, vapidKey: vapidKey, environment: environment)
-                UserDefaults.standard.set(try JSONEncoder().encode(entry), forKey: Self.storageKey(origin))
+                UserDefaults.standard.set(try JSONEncoder().encode(entry), forKey: storageKey(origin))
                 call.resolve(["subscription": subscription(endpoint, keys)])
             } catch { call.reject("Could not set up push", "failed") }
         }
@@ -155,7 +123,7 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
 
     @objc func getSubscription(_ call: CAPPluginCall) {
         do {
-            guard let origin = PCStore.current, let saved = savedEndpoint(origin) else {
+            guard let origin = shownPc, let saved = savedEndpoint(origin) else {
                 call.resolve(["subscription": NSNull()])
                 return
             }
@@ -163,7 +131,7 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
                 call.resolve(["subscription": ["endpoint": saved.endpoint]])
                 return
             }
-            guard let keys = try Self.keyStore().read() else {
+            guard let keys = try keyStore().read() else {
                 call.resolve(["subscription": NSNull()])
                 return
             }
@@ -174,29 +142,18 @@ public class OvisPushPlugin: CAPPlugin, CAPBridgedPlugin, NotificationHandlerPro
     }
 
     @objc func unsubscribe(_ call: CAPPluginCall) {
-        if let origin = PCStore.current { UserDefaults.standard.removeObject(forKey: Self.storageKey(origin)) }
+        if let origin = shownPc { UserDefaults.standard.removeObject(forKey: storageKey(origin)) }
         call.resolve()
     }
 
-    private static func storageKey(_ origin: String) -> String { endpointKeyPrefix + origin }
-
-    private static func storedKey(forEndpoint endpoint: String) -> String? {
-        for (key, value) in UserDefaults.standard.dictionaryRepresentation() {
-            guard key.hasPrefix(endpointKeyPrefix),
-                  let data = value as? Data,
-                  let saved = try? JSONDecoder().decode(Endpoint.self, from: data),
-                  saved.endpoint == endpoint else { continue }
-            return String(key.dropFirst(endpointKeyPrefix.count))
-        }
-        return nil
-    }
+    private func storageKey(_ origin: String) -> String { "ovis.push.endpoint." + origin }
 
     private func savedEndpoint(_ origin: String) -> Endpoint? {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey(origin)) else { return nil }
+        guard let data = UserDefaults.standard.data(forKey: storageKey(origin)) else { return nil }
         return try? JSONDecoder().decode(Endpoint.self, from: data)
     }
 
-    private static func keyStore() throws -> PushKeyStore {
+    private func keyStore() throws -> PushKeyStore {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "OvisPushKeychainGroup") as? String,
               !group.isEmpty else { throw Failure.configuration }
         return PushKeyStore(accessGroup: group)

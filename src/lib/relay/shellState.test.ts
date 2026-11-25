@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Root } from "react-dom/client";
 import { exportPublicKey, generateKeyPair } from "../../../shared/relay-e2ee.ts";
 import { MuxProtocolError } from "../../../shared/relay-mux.ts";
+import { ListMismatchError } from "../../../shared/relay-channel.ts";
 import { deriveServerId } from "../../../shared/relay-server-proof.ts";
 import type { loadRelayShell } from "../relay.ts";
 import type { RelayShellMount } from "./shell.tsx";
@@ -101,6 +102,15 @@ describe("the screen a failure lands on", () => {
     expect(failureOf(new ServerIdentityChangedError("12".repeat(16)), paired)).toBe("identity-changed");
     expect(failureOf(mux("auth_changed"), paired)).toBe("pc-offline");
     expect(forgetsDevice(failureOf(mux("auth_changed"), paired))).toBe(false);
+  });
+
+  it("keeps the saved key when the PC could not check its account, or must be added to it again", () => {
+    for (const [code, failure] of [["account_unreachable", "account-unreachable"], ["account_readd_required", "account-readd"]]) {
+      const refusal = Object.assign(new MuxProtocolError("protocol_error", "PC refused"), { code });
+      expect<string>(failureOf(refusal, paired)).toBe(failure!);
+      expect(forgetsDevice(failureOf(refusal, paired))).toBe(false);
+      expect(pairsAgainWithoutKey(refusal, { code: false, paired: true, codeless: true })).toBe(false);
+    }
   });
 
   it("asks for an update on a protocol the two sides do not share, and calls an unsafe offer damaged", () => {
@@ -232,7 +242,7 @@ describe("the offer fragment", () => {
       WebSocket: function () { order.push("socket"); },
     });
     try {
-      bootRelayShell({ querySelector: () => null } as unknown as HTMLElement, () => ({}) as Root, () => {
+      bootRelayShell({ querySelector: () => null, dataset: {} } as unknown as HTMLElement, () => ({}) as Root, () => {
         order.push("load");
         const shell = { mountRelayShell: async ({ entryUrl }: RelayShellMount) => { mounted.resolve(entryUrl); } };
         return Promise.resolve(shell as Awaited<ReturnType<typeof loadRelayShell>>);
@@ -275,6 +285,26 @@ describe("a link without a code that the PC refused before any digits", () => {
     expect(failureOf(refused, { code: true, paired: false })).toBe("code-expired");
     expect(failureOf(refused, { code: false, paired: true })).toBe("revoked");
     expect(failureOf(refused, { code: false, paired: false, codeless: true, compared: true })).toBe("pair-declined");
+  });
+
+  it("preview-qa #16: once the number was shown, only the PC's refusal reads as declined; a timeout or a lost session is no answer", () => {
+    const compared = { code: false, paired: false, codeless: true, compared: true };
+    expect(failureOf(new MuxProtocolError("auth_failed", "declined"), compared)).toBe("pair-declined");
+    // a join that brought this device's card, which no entry of the account's list let in: the PC says which cause it was
+    for (const [cause, failure] of [["list_not_claimed", "list-not-claimed"], ["list_service_away", "list-not-placed"], ["list_head_lost", "list-not-placed"],
+      ["list_not_in", "list-not-in"], ["list_pc_behind", "list-pc-behind"], ["list_refused", "list-refused"]] as const) {
+      expect(failureOf(new MuxProtocolError("auth_failed", cause), compared)).toBe(failure);
+    }
+    // any other word of the PC's is a decline, as before
+    expect(failureOf(new MuxProtocolError("auth_failed", "list_something_new"), compared)).toBe("pair-declined");
+    // a word that names something every object has is no cause either
+    for (const word of ["constructor", "toString", "__proto__", "hasOwnProperty"]) expect(failureOf(new MuxProtocolError("auth_failed", word), compared)).toBe("pair-declined");
+    // and a PC that follows another list than this device's account's, before any digits
+    expect(failureOf(new ListMismatchError(), { code: false, paired: false, codeless: true })).toBe("list-other");
+    expect(failureOf(new MuxProtocolError("timeout", "no approval in time"), compared)).toBe("pair-unanswered");
+    expect(failureOf(new RelayAdmissionTimeoutError("welcome"), compared)).toBe("pair-unanswered");
+    expect(failureOf(new MuxProtocolError("internal_error", "upstream_lost"), compared)).toBe("pair-unanswered");
+    expect(failureOf(new RelayUnreachableError(null), compared)).toBe("pair-unanswered");
   });
 });
 

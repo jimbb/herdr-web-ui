@@ -1,14 +1,15 @@
 import type { ClientMessage, ClientRole, PendingMessage, ServerFeature, ServerMessage } from "../../shared/protocol.ts";
 import { receiptResumeId } from "./receiptResume.ts";
+import { ACCOUNT_OPENS_ALL_CAPABILITY, type NoticeAnswer, type NoticeSeen } from "../../shared/account-devices-api.ts";
 import { OUTPUT_STALLED_CLOSE_CODE } from "../../shared/terminal-flow.ts";
 import { promptSet } from "../../shared/secret-prompt.ts";
 import { ConnectionTrace } from "./connectionTrace.ts";
-import { abandonNativeReads, getTransport, type WebSocketLike } from "./transport.ts";
+import { abandonNativeReads, getTransport, type Transport, type WebSocketLike } from "./transport.ts";
 
 type Handler = (message: ServerMessage) => void;
 
 export type SubmitDelivery = "immediate" | "queue" | "hold";
-export type SubmitResult = { ok: true; pending?: PendingMessage; unconfirmed?: true; typedNow?: true; sendingAt?: string } | { ok: false; code: string; message: string; draft?: string; box?: string };
+export type SubmitResult = { ok: true; pending?: PendingMessage; unconfirmed?: true; replayed?: true; typedNow?: true; sendingAt?: string } | { ok: false; code: string; message: string; draft?: string; box?: string };
 
 const FEATURES_WAIT_MS = 2000;
 /**
@@ -143,6 +144,8 @@ export class HerdrSocket {
   private readonly disconnectHandlers = new Set<() => void>();
   private readonly beforeReplayHandlers = new Set<() => void>();
   private featuresKnown = false;
+  /** what the last feature list said of the account release, kept across reconnects (accountReleaseWithdrawn) */
+  private accountOpensAllSaid: boolean | null = null;
   /** `terminal-history` from this connection's latest features frame (trusted or not) or snapshot: it says how to draw, not what to send */
   private terminalHistory = false;
   private machineEventsOffered: boolean | null = null;
@@ -187,6 +190,7 @@ export class HerdrSocket {
   private reconnectTimer: number | null = null;
   private connectTimer: number | null = null;
   private connectTimeouts = 0;
+  private routeWatch: { readonly transport: Transport; readonly stop: () => void } | null = null;
   private endedEarly = new WeakSet<WebSocketLike>();
   private disposed = false;
   private wakeListening = false;
@@ -346,7 +350,11 @@ export class HerdrSocket {
     // a backoff retry still waiting would only open a second attempt later, past whatever ends this one
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
-    const socket = getTransport().openSocket(this.url);
+    const transport = getTransport();
+    this.watchRoute(transport);
+    const target = new URL(this.url);
+    target.searchParams.set("receipt_resume_id", receiptResumeId());
+    const socket = transport.openSocket(target.href);
     const epoch = ++this.connectionEpoch;
     const started = Date.now();
     this.socket = socket;
@@ -401,6 +409,8 @@ export class HerdrSocket {
       }
     });
 
+    let earlyNoticeOffer = false;
+    const pendingNotices: Extract<ServerMessage, { type: "device-notice-replay" | "device-notice" }>[] = [];
     socket.addEventListener("message", (event) => {
       if (this.socket !== socket) return;
       this.trace.flush();
@@ -442,6 +452,7 @@ export class HerdrSocket {
         const first = !this.featuresKnown;
         this.features = new Set(message.features ?? []);
         this.featuresKnown = true;
+        this.accountOpensAllSaid = this.features.has(ACCOUNT_OPENS_ALL_CAPABILITY);
         // typing lost on another herdr, or on one never proven, is not this herdr's pane's, whatever its ID
         this.lifetime = message.type === "snapshot" ? message.snapshot.herdr_lifetime : message.herdr_lifetime;
         for (const [paneId, lost] of this.lostInput) if (lost.lifetime !== this.lifetime) this.lostInput.delete(paneId);
@@ -496,7 +507,7 @@ export class HerdrSocket {
       if ((message.type === "input-ready" && message.ready === false) || message.type === "pty-exit" || (message.type === "error" && message.pane_id && ["attach_held", "input_not_ready"].includes(message.code))) this.inputReady.delete(message.pane_id!);
       if (readyPane !== null && (message.type === "input-ready" || wasReady !== this.inputReady.has(readyPane))) this.changeLease(readyPane);
       if (message.type === "submit-result" && this.matchesRequest(message.id, "submit", message.pane_id)) {
-        this.resolveRequest(message.id, message.ok ? { ok: true, ...(message.pending ? { pending: message.pending } : {}), ...(message.typed_now === true ? { typedNow: true as const } : {}), ...(typeof message.sending_at === "string" ? { sendingAt: message.sending_at } : {}) }
+        this.resolveRequest(message.id, message.ok ? { ok: true, ...(message.pending ? { pending: message.pending } : {}), ...(message.replayed === true ? { replayed: true as const } : {}), ...(message.typed_now === true ? { typedNow: true as const } : {}), ...(typeof message.sending_at === "string" ? { sendingAt: message.sending_at } : {}) }
           : { ok: false, code: message.code ?? "submit_failed", message: message.message ?? "the pane did not take the message", ...(message.draft ? { draft: message.draft } : {}),
             ...(!message.draft && typeof message.box === "string" ? { box: message.box } : {}) });
       }
@@ -528,7 +539,20 @@ export class HerdrSocket {
         this.resolveRequest(message.id, message.ok ? { ok: true } : { ok: false, code: message.code ?? "insert_failed", message: message.message ?? "the pane did not take the text" });
       }
       // A terminal/parser failure is not malformed JSON and must not disappear.
+      if (message.type === "features" && !this.featuresKnown) {
+        earlyNoticeOffer = message.features?.includes(ACCOUNT_OPENS_ALL_CAPABILITY) === true;
+        if (!earlyNoticeOffer) pendingNotices.length = 0;
+      }
+      if ((message.type === "device-notice" || message.type === "device-notice-replay") && !this.accountOpensAll()) {
+        // A first-connect offer can precede its trusted snapshot; retain frames only after that offer.
+        if (earlyNoticeOffer && !this.featuresKnown) pendingNotices.push(message);
+        return;
+      }
       this.emit(message);
+      if (this.featuresKnown && pendingNotices.length > 0) {
+        const confirmed = pendingNotices.splice(0);
+        if (this.accountOpensAll()) for (const notice of confirmed) this.emit(notice);
+      }
       for (const paneId of unwatched) this.emit({ type: "watch-end", pane_id: paneId });
     });
 
@@ -802,6 +826,18 @@ export class HerdrSocket {
     this.connect();
   }
 
+  /** A relay carrier back up reopens this stream at once, rather than when its backoff runs out. */
+  private watchRoute(transport: Transport): void {
+    if (this.routeWatch?.transport === transport) return;
+    this.routeWatch?.stop();
+    this.routeWatch = transport.onRouteChange ? {
+      transport,
+      stop: transport.onRouteChange(() => {
+        if (transport.route !== undefined && !this.left && this.socket?.readyState !== SOCKET_OPEN) this.wake();
+      }),
+    } : null;
+  }
+
   private scheduleReconnect(): void {
     if (this.disposed || this.reconnectTimer !== null) return;
     const delay = backoffDelay(this.retries);
@@ -938,6 +974,26 @@ export class HerdrSocket {
 
   featuresListed(): boolean {
     return this.featuresKnown;
+  }
+
+  /** Device table G5: this PC opens to the account's sign-in (ACCOUNT_OPENS_ALL_CAPABILITY), as its trusted features say; never offline. */
+  accountOpensAll(): boolean {
+    return this.connected && this.features.has(ACCOUNT_OPENS_ALL_CAPABILITY);
+  }
+
+  /**
+   * This PC's last feature list lacked the account release (S32-1): an explicit withdrawal, which holds through a
+   * disconnect and a reconnect that has listed nothing yet, until a list offers it again. False before any list.
+   */
+  accountReleaseWithdrawn(): boolean {
+    return this.accountOpensAllSaid === false;
+  }
+
+  /** Device table T57: says what was seen, or answers one notice; only to a PC that offers it. True when sent. */
+  sendNotice(message: NoticeSeen | NoticeAnswer): boolean {
+    if (!this.accountOpensAll()) return false;
+    this.rawSend(message);
+    return true;
   }
 
   hasTerminalHistory(): boolean {
@@ -1151,7 +1207,7 @@ export class HerdrSocket {
    * `clearDraft`: an immediate send over the draft an input_draft refusal named (ClientMessage `clear_draft`)
    * `sendAnyway`: an immediate send after a refusal that showed the box (ClientMessage `send_anyway`)
    * `holdOnly`: a hold that must never go on its own (the composer's Alt+Enter): refused, not queued, where the bridge cannot hold */
-  submit(paneId: string, text: string, payload: string, typed = false, delivery: SubmitDelivery = "immediate", clearDraft?: string, sendAnyway = false, resendId?: string, generation?: number, agentOnly = false, holdOnly = false): Promise<SubmitResult> | null {
+  submit(paneId: string, text: string, payload: string, typed = false, delivery: SubmitDelivery = "immediate", clearDraft?: string, sendAnyway = false, resendId?: string, generation?: number, agentOnly = false, holdOnly = false, commandKey?: string): Promise<SubmitResult> | null {
     const socket = this.socket;
     if (!this.connected || socket === null || this.mode === "observe") return null;
     if (resendId !== undefined && sendAnyway) return Promise.resolve({ ok: false, code: "invalid_delivery", message: "Use a held-copy resend id only for an immediate chat message" });
@@ -1177,6 +1233,7 @@ export class HerdrSocket {
       }
       const id = this.nextSubmit++;
       return this.submitRequest({ type: "submit", id, pane_id: paneId, text, payload, ...(typed ? { typed: true } : {}), ...(delivery !== "immediate" ? { delivery } : {}),
+        ...(commandKey !== undefined ? { command_key: commandKey } : {}),
         ...(clearDraft !== undefined ? { clear_draft: clearDraft } : {}), ...(sendAnyway ? { send_anyway: true as const } : {}), ...(resendId !== undefined ? { resend_id: resendId, resend_generation: generation ?? 0 } : {}), ...(agentOnly ? { agent_only: true as const } : {}) });
     })();
   }
@@ -1365,6 +1422,8 @@ export class HerdrSocket {
     this.trace.close();
     this.disposed = true;
     linkWatchers.delete(this);
+    this.routeWatch?.stop();
+    this.routeWatch = null;
     if (this.reconnectTimer !== null) window.clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.clearConnectTimer();

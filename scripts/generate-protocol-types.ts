@@ -6,7 +6,7 @@
  *                                                           (OVIS_HERDR_BIN picks the herdr binary)
  *   bun run scripts/generate-protocol-types.ts --refresh-hc  # re-read herdr-core's from `hc schema`
  *                                                           (OVIS_HC_BIN picks the hc binary; use the
- *                                                           version ci.yml's herdr-core-live job pins)
+ *                                                           newest version in the HC_RELEASES list of ci.yml's herdr-core-live job)
  *
  * - String enums become unions widened with `(string & {})`. herdr gives no
  *   stability guarantee, so a value from a future version must still flow through
@@ -20,7 +20,8 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { generateHcTypes } from "./hc-types.ts";
+import { generateHarnessTypes, generateHcTypes } from "./hc-types.ts";
+import harnessSchema from "../shared/harness-contract.schema.json";
 
 const ROOT = join(import.meta.dir, "..");
 const SCHEMA_PATH = join(ROOT, "scripts", "herdr-schema.json");
@@ -246,6 +247,7 @@ async function loadHcSchema(refresh: boolean): Promise<Json> {
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const targets = [
+  { output: join(ROOT, "shared/harness-contract.generated.ts"), schema: join(ROOT, "shared/harness-contract.schema.json"), text: generateHarnessTypes(harnessSchema) },
   { output: OUTPUT_PATH, schema: SCHEMA_PATH, text: generate(await loadSchema(args.includes("--refresh"))) },
   { output: HC_OUTPUT_PATH, schema: HC_SCHEMA_PATH, text: generateHcTypes(await loadHcSchema(args.includes("--refresh-hc"))) },
 ];

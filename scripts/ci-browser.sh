@@ -83,6 +83,7 @@ run_script scripts/terminal-images-demo-regression.ts
 run_script scripts/terminal-ghostty-demo-regression.ts
 run_script scripts/mirror-fold-demo-regression.ts
 run_script scripts/chat-no-rewind-demo-regression.ts
+run_script scripts/tab-switch-keeps-scroll-demo-regression.ts
 run_script scripts/terminal-cjk-punctuation-regression.ts
 run_script scripts/terminal-selection-cell-bg-regression.ts
 run_script scripts/terminal-late-faces-regression.ts
@@ -92,6 +93,7 @@ run_script scripts/terminal-bundled-mono-regression.ts
 run_script scripts/terminal-served-font-regression.ts
 run_script scripts/application-paging-regression.ts
 run_script scripts/pane-paging-demo-regression.ts
+run_script scripts/chat-reading-position-demo-regression.ts
 run_script scripts/link-menu-demo-regression.ts
 run_script scripts/external-link-tab-regression.ts
 run_script scripts/key-bar-customization-demo-regression.ts
@@ -115,14 +117,15 @@ run_script scripts/theme-file-demo-regression.ts
 run_script scripts/boot-loading-demo-regression.ts
 run_script scripts/old-safari-demo-regression.ts
 run_script scripts/security-summary-demo-regression.ts
-run_script scripts/security-summary-captures-light-demo-regression.ts
-run_script scripts/security-summary-captures-dark-demo-regression.ts
 run_script scripts/push-health-demo-regression.ts
 run_script scripts/alert-webhook-demo-regression.ts
 run_script scripts/relay-direct-demo-regression.ts
 run_script scripts/relay-join-browser-qa.ts
 run_script scripts/relay-qa-teardown-regression.ts
 run_script scripts/relay-device-indexeddb-regression.ts
+run_script scripts/account-list-seal-browser-qa.ts
+run_script scripts/account-list-device-browser-qa.ts
+run_script scripts/account-list-gossip-browser-qa.ts
 run_script scripts/install-hint-demo-regression.ts
 run_script scripts/device-security-demo-regression.ts
 run_script scripts/cliproxy-settings-regression.ts
@@ -168,6 +171,7 @@ run_script scripts/file-viewer-page-scripts-browser-qa.ts
 run_script scripts/text-file-edit-regression.ts
 run_script scripts/web-panel-mobile-regression.ts
 run_script scripts/palette-local-page-demo-regression.ts
+run_script scripts/built-in-browser-demo-regression.ts
 run_script scripts/pwa-update-browser-qa.ts
 run_script scripts/install-state-demo-regression.ts
 run_script scripts/revision-bound-update-demo-regression.ts
@@ -199,7 +203,6 @@ run_script scripts/chat-request-details-demo-regression.ts
 run_script scripts/chat-svg-figures-demo-regression.ts
 run_script scripts/chat-math-demo-regression.ts
 run_script scripts/terminal-paste-insert-demo-regression.ts
-run_script scripts/terminal-paste-insert-variants-demo-regression.ts
 run_script scripts/composer-fit-demo-regression.ts
 run_script scripts/composer-send-demo-regression.ts
 run_script scripts/composer-draft-demo-regression.ts
@@ -239,7 +242,6 @@ run_script scripts/agent-lock-demo-regression.ts
 run_script scripts/agent-groups-demo-regression.ts
 run_script scripts/agent-state-groups-demo-regression.ts
 run_script scripts/pane-mute-demo-regression.ts
-run_script scripts/pane-mute-captures-demo-regression.ts
 run_script scripts/workspace-touch-reorder-demo-regression.ts
 run_script scripts/prompt-dock-demo-regression.ts
 run_script scripts/prompt-card-timing-demo-regression.ts
@@ -268,14 +270,14 @@ run_script scripts/relay-pairing-prompt-regression.ts
 run_script scripts/relay-account-pcs-regression.ts
 run_script scripts/relay-first-link-regression.ts
 run_script scripts/relay-second-device-join-regression.ts
+run_script scripts/relay-new-pc-press-regression.ts
 run_script scripts/machine-own-ovis-regression.ts
 run_script scripts/herdr-profiles-browser-qa.ts
 run_script scripts/relay-e2e-regression.ts
 run_script scripts/offline-typing-relay-regression.ts
+run_script scripts/add-pc-more-relay-regression.ts
+run_script scripts/my-pcs-ways-regression.ts
 run_script scripts/relay-shell-browser-qa.ts
-run_script scripts/relay-dashboard-browser-qa.ts
-run_script scripts/sheet-history-late-step-regression.ts
-run_script scripts/my-machines-today-regression.ts
-run_script scripts/my-machines-screens-qa.ts
+run_script scripts/relay-client-skew-regression.ts
 run_script scripts/relay-offline-reasons-regression.ts
 run_script scripts/relay-media-browser-qa.ts

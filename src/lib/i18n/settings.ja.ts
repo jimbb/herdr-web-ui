@@ -1,10 +1,11 @@
 /**
  * Japanese for the keys only the settings files use:
  * components/SettingsDialog.tsx (with THEME_NAMES), components/SignOutRow.tsx, components/KeyBarSettings.tsx,
- * components/SettingsControls.tsx, components/TelemetryControls.tsx, lib/paletteSettings.ts.
+ * components/SettingsControls.tsx, components/TelemetryControls.tsx, components/LinkBrowserRow.tsx, components/TerminalCommandRow.tsx, lib/paletteSettings.ts.
  * Register and fixed terms follow ../i18n.ja.ts; a key another feature also uses goes there.
  */
 export const SETTINGS_JA: Record<string, string> = {
+  "Forget": "削除",
   "Finished": "完了",
   "Direct typing": "直接入力",
   "Microphone permission was denied": "マイクの使用が許可されませんでした",
@@ -133,7 +134,6 @@ export const SETTINGS_JA: Record<string, string> = {
   "Auto ({language})": "自動（{language}）",
   "No OpenAI key: the browser's speech recognition is used": "OpenAI キーがないため、ブラウザーの音声認識を使用します",
   "Speech recognition": "音声認識",
-  "Browser": "ブラウザー",
   "API key": "API キー",
   "Save an API key to use the mic": "マイクを使うには API キーを保存してください",
   "No OpenAI key saved": "OpenAI キーが保存されていません",
@@ -170,7 +170,7 @@ export const SETTINGS_JA: Record<string, string> = {
   "Anonymous usage counts": "匿名の利用集計",
   "Turned off on this PC by OVIS_TELEMETRY=0, DO_NOT_TRACK or a CI environment.": "この PC では OVIS_TELEMETRY=0、DO_NOT_TRACK または CI 環境によりオフになっています。",
   "Send anonymous usage counts": "匿名の利用集計を送る",
-  "Once on install and once per update, with the last browser's app settings, and once a day you open the app, with the kinds of coding agents running in herdr (such as claude or codex), the kinds of screen the app was opened on, how they reached this PC (this PC itself, the local network, Tailscale, Funnel, a device paired through the Ovis relay (through the relay or directly), Portal or another proxy), and how many prompt answers were sent and alerts delivered and tapped. After each day, how often the app's buttons were used that day (chat sends, the composer's buttons, the agent inbox, and switches between chat and terminal by kind of agent and how) and, for a few actions, whether a button, a menu, a shortcut or the command palette was used, each count only as a rough range, with the list of which of these controls were shown, on narrow and wide screens apart, never what was typed, which pane or what time of day. Custom fonts, shortcuts and replies are reported only as customization flags or counts, never their text. Account identifiers, terminal content and files are excluded. The receiver stores the country, not the IP address.": "インストール時に 1 回、更新ごとに 1 回、最後に使用したブラウザーのアプリ設定とともに送信し、アプリを開いた日に 1 回、herdr で動いているコーディングエージェントの種類（claude や codex など）、アプリを開いた画面の種類、その画面がこの PC に届いた経路（この PC 自身、ローカルネットワーク、Tailscale、Funnel、Ovis リレーでペアリングしたデバイス（リレー経由または直接接続）、Portal、その他のプロキシ）、送信したプロンプトへの回答数、届いた通知とタップされた通知の数とともに送信します。1 日が終わると、その日にアプリのボタンをどれだけ使ったか（チャットの送信、入力欄のボタン、エージェント受信箱、エージェントの種類と操作方法ごとのチャットとターミナルの切り替え）と、いくつかの操作をボタン・メニュー・ショートカット・コマンドパレットのどれで行ったかを回数ごとにおおよその範囲だけで送り、これらのコントロールのどれが表示されたかを名前の一覧で送ります。狭い画面と広い画面に分けて送り、入力した内容、どのペインか、何時かは送りません。カスタムフォント、ショートカット、返信は、テキストではなくカスタマイズの有無や数としてのみ報告します。アカウント識別子、ターミナルの内容、ファイルは含みません。受信側は IP アドレスではなく国のみを保存します。",
+  "Once on install and once per update, with the last browser's app settings, and once a day you open the app, with the kinds of coding agents running in herdr (such as claude or codex), the kinds of screen the app was opened on, how they reached this PC (this PC itself, the local network, Tailscale, Funnel, a device paired through the Ovis relay (through the relay or directly), Portal or another proxy), how many prompt answers were sent and alerts delivered and tapped, how many panes of each kind of agent Ovis started and how many were started otherwise, the agents' versions (such as 2.1), and how answers to agents went (through the agent's own channel, as keys, or at the terminal), in ranges. After each day, how often the app's buttons were used that day (chat sends, the composer's buttons, the agent inbox, and switches between chat and terminal by kind of agent and how) and, for a few actions, whether a button, a menu, a shortcut or the command palette was used, each count only as a rough range, with the list of which of these controls were shown, on narrow and wide screens apart, never what was typed, which pane or what time of day. Custom fonts, shortcuts and replies are reported only as customization flags or counts, never their text. Account identifiers, terminal content and files are excluded. The receiver stores the country, not the IP address.": "インストール時に 1 回、更新ごとに 1 回、最後に使用したブラウザーのアプリ設定とともに送信し、アプリを開いた日に 1 回、herdr で動いているコーディングエージェントの種類（claude や codex など）、アプリを開いた画面の種類、その画面がこの PC に届いた経路（この PC 自身、ローカルネットワーク、Tailscale、Funnel、Ovis リレーでペアリングしたデバイス（リレー経由または直接接続）、Portal、その他のプロキシ）、送信したプロンプトへの回答数、届いた通知とタップされた通知の数、エージェントの種類ごとに Ovis が起動したペインとそれ以外のペインの数、エージェントのバージョン（2.1 など）、エージェントへの回答の経路（エージェント自身のチャネル、キー入力、ターミナル）のおおよその範囲とともに送信します。1 日が終わると、その日にアプリのボタンをどれだけ使ったか（チャットの送信、入力欄のボタン、エージェント受信箱、エージェントの種類と操作方法ごとのチャットとターミナルの切り替え）と、いくつかの操作をボタン・メニュー・ショートカット・コマンドパレットのどれで行ったかを回数ごとにおおよその範囲だけで送り、これらのコントロールのどれが表示されたかを名前の一覧で送ります。狭い画面と広い画面に分けて送り、入力した内容、どのペインか、何時かは送りません。カスタムフォント、ショートカット、返信は、テキストではなくカスタマイズの有無や数としてのみ報告します。アカウント識別子、ターミナルの内容、ファイルは含みません。受信側は IP アドレスではなく国のみを保存します。",
   "Once a day you open the app:": "アプリを開いた日に 1 回:",
   "After a day has ended:": "1 日が終わった後:",
   "The receiver adds the country this message comes from (two letters, such as KR). It does not store the address.": "受信側が、このメッセージの送信元の国（KR のような 2 文字）を付け加えます。アドレスは保存しません。",
@@ -182,6 +182,10 @@ export const SETTINGS_JA: Record<string, string> = {
   "Beside the pane": "ペインの横",
   "In a new tab": "新しいタブ",
   "Reuse tab for external links": "外部リンク用のタブを再利用",
+  "Browser for links": "リンクを開くブラウザ",
+  "The browser a web link you click in Ovis opens in, on this computer. Sign-in pages always open in the system's default browser.": "このコンピュータで Ovis の Web リンクを押したときに開くブラウザです。サインインのページは常にシステムの既定のブラウザで開きます。",
+  "System default": "システムの既定",
+  "System default ({name})": "システムの既定 ({name})",
   "theme themes palette dark light mode colors density language sidebar logos": "テーマ パレット palette ダーク ライト モード 色 密度 言語 サイドバー ロゴ",
   "chat message width composer enter send thinking code": "チャット メッセージ 幅 入力欄 エンター 送信 思考 コード",
   "terminal key bar keyboard clipboard": "ターミナル キーバー キーボード クリップボード",
@@ -240,7 +244,6 @@ export const SETTINGS_JA: Record<string, string> = {
   "agents hooks claude codex install": "エージェント フック claude codex インストール",
   "onboarding first run getting started welcome": "オンボーディング 初回 はじめに ようこそ",
   "Agent integrations": "エージェント連携",
-  "This page shows one PC. The front page lists every PC this phone is paired with.": "このページは1台のPCを表示します。トップページにこのスマホとペアリング済みのすべてのPCが並びます。",
   "Deletes this phone's key for this PC. Pairing again takes a new QR code from the PC.": "このPC用のこのスマホのキーを削除します。再度ペアリングするにはPCの新しいQRコードが必要です。",
 
   "Through Portal": "Portal経由",
@@ -288,4 +291,27 @@ export const SETTINGS_JA: Record<string, string> = {
 
   "Could not read this PC's alert destination ({error}). Close Settings and open it again.": "この PC の外部通知の設定を読み取れませんでした（{error}）。設定を閉じてもう一度開いてください。",
   "queue tasks schedule batch": "キュー タスク スケジュール バッチ 順番",
+  "Built-in browser": "内蔵ブラウザー",
+  "Blocked sites": "ブロックするサイト",
+  "Opens web pages in tabs inside this app: they are listed under Browser in the sidebar and open beside the pane. Its tabs are signed in to nothing you use elsewhere, and an agent's tabs keep cookies of their own.": "ウェブページをこのアプリ内のタブで開きます。タブはサイドバーの「ブラウザー」に並び、ペインの横に開きます。これらのタブは他でのログインを使わず、エージェントのタブは別の Cookie を使います。",
+  "The built-in browser never loads these sites or their subdomains, in your tabs or an agent's. One site per line.": "内蔵ブラウザーは、自分のタブでもエージェントのタブでも、これらのサイトとそのサブドメインを読み込みません。1 行に 1 サイトずつ入力します。",
+  "Density": "表示密度",
+  "Comfortable": "ゆったり",
+  "Compact": "コンパクト",
+  "Language": "言語",
+  "Interface font size": "インターフェースの文字サイズ",
+  "Decrease interface font size": "インターフェースの文字サイズを小さく",
+  "Increase interface font size": "インターフェースの文字サイズを大きく",
+  "Forget this PC?": "このPCを削除しますか？",
+  "This phone's key for it is deleted here, and the PC keeps listing this phone until it is revoked there. Pairing again takes a new QR code from the PC.": "このスマホ側のキーを削除します。PC側ではそこで取り消すまでこのスマホが一覧に残ります。再度ペアリングするにはPCの新しいQRコードが必要です。",
+  "Terminal command": "ターミナルコマンド",
+  "Use ovis in a terminal": "ターミナルで ovis を使う",
+  "Adds the ovis command for this app: in a new terminal window, ovis login, ovis status and ovis approve work on this app's Ovis.": "このアプリの ovis コマンドを追加します。新しいターミナルウィンドウで ovis login、ovis status、ovis approve がこのアプリの Ovis に対して動きます。",
+  "Add the command": "コマンドを追加",
+  "Adding the command…": "コマンドを追加中…",
+  "Couldn't add the ovis command.": "ovis コマンドを追加できませんでした。",
+  "{path} is the ovis command of another Ovis install: it stays as it is, and this app adds none.": "{path} は別の Ovis インストールの ovis コマンドです。そのまま残し、このアプリは追加しません。",
+  "{path} comes first on your terminal's PATH, so ovis runs that one.": "ターミナルの PATH で {path} が先にあるため、ovis はそちらを実行します。",
+  "{dir} is not on your terminal's PATH: add it there to run ovis.": "{dir} はターミナルの PATH にありません。ovis を実行するには PATH に追加してください。",
+  "Added ~/.local/bin to your PATH in {path}: open a new terminal window to run ovis.": "{path} で ~/.local/bin を PATH に追加しました。新しいターミナルウィンドウを開いて ovis を実行してください。",
 };

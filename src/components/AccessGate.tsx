@@ -3,11 +3,12 @@ import "./AccessGate.css";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { ApiError, authenticate, pairDevice } from "../lib/api.ts";
-import { deviceLabel } from "../lib/phone.ts";
+import { thisDeviceLabel } from "../lib/phone.ts";
 import type { AccessRefusal } from "../../shared/protocol.ts";
 import { useT } from "../lib/i18n.ts";
 import { changePc, inNativeApp } from "../lib/nativeApp.ts";
 import { userErrorMessage, type UserError } from "../lib/userError.ts";
+import { StrictUnlockAsk } from "./StrictModePanel.tsx";
 
 
 export interface AccessGateProps {
@@ -22,6 +23,8 @@ export interface AccessGateProps {
   onPaired?: () => void;
   /** Fires once the server set a cookie: the shell can mount, and every later fetch and the WebSocket carry it. */
   onUnlocked: () => void;
+  /** the server says this request is this PC's own window (/api/health auth.own_window) */
+  ownWindow?: boolean;
 }
 
 /**
@@ -31,7 +34,25 @@ export interface AccessGateProps {
  * token stays as the other way. Nothing is stored here: the server answers with an
  * HttpOnly cookie either way.
  */
-export function AccessGate({ reason, initialCode, consumePairCode, pairingUnconfirmed, onPaired, onUnlocked }: AccessGateProps) {
+export function AccessGate(props: AccessGateProps) {
+  // a locked PC pairs nobody: its own window may only ask to turn strict mode off; any other window sees one line.
+  // Chosen before the pairing form mounts, so a pairing QR's code is never claimed or sent (T47, N4)
+  return props.reason === "locked" ? <LockedGate ownWindow={props.ownWindow === true} /> : <PairingGate {...props} />;
+}
+
+function LockedGate({ ownWindow }: { ownWindow: boolean }) {
+  const t = useT();
+  return (
+    <main className="access-gate-screen">
+      <div className="access-gate" data-testid="strict-gate">
+        <img src="/icons/icon-192.png?v=sheep1" alt="" width="44" height="44" className="access-gate-mark" />
+        {ownWindow ? <StrictUnlockAsk /> : <p className="access-gate-copy">{t("This PC is in strict mode.")}</p>}
+      </div>
+    </main>
+  );
+}
+
+function PairingGate({ reason, initialCode, consumePairCode, pairingUnconfirmed, onPaired, onUnlocked }: AccessGateProps) {
   const t = useT();
   const codeRef = useRef<HTMLInputElement | null>(null);
   const tokenRef = useRef<HTMLInputElement | null>(null);
@@ -47,7 +68,7 @@ export function AccessGate({ reason, initialCode, consumePairCode, pairingUnconf
     setSubmitting("code");
     setError(null);
     try {
-      await pairDevice(value, deviceLabel(navigator.userAgent, navigator.maxTouchPoints ?? 0));
+      await pairDevice(value, thisDeviceLabel());
       onPaired?.();
       onUnlocked();
     } catch (err) {
@@ -97,6 +118,9 @@ export function AccessGate({ reason, initialCode, consumePairCode, pairingUnconf
         <h1 id="access-gate-title" className="access-gate-title">
           {t(reason === "token_required" ? "Unlock" : "Pair this device")}
         </h1>
+        {reason === "tailnet_blocked" && (
+          <p className="access-gate-refused" role="status">{t("This device was removed on the PC, so your Tailscale login no longer lets it in. Allow it on the PC's own screen, or pair it with a code.")}</p>
+        )}
         {reason === "other_user" && (
           <p className="access-gate-refused" role="status">{t("Tailscale says this device belongs to someone other than this PC's owner. The owner can still let it in with a pairing code.")}</p>
         )}

@@ -50,24 +50,37 @@ Play holds the app signing key.
 
 `app/android/app/build.gradle` signs a release with the upload key when
 `OVIS_UPLOAD_PROPERTIES` names that file. A missing file or a missing entry fails a release
-build with what is wrong, never a debug build. Build from `main` (after #1697 is merged, so the
-test build has backups off and the error page reasons):
+build with what is wrong, never a debug build.
+
+The app carries the hosted shell of a release ([The bundled shell](../../docs/native-app.md#the-bundled-shell-android)),
+and Gradle builds the store app only from one: the tag's `dist-shell.tar.gz`, checked against the SHA-256 the
+release published with it, never a shell built on this machine, which would carry this machine's environment
+(`OVIS_ACCOUNT_SERVICE_URL` and the like) into the app. Build from the same tag:
 
 ```bash
-git switch main && git pull
+tag=v0.5.10   # the release whose shell the app carries
+git switch --detach "$tag"
 bun install && (cd app && bun install)
-cd app && bun run build:web && bunx cap sync android
+dir="$(mktemp -d)"
+gh release download "$tag" --pattern 'dist-shell.tar.gz*' --dir "$dir"
+cd app && OVIS_APP_SHELL_ARCHIVE="$dir/dist-shell.tar.gz" OVIS_APP_SHELL_SHA256="$(cut -d ' ' -f 1 "$dir/dist-shell.tar.gz.sha256")" \
+  OVIS_APP_SHELL_TAG="$tag" bun run build:web && bunx cap sync android
 cd android && OVIS_GOOGLE_SERVICES=~/.config/ovis-push/google-services.json \
   OVIS_UPLOAD_PROPERTIES=~/.config/ovis-android/upload.properties ./gradlew bundleRelease   # without OVIS_GOOGLE_SERVICES the bundle has no push
 # app/android/app/build/outputs/bundle/release/app-release.aab
 keytool -printcert -jarfile app/build/outputs/bundle/release/app-release.aab   # shows your upload key
 ```
 
+`bundleRelease` refuses a shell that is not a release's (`app/bundled-shell/shell-provenance.json`), one whose
+`index.html` misses a file it starts with, and a build that loads the shell from the network
+(`OVIS_APP_SHELL=hosted`, the default with `OVIS_APP_URL`). The release that ships also adds its line to
+`server/relay/store-app-versions.json` (#4557), which the PCs' app floor reads.
+
 | Field | Now | Rule |
 |---|---|---|
 | `applicationId` | `sh.ovis.app` | never changes once uploaded |
-| `versionCode` | `13` | raise it by one for every upload, test tracks included (`defaultConfig` in `app/android/app/build.gradle`); the last upload is 1.0.5 (13), built from main at `d30527fd` and published to internal testing on 2026-11-20: the scanned QR code lands on its PC (#4231), the app opens on the account sign-in (#4256), and, over 1.0.5 (12) from `0c4f0673` just before it, the app's list opens the hosted app on its PCs (#4266); 1.0.4 (11) went to production review on 2026-11-19 |
-| `versionName` | `1.0.5` | what people see; raise it for each public release |
+| `versionCode` | `14` | raise it by one for every upload, test tracks included (`defaultConfig` in `app/android/app/build.gradle`); the last upload is 1.0.6 (14), built from main at `ab037b30` with PCs added over SSH (#3862), published to internal testing and sent to Google Play's production review on 2026-11-21; 1.0.5 (13), built from main at `d30527fd` (the scanned QR code lands on its PC, #4231; the app opens on the account sign-in, #4256; the app's list opens the hosted app on its PCs, #4266), is the version live on Google Play |
+| `versionName` | `1.0.6` | what people see; raise it for each public release |
 | `targetSdkVersion` | 36 | Play asks new apps for a recent target |
 
 ## 3. Store listing
@@ -89,8 +102,8 @@ presence > Main store listing > Manage translations.
 >
 > How it works:
 > - Install Ovis on your PC (ovis.sh) and open it there.
-> - In the app, scan the pairing QR code from Settings > Phone & devices on the PC, or type its
->   address.
+> - In the app, scan the pairing QR code from Settings > Devices and PCs > Add a connection on the
+>   PC, or type its address.
 > - The app connects only to your own PC: over Tailscale or your own network, or, once you turn it
 >   on on the PC, through the Ovis relay, end-to-end encrypted.
 >
@@ -107,7 +120,8 @@ presence > Main store listing > Manage translations.
 | Phone screenshots | `screenshots/phone-*.png` | 2 to 8, 1080 x 1920 here (9:16) |
 
 The screenshots are the app's own connect screen and its bundled demo, taken in an Android 16
-emulator; no real PC or session is in them.
+emulator; no real PC or session is in them. The connect screens in them predate the hosted Connect a PC
+screen and its look: take them again from a current build before the next upload.
 
 **Store settings:** category Tools; contact email: yours (Play shows it publicly); website
 `https://ovis.sh`; privacy policy `https://ovis.sh/privacy/`.
@@ -117,7 +131,7 @@ emulator; no real PC or session is in them.
 | Section | Answer |
 |---|---|
 | Privacy policy | `https://ovis.sh/privacy/` |
-| App access | "All or some functionality is restricted". Instructions: *Signing in is optional; no account is needed to review. The app opens a computer that runs the Ovis server (open source, ovis.sh). Without one, tap "Start without signing in", then "Enter an address", type demo and tap Open: it shows the whole app with made-up agents and terminals, on the phone only.* No login details. |
+| App access | "All or some functionality is restricted". Instructions (500 characters at most), to send with the next upload (1.0.6 sent a "Direct" tab that is gone): *On the first screen, Connect a PC, tap the SSH tab, then Add by address, type demo and tap Connect (offline: type demo in the address field). The offline demo runs the full app with sample agents and terminals: chat, approvals, terminal, workspaces, Settings. No login, payment, network, QR code or PC is needed. Signing in is optional. Live use pairs with the user's own computer running Ovis (QR code, address, the encrypted relay, or SSH; private keys stay on the phone). No paid content.* No login details. |
 | Ads | No, the app has no ads |
 | Content rating | Category "All other app types" (utility). Every question No: no violence, sexual content, profanity, drugs, gambling; no user-to-user chat or sharing between users; no location sharing; no digital purchases. Expected rating: Everyone / PEGI 3 |
 | Target audience | 18 and over only (a developer tool; the privacy policy says it is not for children) |
@@ -274,4 +288,36 @@ service's records, the only data that reaches the developer):
 - **Saving pictures**, from 1.0 (5): Download in Chat's picture viewer saves the picture to the
   phone's Downloads (MediaStore on Android 10 and later), with no storage permission, so the Data
   safety answers stay as they are.
+- **PCs over SSH**, from 1.0.6 (docs/native-app.md, PCs over SSH): the
+  phone signs in to the user's own SSH server and opens that PC's Ovis through a tunnel on the
+  phone's loopback. What Play's review needs to hear:
+  - **No new permission.** INTERNET and ACCESS_NETWORK_STATE were already there; no
+    FOREGROUND_SERVICE (the connection is made again when the app comes back, so nothing runs in
+    the background and no foreground-service type is declared), no VpnService, no
+    QUERY_ALL_PACKAGES. The loopback listener is an ordinary socket inside the app's own process,
+    reachable on the phone only, and answers nothing without the app's own cookie.
+  - **Keys.** The phone's own SSH key (ed25519) is made on the phone; its private half is sealed
+    with an AES-GCM key held in the Android Keystore and never leaves the app. A private key the
+    user pastes in, and its passphrase, are sealed the same way. A password is used once to sign
+    in and never stored. Backups stay off (`allowBackup="false"`), so none of it goes to a
+    Google backup either. Nothing of it reaches the developer.
+  - **Data safety**: Google counts what goes to the user's own PC as collected (above), and SSH
+    adds no data type: the content is the same app's, now over SSH (encrypted), and goes only
+    to the PC, with no relay, `app.ovis.sh` or developer service on the way. Two things are new
+    and both fit rows already declared: the public half of the phone's SSH key, which the app
+    adds to the PC's `~/.ssh/authorized_keys` when the user asks (Device or other IDs: name it
+    in that row), and the SSH password, which is not a Play data type and goes only to the PC's
+    sshd. The SSH account name the user types goes to that PC's sshd too: declare it under
+    Personal info > User IDs (collected, not shared, sent only to the user's own PC, required for
+    the SSH way only). Add "the public key of the phone's SSH key, kept by the user's own PC" to
+    the Device or other IDs row when this ships.
+  - **App access**: the instructions (section 4) name SSH among the ways to pair and say the
+    private keys stay on the phone (the public key goes to the PC's `authorized_keys`); the demo
+    shows the same app without a PC (the field holds 500 characters, so there is no room for more).
+    Do not hand Google a login to a real machine.
+  - **Policy**: an SSH client is allowed (Device and Network Abuse covers apps that interfere
+    with other apps or networks, which this does not); the app reaches only the address the user
+    types, on the port the user types.
+  - Store listing: one line in the full description, under how to connect: *Or add a computer you
+    already reach over SSH: no relay, no account, no open port but SSH.*
 - Every new upload: raise `versionCode`, build as in section 2, upload to the track.

@@ -51,24 +51,31 @@ const remoteAccess = {
 const portalFetchPage = async (context: BrowserContext): Promise<void> => {
   await context.route("**/api/access", (route) => route.fulfill({ json: remoteAccess }));
 };
-const openPhoneSettings = async (page: Page): Promise<void> => {
+const openPhoneSettings = async (page: Page, portalOffered = true): Promise<void> => {
   await page.keyboard.press("ControlOrMeta+Shift+Comma");
   await page.locator(".settings-dialog").waitFor({ timeout: 10_000 });
   await openSettingsPage(page, "Devices and PCs");
   await page.locator('.settings-dialog [data-section="devices"]').getByRole("button", { name: "Add a connection", exact: true }).click();
   const connect = settingsOf(page);
   await connect.waitFor({ timeout: 10_000 });
-  const devicesTab = connect.locator('.connect-ways [data-tab="devices"]');
-  if (await devicesTab.count() > 0) await devicesTab.click();
-  await connect.locator('[data-tab-panel="devices"]').waitFor({ timeout: 10_000 });
+  // Portal is one row at the foot of the SSH tab, its controls behind Settings; a window with no tab (a visitor) shows them alone
+  const ssh = connect.locator('.connect-tabs [data-tab="ssh"]');
+  if (await ssh.count() > 0) {
+    await ssh.click();
+    await connect.locator('[data-tab-panel="ssh"]').waitFor({ timeout: 10_000 });
+    if (!portalOffered) return;
+    const row = connect.getByTestId("portal-row");
+    await row.waitFor({ timeout: 10_000 });
+    await row.getByRole("button", { name: "Settings", exact: true }).click();
+  }
 };
 const settingsOf = (page: Page) => page.getByRole("dialog", { name: "Add a connection", exact: true });
-const reopenPhoneSettings = async (page: Page): Promise<void> => {
+const reopenPhoneSettings = async (page: Page, portalOffered = true): Promise<void> => {
   await settingsOf(page).getByRole("button", { name: "Close", exact: true }).click();
   await settingsOf(page).waitFor({ state: "detached", timeout: 10_000 });
   await page.locator(".settings-dialog").getByRole("button", { name: "Close settings", exact: true }).click();
   await page.locator(".settings-dialog").waitFor({ state: "detached", timeout: 10_000 });
-  await openPhoneSettings(page);
+  await openPhoneSettings(page, portalOffered);
 };
 
 const servers: ServerInstance[] = [];
@@ -117,7 +124,7 @@ try {
     hostname: "127.0.0.1",
     stateDir,
     token,
-    tailscaleOwner: null,
+    tailscaleOwner: null, accountOpensAll: true,
     tailscaleServeOnly: false,
     portal,
     usage: new UsageService(undefined, []),
@@ -143,8 +150,13 @@ try {
   await ownerPage.getByLabel("Access token", { exact: true }).fill(token);
   await ownerPage.getByRole("button", { name: "Unlock", exact: true }).click();
   await ownerPage.locator(".conn-live").waitFor({ state: "attached", timeout: 15_000 });
-  const ownerAuth = await ownerPage.evaluate(async () => (await (await fetch("/api/health?scope=bridge")).json()).auth);
-  assert.deepEqual(ownerAuth, { required: false, authenticated: true, via: "token", role: "drive" }, "the UI token login receives the owner role");
+  const ownerAuth = () => ownerPage.evaluate(async () => (await (await fetch("/api/health?scope=bridge")).json()).auth);
+  const tokenOwner = { required: false, authenticated: true, via: "token", role: "drive" };
+  assert.deepEqual(await ownerAuth(), tokenOwner, "an unbound token owner drives without a Step 2 lock hint");
+  server.context.services.devices.bindByService("acct_portal_fixture");
+  assert.deepEqual(await ownerAuth(), { ...tokenOwner, own_window: true }, "binding the same PC enables its own-window hint");
+  assert.equal(server.context.services.devices.clearAccountBinding("unlisted", "account"), true);
+  assert.deepEqual(await ownerAuth(), tokenOwner, "leaving the account restores the unbound portal fixture");
 
   await openPhoneSettings(ownerPage);
   const ownerSettings = settingsOf(ownerPage);
@@ -294,11 +306,11 @@ try {
   answer = "older";
   for (const page of [ownerPage, watchPage]) {
     const asked = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/portal" && response.status() === 404, { timeout: 10_000 });
-    await reopenPhoneSettings(page);
+    await reopenPhoneSettings(page, false);
     await asked;
     const settings = settingsOf(page);
-    await settings.locator('[data-tab-panel="devices"]').locator(":scope > .connect-section, :scope > .settings-description").first().waitFor({ timeout: 10_000 });
-    assert.equal(await settings.locator('section[aria-label="Portal"]').count(), 0, "an older server offers no Portal on Phones and devices");
+    await settings.locator('[data-tab-panel="ssh"], .connect-phone-body > .connect-section, .connect-phone-body > .settings-description').first().waitFor({ timeout: 10_000 });
+    assert.equal(await settings.locator('section[aria-label="Portal"]').count(), 0, "an older server offers no Portal in Add a connection");
     assert.equal(await settings.locator("#portal-relay").count(), 0, "an older server's page offers no relay");
   }
   assert.deepEqual(portalPosts, [], "the browser sent no Portal start or stop of its own");
@@ -370,10 +382,13 @@ try {
   blockedPage.on("pageerror", (error) => pageErrors.push(error.message));
   await blockedPage.goto(`http://127.0.0.1:${blockedServer.port}`, { waitUntil: "domcontentloaded" });
   await blockedPage.locator(".conn-live").waitFor({ state: "attached", timeout: 15_000 });
-  await openPhoneSettings(blockedPage);
+  await openPhoneSettings(blockedPage, false);
   const blockedSettings = settingsOf(blockedPage);
-  await blockedSettings.locator('[data-tab-panel="devices"]').locator(":scope > .connect-section, :scope > .settings-description").first().waitFor({ timeout: 10_000 });
-  assert.equal(await blockedSettings.locator('section[aria-label="Portal"]').count(), 0, "a Portal that needs a configured token is not offered");
+  await blockedSettings.locator('[data-tab-panel="ssh"], .connect-phone-body > .connect-section, .connect-phone-body > .settings-description').first().waitFor({ timeout: 10_000 });
+  // the SSH tab always keeps Portal's row: here one line saying the token is missing, and the guide's way to set it
+  await blockedSettings.getByTestId("portal-row").getByText("Portal needs an access token on this PC.", { exact: true }).waitFor();
+  assert.equal(await blockedSettings.getByTestId("portal-row").getByRole("link", { name: "How to set up", exact: true }).count(), 1, "the token-required row links the guide");
+  assert.equal(await blockedSettings.locator("#portal-relay").count(), 0, "a Portal that needs a configured token offers no relay field");
   assert.equal(await blockedSettings.getByRole("button", { name: "Start", exact: true }).count(), 0, "Portal Start is unavailable without a configured token");
   assert.deepEqual(pageErrors, [], "the token-required page has no browser errors");
   console.log("PASS Portal token-required UI: a Portal that cannot start without a configured token is left out");

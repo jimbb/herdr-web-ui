@@ -10,10 +10,13 @@
  * the acts write; Ovis has no boundary there.
  */
 import { dlopen, FFIType } from "bun:ffi";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, closeSync, fstatSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { CONFIRM_MS } from "../../shared/account-devices-api.ts";
 import { machineForwardingHeaders } from "../access.ts";
+import { writePrivateState } from "../private-state.ts";
 
 export type ScreenAction =
   | { kind: "lock" }
@@ -31,7 +34,7 @@ export interface ConfirmShown { title: string; lines: readonly string[]; fingerp
 export type ConfirmAnswer = "approved" | "declined" | "expired";
 export interface OpenConfirm { id: string; action: ScreenAction; shown: ConfirmShown; expiresAt: number }
 
-export const CONFIRM_MS = 2 * 60_000;
+export { CONFIRM_MS };
 export const CONFIRMS_OPEN_MAX = 16;
 export const LOCAL_CONFIRM_FILE = "local-confirm.json";
 const DESKTOP_OWNER_ARGUMENT = "--desktop-owner-fd";
@@ -98,6 +101,11 @@ export class LocalConfirms {
   onChange(listener: () => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  /** Takes an act off the screen: what it asked for is gone. Its asker hears `expired`, and no answer to it counts. */
+  withdraw(id: string): void {
+    this.#end(id, "expired");
   }
 
   isOpen(id: string): boolean {
@@ -292,23 +300,30 @@ export function peerUidOnLinux(listenerPort: number, peerPort: number): number |
 
 /** 127.0.0.1 as /proc/net/tcp writes it, in host (little-endian) order. */
 const LOOPBACK_HEX = "0100007F";
+/** TCP_ESTABLISHED as /proc/net/tcp writes the state. */
+const ESTABLISHED = "01";
 
 /**
- * The uid of the one row whose local end is the peer's own 127.0.0.1:port and whose remote end is this listener's
- * 127.0.0.1:port; the listener takes only 127.0.0.1 peers, so another address on the same ports is someone else.
+ * The uid of the one established row whose local end is the peer's own 127.0.0.1:port and whose remote end is this
+ * listener's 127.0.0.1:port; the listener takes only 127.0.0.1 peers, so another address on the same ports is someone
+ * else, and two such rows name nobody.
  */
 export function peerUidInTable(table: string, listenerPort: number, peerPort: number): number | null {
+  let found: number | null = null;
+  let matches = 0;
   for (const row of table.split("\n").slice(1)) {
     const fields = row.trim().split(/\s+/);
-    if (fields.length < 8) continue;
+    if (fields.length < 8 || fields[3] !== ESTABLISHED) continue;
     const [localAddress, localPort] = fields[1]!.split(":");
     const [remoteAddress, remotePort] = fields[2]!.split(":");
     if (localAddress !== LOOPBACK_HEX || remoteAddress !== LOOPBACK_HEX) continue;
     if (Number.parseInt(localPort!, 16) !== peerPort || Number.parseInt(remotePort!, 16) !== listenerPort) continue;
+    matches++;
     const uid = Number(fields[7]);
-    return Number.isSafeInteger(uid) ? uid : null;
+    found = Number.isSafeInteger(uid) ? uid : null;
   }
-  return null;
+  // more than one connection on the same exact ends cannot be told apart: nobody
+  return matches === 1 ? found : null;
 }
 
 const PAGE_HEADERS = {
@@ -375,8 +390,7 @@ export function openConfirmListener(confirms: LocalConfirms, options: {
   });
   const file = join(options.stateDir, LOCAL_CONFIRM_FILE);
   try {
-    writeFileSync(file, JSON.stringify({ port: server.port }), { mode: 0o600 });
-    chmodSync(file, 0o600);
+    writePrivateState(file, { port: server.port });
   } catch (error) {
     server.stop(true);
     throw error;
@@ -384,11 +398,25 @@ export function openConfirmListener(confirms: LocalConfirms, options: {
   return {
     port: server.port!,
     stop() {
-      server.stop(true);
+      // The approval of the last standing unlock can close this listener. Finish its HTTP reply.
+      server.stop();
       try { rmSync(file, { force: true }); }
       catch (error) { console.error(`${file} was not removed: ${error instanceof Error ? error.message : String(error)}`); }
     },
   };
+}
+
+/**
+ * Opens `url` (this listener's page) in a browser on this PC's own desktop, as `ovis confirm` does: on Linux, under X11
+ * or Wayland only. False where there is no desktop to open it on, and where `xdg-open` could not be started (a desktop
+ * without it): only a started opener counts as opened.
+ */
+export function openOnDesktop(url: string, env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (platform !== "linux" || !(Boolean(env["DISPLAY"]) || Boolean(env["WAYLAND_DISPLAY"]))) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const opener = spawn("xdg-open", [url], { stdio: "ignore", detached: true, env });
+    opener.once("spawn", () => { opener.unref(); resolve(true); }).once("error", () => resolve(false));
+  });
 }
 
 function listPage(open: readonly OpenConfirm[]): string {

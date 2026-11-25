@@ -1,31 +1,37 @@
 /**
- * The desktop app signs in through the system browser (lib/account/desktop.ts); a browser on the PC's
- * own secure address, which no sign-in can be sent back to, signs in with a code
- * (lib/account/deviceSignIn.ts): one button and the Ovis link page where the service has it, else the
- * provider's device flow.
+ * The desktop app signs in through the system browser (lib/account/desktop.ts), and the PC's own window in a
+ * browser on the PC through the loopback redirect (lib/account/ownWindow.ts); any other browser on the PC's
+ * address, which no sign-in can be sent back to, signs in with a code (lib/account/deviceSignIn.ts): one button
+ * and the Ovis link page where the service has it, else the provider's device flow.
  */
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useEffectEvent, useRef, useState } from "react";
+import { Check, Plus, X } from "lucide-react";
 
 import type { AccountLimits } from "../../shared/protocol.ts";
-import { AddPcWaitOver, closeAddWindow, keepAddPcWaiting, listThisPc, onAddPcWaiting, pagePc, pcAnswers, readAddPcWaiting, reopenAddWindow, thisPcInNoAccount, thisPcMembership, type AddPcWaiting, type ListedPc } from "../lib/account/addThisPc.ts";
+import { AddPcWaitOver, addInOnePress, closeAddWindow, keepAddPcWaiting, listedInAccount, listThisPc, onAddPcWaiting, pagePc, pcAnswers, readAddPcWaiting, reopenAddWindow, thisPcInNoAccount, thisPcMembership, type AddPcWaiting, type OnePress, type ListedPc } from "../lib/account/addThisPc.ts";
 import { deleteAccount, holdingSessionStore, installSignInAgain } from "../lib/account/deleteAccount.ts";
-import { desktopAccount, desktopProviders, desktopSignIn } from "../lib/account/desktop.ts";
+import { desktopAccount, desktopProviders, desktopSignIn, type DesktopAccountBridge } from "../lib/account/desktop.ts";
 import { ApiError, fetchBridgeHealth, fetchRelay, requestRelay } from "../lib/api.ts";
 import { startDeviceSignIn, startLinkPageSignIn, type DeviceSignInProvider } from "../lib/account/deviceSignIn.ts";
 import { AccountPcError, within } from "../lib/account/join.ts";
+import { pagePcs } from "../lib/account/listPcs.ts";
+import { pageAccountList } from "../lib/account/pageList.ts";
 import { myPcs, type MyPc } from "../lib/account/myPcs.ts";
-import { AccountService, AccountServiceError, DEVICE_PROVIDERS, offeredProviders, pcAccountServiceOf, sameSignIn, SignedOutError, type AccountIdentity, type DeviceProvider, type OfferedProviders } from "../lib/account/service.ts";
+import { ownSignIn, ownWindowSignIn, pcServiceHere, useOwnWindowRedirect } from "../lib/account/ownWindow.ts";
+import { AccountServiceError, DEVICE_PROVIDERS, indexedAccountService, offeredProviders, sameSignIn, SignedOutError, type AccountIdentity, type AccountService, type DeviceProvider, type OfferedProviders } from "../lib/account/service.ts";
 import { SignInError } from "../lib/account/signin.ts";
 import { indexedAccountStore, type AccountProvider, type AccountSession, type AccountStore } from "../lib/account/store.ts";
+import { postKept, refusalShown, unsentBlocks, type UnsentBlocks } from "../lib/account/unsentBlocks.ts";
 import { currentLocale, useT, type Translate } from "../lib/i18n.ts";
-import { inMacApp, inNativeApp } from "../lib/nativeApp.ts";
 import { pairThisBrowser, UnconfirmedPairing } from "../lib/pairing.ts";
-import { deviceLabel, deviceOs } from "../lib/phone.ts";
+import { deviceOs, thisDeviceLabel } from "../lib/phone.ts";
 import { ExternalLink } from "../lib/externalLink.ts";
-import { AccountPcList, AccountSignIn, PROVIDER_NAMES, ProviderMark } from "./AccountPcs.tsx";
+import { AccountPcList, AccountSignIn, PROVIDER_NAMES, ProviderMark, providerChoice } from "./AccountPcs.tsx";
+import { AccountHead, ManageAccountSheet } from "./AccountHead.tsx";
+import { AccountManageLists } from "./AccountManage.tsx";
 import { QrCode } from "./QrCode.tsx";
 import { statusText } from "./RelayPanel.tsx";
-import { SettingsGroup, SettingsRow } from "./SettingsControls.tsx";
+import { SettingsGroup, SettingsQuery, SettingsRow } from "./SettingsControls.tsx";
 
 /** A delete confirmed in this section, for the sign-in it was asked for (AccountSection's `deletion`). */
 interface Deletion { readonly session: AccountSession }
@@ -33,7 +39,8 @@ interface Deletion { readonly session: AccountSession }
 type View =
   | { kind: "loading" }
   | { kind: "signed-out"; error: string | null; notice?: string }
-  | { kind: "signing-in" }
+  /** `link`: the sign-in page the browser would not open in a tab of its own, offered to open by hand */
+  | { kind: "signing-in"; link?: string }
   | { kind: "device-code"; provider: DeviceSignInProvider; userCode: string | null; verificationUri: string; verificationUriComplete: string | null }
   | { kind: "signed-in"; provider: AccountProvider; account: string; pcs: MyPc[] | null; methods: AccountIdentity[] | null; limits: AccountLimits | null; error: string | null };
 
@@ -50,17 +57,15 @@ export function formatRelayBytes(bytes: number): string {
   return `${rounded} GB`;
 }
 
-export function formatAccountLimits(t: Translate, limits: AccountLimits, listedPcs: number): { label: string; summary: string } {
+/** The plan and its use on one line: "Free · 2/20 PCs", with the relay data when the plan caps it. */
+export function formatAccountLimits(t: Translate, limits: AccountLimits, listedPcs: number): string {
   const plan = limits.plan.length > 0 ? limits.plan[0]!.toUpperCase() + limits.plan.slice(1) : limits.plan;
   const usedPcs = limits.pcs_used ?? listedPcs;
   const pcsPart = t("{used}/{max} PCs", { used: usedPcs, max: limits.pcs_max });
   const dataPart = typeof limits.data_cap_bytes === "number" && limits.data_cap_bytes > 0 && typeof limits.data_used_bytes === "number"
     ? t("{used} / {cap} relay data", { used: formatRelayBytes(limits.data_used_bytes), cap: formatRelayBytes(limits.data_cap_bytes) })
     : null;
-  return {
-    label: t("Plan · {plan}", { plan }),
-    summary: dataPart !== null ? `${pcsPart} · ${dataPart}` : pcsPart,
-  };
+  return [plan, pcsPart, ...(dataPart !== null ? [dataPart] : [])].join(" · ");
 }
 
 /** The account's limits as `session` reads them; null when the service reports none, or once another sign-in (or none) is stored. */
@@ -127,13 +132,22 @@ type AddThisPcState =
    */
   | { kind: "waiting"; name: string; until: number; mark: AddPcWaiting | null; resumed: boolean; signedIn?: boolean }
   | { kind: "expired" }
+  /** another device of the account denied the request (removed its listing): the PC is not added, and a press asks anew */
+  | { kind: "declined" }
   /** `enrolling`: the device that added the PC has not let the account's other devices in yet */
   | { kind: "done"; account: string; enrolling: boolean }
-  | { kind: "error"; message: string };
+  /**
+   * `again`: the listing was refused for the sign-in itself (an old one with no key to prove): this page's own sign-in
+   * again, offered in place for `from` (the sign-in stored then), under way (`link`: the page a browser would not open), and
+   * then the same press with the fresh one
+   */
+  | { kind: "error"; message: string; again?: { readonly from: AccountSession; readonly step: "offered" | "signing-in"; readonly link: string | null } };
 
 const pageHidden = (): boolean => typeof document !== "undefined" && document.hidden === true;
 
-const offering = (state: AddThisPcState): boolean => state.kind === "offer" || state.kind === "expired" || state.kind === "error" || state.kind === "relay-off";
+const offering = (state: AddThisPcState): boolean => state.kind === "offer" || state.kind === "expired" || state.kind === "declined" || state.kind === "error" || state.kind === "relay-off";
+
+const IN_USE_HELP = "https://github.com/devswha/ovis/blob/main/docs/guide.md#a-sign-in-method-that-belongs-to-another-account";
 
 const warned = (what: string) => (error: unknown): void => console.warn(what, error instanceof Error ? error.name : error);
 
@@ -144,11 +158,10 @@ function resumable(kept: AddPcWaiting, now: number): boolean {
 }
 
 /**
- * Closes this PC's pairing window, so nothing more is taken through it; an older Ovis has no such route and lets it run out.
- * A wait begun right after asks for its window only once this close was answered (`closeAddWindow`).
+ * Automatic cleanup names the window this attempt opened. Only an explicit stop closes without an ID.
  */
-function closeWindow(): void {
-  closeAddWindow().catch((error: unknown) => {
+function closeWindow(windowId?: string): void {
+  closeAddWindow(windowId).catch((error: unknown) => {
     if (!(error instanceof ApiError && error.status === 404)) console.warn("Ovis: this PC's pairing window was not closed", error instanceof Error ? error.name : error);
   });
 }
@@ -161,6 +174,51 @@ const waitKept = (): boolean => { const kept = readAddPcWaiting(); return kept !
  * that began it said it adds this PC ("Sign in and add this PC"); only then is the PC listed without another press.
  */
 export interface SignedInHere { readonly account: string; readonly adds: boolean }
+
+/**
+ * Signs this device in again, fresh, with the provider `from` signed in with (called in the press itself, so no popup
+ * blocker takes its page; `blocked` is told the page to offer as a link), and stores it in `from`'s place for the same
+ * account only: the sign-in it stored, or null. Another account's sign-in, or one that finished after `signal` ended it,
+ * once `wanted` (asked inside that store's write) says no, or after a sign-out or another sign-in meanwhile, is never stored.
+ */
+export type SignInAgain = (from: AccountSession, options: { readonly signal: AbortSignal; readonly wanted: () => boolean; readonly blocked: (link: string) => void }) => Promise<AccountSession | null>;
+
+/**
+ * This page's own sign-in again: the desktop app's, or the PC's own window's. Undefined where the page signs in with a
+ * code (the account service never adds a PC in one press for such a sign-in), and while that is still asked.
+ */
+function signInAgainWith(bridge: DesktopAccountBridge | null, service: string | null, redirect: string | null | undefined): SignInAgain | undefined {
+  if (service === null || (bridge === null && !redirect)) return undefined;
+  return (from, { signal, wanted, blocked }) => ownSignIn(from.provider, { bridge, service, redirect: redirect ?? null, store: holdingSessionStore(indexedAccountStore), signal, blocked })
+    .then(async (again) => again.account === from.account && await installSignInAgain(indexedAccountStore, from, again, () => !signal.aborted && wanted()) ? again : null);
+}
+
+/** `signInAgainWith` for a screen that has no sign-in of its own while signed in (the relay tab). */
+export function useSignInAgainHere(): SignInAgain | undefined {
+  const bridge = desktopAccount();
+  const service = bridge?.service ?? pcServiceHere();
+  return signInAgainWith(bridge, service, useOwnWindowRedirect(bridge === null && service !== null));
+}
+
+/**
+ * The one offer of a fresh sign-in a wait gets when the account service refused the one press for the sign-in itself,
+ * for the wait that ends `until`: offered (`from`, the sign-in stored then; `mark`, the wait), under way (`link`: the
+ * sign-in page the browser would not open in a tab of its own), pressing again with the fresh sign-in, or failed.
+ */
+type Again =
+  /** `shared`: the wait was kept for this tab's other screens when it was offered, so their Stop withdraws the offer */
+  | { readonly until: number; readonly step: "offered"; readonly from: AccountSession; readonly mark: AddPcWaiting; readonly shared: boolean }
+  | { readonly until: number; readonly step: "signing-in"; readonly link: string | null }
+  | { readonly until: number; readonly step: "adding" }
+  | { readonly until: number; readonly step: "failed"; readonly message: string };
+
+/** Why a press added nothing, and what adds this PC all the same: said under the wait, which goes on. */
+function onePressRefusal(t: Translate, pressed: Exclude<OnePress, "added">): string {
+  const otherWays = t("Add this PC from another device of your account and approve the number it shows here, or scan this PC's QR code with your phone.");
+  return pressed === "no-two-step"
+    ? `${t("This sign-in has no two-step sign-in.")} ${otherWays} ${t("To add it in one press, turn on two-step sign-in with your sign-in provider and sign in again.")}`
+    : `${t("This PC was not added in one press.")} ${otherWays}`;
+}
 
 let relistOnItsWay: { readonly until: number; readonly listed: Promise<ListedPc> } | null = null;
 
@@ -176,9 +234,20 @@ let relistOnItsWay: { readonly until: number; readonly listed: Promise<ListedPc>
  * nobody is closed. A sign-in whose button said nothing of adding lists and opens nothing: it gets the offer.
  * The relay is never turned on without a press. Nothing else is listed or opened without one. A device that only
  * watches this PC can list nothing, and is shown nothing.
+ * A wait whose one press the account service refused for the sign-in itself (not two-step, not fresh) offers once to
+ * sign in again here (`signInAgain`): stored in that sign-in's place, it alone presses again, for the PC that waited.
  */
-export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }: {
+export function AddThisPc({ relayAbove = true, gateNote = true, relayOn, service, signedInHere, onListed, opensAll = () => false, signInAgain }: {
   relayAbove?: boolean;
+  /**
+   * The relay's state as a switch beside this one shows it (the relay tab): once it is on, an offer to turn it on and
+   * add the PC becomes the plain offer. Only that idle offer changes; an add or a wait under way goes on as it is.
+   */
+  relayOn?: boolean;
+  /** false on the relay tab, which holds no sentence: that turning the relay on closes the device gate is then the button's tooltip */
+  gateNote?: boolean;
+  /** this PC lists account-opens-all/1 now (its step-2 switch is on): only then is a one press tried */
+  opensAll?: () => boolean;
   onListed?: () => void;
   service?: () => AccountService;
   /**
@@ -186,10 +255,17 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
    * already there): only that one adds the PC without another press, and only when its button said so.
    */
   signedInHere?: () => SignedInHere | null;
+  /** this page's own sign-in again (`signInAgainWith`); without it a wait offers none */
+  signInAgain?: SignInAgain | undefined;
 }) {
   const t = useT();
   const [state, setState] = useState<AddThisPcState>({ kind: "hidden" });
-  const accountService = useCallback((): AccountService => service?.() ?? new AccountService({ store: indexedAccountStore }), [service]);
+  const [again, setAgain] = useState<Again | null>(null);
+  const againRun = useRef<AbortController | null>(null);
+  const waitingUntil = state.kind === "waiting" ? state.until : null;
+  // the wait ended (stopped, added, run out, replaced) or the screen went: its sign-in again stores nothing and adds nothing
+  useEffect(() => () => { againRun.current?.abort(); againRun.current = null; }, [waitingUntil]);
+  const accountService = useCallback((): AccountService => service?.() ?? indexedAccountService, [service]);
   /** What the screen shows of a PC that has an account: "in your account" only when it is the one signed in to now, else nothing here is true of it. */
   const joinedAs = useCallback(async (account: string, enrolling: boolean): Promise<AddThisPcState> => {
     const session = await accountService().session();
@@ -222,7 +298,13 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
         const kept = stored !== null && resumable(stored, Date.now()) ? stored : null;
         if (kept === null) {
           keepAddPcWaiting(null);
-          if (account !== null) return;
+          if (account !== null) {
+            const page = pagePc();
+            if (stored !== null && page !== null && page !== stored.serverId) return;
+            const next = await joinedAs(account, enrolling);
+            if (live) setState(next);
+            return;
+          }
           // a device that only watches this PC lists nothing (the PC refuses it the window): no listing, and no button that could only fail
           const watching = await within(ANSWER_MS, fetchBridgeHealth()).then(({ auth }) => auth?.role === "watch", (error: unknown) => {
             warned("Ovis: what this browser may do on this PC could not be read")(error);
@@ -284,8 +366,8 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
     };
     read();
     return () => { live = false; if (again !== null) clearTimeout(again); };
-  }, [accountService, signedInHere]);
-  const pressed = useRef<number | null>(null);
+  }, [accountService, joinedAs, signedInHere]);
+  const pressedUntil = useRef<number | null>(null);
   /** how many listings and relay starts this copy began: a window is closed late only while none began since */
   const starts = useRef(0);
   const stops = useRef(0);
@@ -294,7 +376,7 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
     if (!idle) return;
     let live = true;
     const off = onAddPcWaiting((kept) => {
-      if (kept === null || kept.until === pressed.current || !resumable(kept, Date.now())) return;
+      if (kept === null || kept.until === pressedUntil.current || !resumable(kept, Date.now())) return;
       accountService().session().then((session) => {
         const now = readAddPcWaiting();
         // only under the sign-in the wait was begun in, and only while it is still the wait the tab keeps
@@ -323,15 +405,28 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
         : { kind: "offer" });
     };
     const stopped = (): void => { forget(); left(); };
+    /**
+     * The listing this wait made, gone from the account once it was seen there: a device of the account denied the
+     * request (Deny on its join request). The wait ends rather than list the PC again, which would ask once more.
+     */
+    let seenListed = false;
+    const deniedElsewhere = async (): Promise<boolean> => {
+      if (mark === null) return false;
+      const listed = await listedInAccount(accountService(), mark.serverId, mark.account);
+      if (listed === true) seenListed = true;
+      return listed === false && seenListed;
+    };
+    const declined = (): void => { forget(); setState({ kind: "declined" }); };
     const stopsThen = stops.current;
     const startsThen = starts.current;
+    let joinedWait = false;
     /**
-     * A reopen or a listing of this wait reached the PC after Stop waiting closed its window (here, or in another
-     * copy), and opened it again for nobody: closed once more, unless the person began another wait meanwhile.
+     * A late reopen or relist can open a window after this wait stopped or found membership.
+     * Close only the window opened by that request.
      */
-    const closeLate = (): boolean => {
-      if (!((stops.current !== stopsThen || withdrawn()) && starts.current === startsThen && !waitKept())) return false;
-      closeWindow();
+    const closeLate = (windowId: string): boolean => {
+      if (!joinedWait && !((stops.current !== stopsThen || withdrawn()) && starts.current === startsThen && !waitKept())) return false;
+      closeWindow(windowId);
       return true;
     };
     const expired = (): boolean => {
@@ -348,6 +443,7 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
       // already, and of that one the screen says nothing, as on a page that kept no wait
       const next: AddThisPcState = mark === null || await pcAnswers(mark.serverId) ? await joinedAs(account, enrolling) : { kind: "hidden" };
       if (!live) return;
+      joinedWait = true;
       keepAddPcWaiting(null);
       setState(next);
     };
@@ -363,14 +459,15 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
         // one that waited, and no window is opened on that one
         if (mark !== null && !await pcAnswers(mark.serverId)) { if (live) stopped(); return; }
         if (!live || withdrawn()) return;
-        const pc = await reopenAddWindow();
-        const closed = closeLate();
+        if (await deniedElsewhere()) { if (live && !withdrawn()) declined(); return; }
+        if (!live || withdrawn()) return;
+        const { serverId: pc, windowId } = await reopenAddWindow();
+        const closed = windowId !== undefined && closeLate(windowId);
         // it changed PC between that question and the window: the wait is not this one's
         if (pc === null || mark === null || pc === mark.serverId) return;
         if (live) stopped();
-        // and that request opened a window on the other PC, where no screen waits for anyone: closed again, unless
-        // it was just now, or the person began another wait meanwhile (whose window a close would take)
-        if (!closed && starts.current === startsThen && !waitKept()) closeWindow();
+        // Release the window on the other PC if this tab did not start another wait meanwhile.
+        if (!closed && windowId !== undefined && starts.current === startsThen && !waitKept()) closeWindow(windowId);
       })()).catch(warned("Ovis: this PC's pairing window was not reopened")).finally(() => { reopening = false; });
     };
     let asking = false;
@@ -396,8 +493,8 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
       if (expired()) return;
       let mine: typeof relistOnItsWay = null;
       let over = false;
-      let asked = false;
-      const closeAsked = (): void => { if (asked && closeLate()) asked = false; };
+      let windowId: string | undefined;
+      const closeAsked = (): void => { if (windowId !== undefined && closeLate(windowId)) windowId = undefined; };
       within(2 * REOPEN_MS, (async (): Promise<boolean> => {
         const { account, enrolling } = await thisPcMembership();
         if (!live) return true;
@@ -406,6 +503,9 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
         // listed only under the account the press was made in: another sign-in since then ends the wait
         if (!await stillSignedIn()) { if (live) stopped(); return true; }
         if (!live || over) return true;
+        // denied on another device since a reopen saw it listed: never listed again by itself
+        if (seenListed && await deniedElsewhere()) { if (live && !withdrawn()) declined(); return true; }
+        if (!live || over) return true;
         if (withdrawn()) { left(); return true; }
         const kept = shared ? readAddPcWaiting() : null;
         if (mark !== null && kept !== null && kept.until === until && kept.listedAt > mark.listedAt) { mark = kept; return true; }
@@ -413,17 +513,24 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
         // was stopped (here or in another copy) while the listing was on its way
         const wait = mark === null ? undefined : { serverId: mark.serverId, account: mark.account, running: (): boolean => live && !withdrawn() };
         const flying = shared && relistOnItsWay?.until === until ? relistOnItsWay : null;
-        asked = flying === null;
-        const listed = flying?.listed ?? listThisPc(accountService(), { relistMs: RELIST_MS, for: wait });
+        const listed = flying?.listed ?? listThisPc(accountService(), {
+          relistMs: RELIST_MS, for: wait, opened: (id) => { windowId = id; },
+        });
         // its request for the window may reach the PC only after this attempt was given up for getting no answer in
         // time, and after Stop waiting closed the window: closed once more when the listing itself is over, and
         // when the attempt is (a listing whose directory never answers is never over)
         if (flying === null) void listed.then(closeAsked, closeAsked);
         if (shared && flying === null) relistOnItsWay = mine = { until, listed };
-        await listed;
+        const { membership } = await listed;
+        // Only the caller that opened the window has its ID, even when another screen shares the result.
+        if (membership !== undefined && windowId !== undefined) {
+          closeWindow(windowId);
+          windowId = undefined;
+        }
         if (!live) return true;
         // another copy stopped the wait while the PC was being listed: what it forgot is not kept again
         if (withdrawn()) { left(); return true; }
+        if (membership !== undefined) { await joined(membership.account, membership.enrolling); return true; }
         if (mark !== null) { mark = { ...mark, listedAt: Date.now() }; keepAddPcWaiting(mark); }
         return true;
       })()).catch((error: unknown) => {
@@ -495,30 +602,54 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
     const began = ++starts.current;
     const current = (): boolean => attempt.current === mine;
     if (as !== null) setState({ kind: "adding" });
-    let opened = false;
+    let windowId: string | undefined;
     let writing = false;
-    let closed = false;
     /** Closes the window this attempt opened, once: never under a wait the tab keeps, or a listing begun since. */
     const closeOpened = (): void => {
-      if (!opened || closed || starts.current !== began || waitKept()) return;
-      closed = true;
-      closeWindow();
+      if (windowId === undefined || starts.current !== began || waitKept()) return;
+      closeWindow(windowId);
+      windowId = undefined;
     };
     const drop = as === null ? null : (): void => { if (current()) attempt.current++; closeOpened(); };
     dropped.current = drop;
     const over = (): void => { if (dropped.current === drop) dropped.current = null; };
-    const reached = (step: "opened" | "writing"): void => { if (step === "opened") opened = true; else writing = true; };
     const listing = (async (): Promise<AddThisPcState | null> => {
       // the window outlives a wait that stopped by up to ten minutes: a device may have added this PC through it, and then nothing is listed again
       const { account: joined, enrolling } = await thisPcMembership();
       if (!current()) return null;
       if (joined !== null) { keepAddPcWaiting(null); return await joinedAs(joined, enrolling); }
-      const { name, serverId, account } = await listThisPc(accountService(), { relistMs: RELIST_MS, ...(as === null ? {} : { as: { account: as, running: current, reached } }) });
+      const { name, serverId, account, membership } = await listThisPc(accountService(), {
+        relistMs: RELIST_MS,
+        opened: (id) => { windowId = id; },
+        ...(as === null ? {} : { as: { account: as, running: current, writing: () => { writing = true; } } }),
+      });
+      if (!current()) return null;
+      if (membership !== undefined) {
+        closeOpened();
+        keepAddPcWaiting(null);
+        return await joinedAs(membership.account, membership.enrolling);
+      }
+      // in one press when the account service admits it; the window this listing opened is then needed no more
+      const pressed = account === null ? "refused" : await addInOnePress(accountService(), serverId, account, current, opensAll());
+      if (account !== null && pressed === "added") {
+        // an attempt given up or replaced meanwhile clears nothing that a newer one owns
+        if (!current()) return null;
+        // the account lists this PC now: whoever shows the account's PCs reads them again
+        listed();
+        keepAddPcWaiting(null);
+        closeOpened();
+        return await joinedAs(account, false);
+      }
+      // refused for the sign-in itself: the wait offers one fresh sign-in here, never again after it
+      const from = pressed === "sign-in-again" && signInAgain !== undefined ? await accountService().session() : undefined;
       if (!current()) return null;
       const now = Date.now();
       const mark = account === null ? null : { name, until: now + WAITING_MS, serverId, account, listedAt: now };
-      pressed.current = mark?.until ?? null;
+      pressedUntil.current = mark?.until ?? null;
       keepAddPcWaiting(mark);
+      if (from !== undefined && mark !== null && from.account === account) setAgain({ until: mark.until, step: "offered", from, mark, shared: readAddPcWaiting()?.until === mark.until });
+      // a sign-in without two-step is refused again however often it signs in: the wait says what works
+      else if (pressed === "no-two-step" && mark !== null) setAgain({ until: mark.until, step: "failed", message: onePressRefusal(t, pressed) });
       return { kind: "waiting", name, until: now + WAITING_MS, mark, resumed: false, signedIn: as !== null };
     })();
     // an attempt given up, or whose screen went, while its window was still being opened: closed once it is open
@@ -534,10 +665,19 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
       if (as !== null && error instanceof AddPcWaitOver) { setState({ kind: "offer" }); return; }
       const relayOff = error instanceof ApiError && error.code === "relay_off";
       if (as !== null && relayOff) { setState({ kind: "relay-off", account: as, error: null }); return; }
-      setState({ kind: "error", message: relayOff
+      // the PC left the account (`ovis logout`) and gave no proof of its own here: only a sign-in on the PC lists it again
+      const left = error instanceof AccountServiceError && error.code === "pc_left";
+      // an old sign-in with no registered key to prove (docs/account.md, "In one press"): a new sign-in lists it
+      const stale = error instanceof AccountServiceError && error.code === "session_not_fresh";
+      const shown: AddThisPcState = { kind: "error", message: left ? t("Sign in on this PC to add it again") : stale ? t("Sign in again to add it: your sign-in is more than ten minutes old.") : relayOff
         ? relayAbove ? t("Turn on remote access through the Ovis relay above first.") : t("Turn on remote access through the Ovis relay in Settings → Devices and PCs first.")
         // its entry was already on the way to the directory when the screen gave up: it may be listed all the same
-        : writing ? t("This PC may not have been listed in your account. Try again.") : t("This PC could not be listed in your account. Try again.") });
+        : writing ? t("This PC may not have been listed in your account. Try again.") : t("This PC could not be listed in your account. Try again.") };
+      setState(shown);
+      // the same press goes on after this page's own sign-in again, offered here for the sign-in stored now
+      if (stale && signInAgain !== undefined) void accountService().session().then((from) => {
+        if (from !== undefined) setState((now) => now === shown ? { ...shown, again: { from, step: "offered", link: null } } : now);
+      }, warned("Ovis: the sign-in could not be read"));
     });
   };
   /**
@@ -558,11 +698,22 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
     });
   };
   const relayOff = state.kind === "relay-off";
+  useEffect(() => {
+    if (relayOn === undefined) return;
+    if (relayOn) { setState((current) => current.kind === "relay-off" ? { kind: "offer" } : current); return; }
+    // turned off again: the idle offer becomes the one press that turns it on and adds, under the sign-in stored now
+    let live = true;
+    accountService().session().then((session) => {
+      if (live && session !== undefined) setState((current) => current.kind === "offer" ? { kind: "relay-off", account: session.account, error: null } : current);
+    }, warned("Ovis: the sign-in could not be read"));
+    return () => { live = false; };
+  }, [relayOn, accountService]);
   const [closesGate, setClosesGate] = useState(false);
   useEffect(() => {
     if (!relayOff) return;
     let live = true;
-    fetchBridgeHealth().then(({ security }) => { if (live) setClosesGate(security !== undefined && security.pairing_gate === "open" && !security.token_configured); },
+    // a relay that may not start (serve-only) closes nothing: no note about turning it on
+    Promise.all([fetchBridgeHealth(), fetchRelay()]).then(([{ security }, relay]) => { if (live) setClosesGate(relay.blocked === null && security !== undefined && security.pairing_gate === "open" && !security.token_configured); },
       warned("Ovis: this PC's access facts could not be read"));
     return () => { live = false; };
   }, [relayOff]);
@@ -593,6 +744,13 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
       if (!current()) return;
       if (auth?.via === "open") await pairThisBrowser();
       if (!current()) return;
+      const membership = await thisPcMembership();
+      if (!current()) return;
+      if (membership.account !== null) {
+        const next = await joinedAs(membership.account, membership.enrolling);
+        if (current()) setState(next);
+        return;
+      }
       const status = await requestRelay("start");
       if (!current()) return;
       if (status.blocked !== null) { setState({ kind: "relay-off", account, error: statusText(t, status) }); return; }
@@ -620,43 +778,154 @@ export function AddThisPc({ relayAbove = true, service, signedInHere, onListed }
     setState({ kind: "offer" });
     closeWindow();
   };
+  /**
+   * The wait's one sign-in again, with the provider of the sign-in it began under. It runs only while its wait does, in
+   * this copy of the screen and in every other (a Stop waiting anywhere ends it, and its sign-in is then not stored).
+   * Stored in that one's place, the fresh sign-in and no other presses again, for the PC that waited and only while
+   * this address still answers for it (it is listed already): a refusal then is the plain wait, with no offer again.
+   * Another account's sign-in stores nothing and the wait goes on; a cancelled or failed one too.
+   */
+  const signInAgainNow = ({ until, from, mark, shared }: { until: number; from: AccountSession; mark: AddPcWaiting; shared: boolean }): void => {
+    if (signInAgain === undefined) return;
+    // another copy of this screen stopped the wait, or began another, before this press: no sign-in is started
+    if (shared && readAddPcWaiting()?.until !== until) { setAgain(null); return; }
+    const controller = new AbortController();
+    againRun.current = controller;
+    const running = (): boolean => !controller.signal.aborted;
+    // and one that does so while it runs ends it at once
+    const off = onAddPcWaiting((kept) => { if (shared && kept?.until !== until) controller.abort(); });
+    const over = (next: Again | null): void => {
+      off();
+      if (againRun.current !== controller) return;
+      againRun.current = null;
+      setAgain(next);
+    };
+    setAgain({ until, step: "signing-in", link: null });
+    signInAgain(from, { signal: controller.signal, wanted: running, blocked: (link) => { if (running()) setAgain({ until, step: "signing-in", link }); } }).then(async (session) => {
+      if (session === null || !running()) { over(null); return; }
+      setAgain({ until, step: "adding" });
+      try {
+        // asked first: this address may answer for another PC now, and nothing is pressed for that one
+        const pressed = await within(ANSWER_MS, pcAnswers(mark.serverId)) && running()
+          ? await addInOnePress(accountService(), mark.serverId, mark.account, running, opensAll(), session) : "refused";
+        if (!running()) { over(null); return; }
+        // the one offer is spent: the wait goes on, and says why this press added nothing
+        if (pressed !== "added") { over({ until, step: "failed", message: onePressRefusal(t, pressed) }); return; }
+        over(null);
+        listed();
+        keepAddPcWaiting(null);
+        const next = await joinedAs(mark.account, false);
+        setState((current) => current.kind === "waiting" && current.until === until ? next : current);
+      } catch (error) {
+        warned("Ovis: this PC was not added in one press")(error);
+        over(null);
+      }
+    }, (error: unknown) => {
+      if (!running() || (error instanceof DOMException && error.name === "AbortError")) { over(null); return; }
+      console.warn("Ovis: the sign-in did not finish", error instanceof SignInError ? error.code : error instanceof Error ? error.name : error);
+      over({ until, step: "failed", message: t("The sign-in did not finish. Try again.") });
+    });
+  };
+  /**
+   * The sign-in again a refused listing offers: this page's own, stored in the place of `from` only for the same account;
+   * then the same press as that sign-in (`add` with its account, which lists nothing once another account is stored).
+   * Cancelled, failed or another account's, the offer stays.
+   */
+  const signInAgainToList = (from: AccountSession, message: string): void => {
+    if (signInAgain === undefined) return;
+    againRun.current?.abort();
+    const controller = new AbortController();
+    againRun.current = controller;
+    const running = (): boolean => !controller.signal.aborted && againRun.current === controller;
+    const offered = (shown: string): void => { if (againRun.current === controller) againRun.current = null; setState({ kind: "error", message: shown, again: { from, step: "offered", link: null } }); };
+    setState({ kind: "error", message, again: { from, step: "signing-in", link: null } });
+    signInAgain(from, { signal: controller.signal, wanted: running, blocked: (link) => {
+      if (running()) setState((now) => now.kind === "error" && now.again !== undefined ? { ...now, again: { ...now.again, link } } : now);
+    } }).then((session) => {
+      if (!running()) return;
+      if (session === null) { offered(message); return; }
+      againRun.current = null;
+      // as a sign-in that just finished here: under that account only, cancellable, and given up with the screen
+      add(session.account);
+    }, (error: unknown) => {
+      if (!running()) return;
+      if (error instanceof DOMException && error.name === "AbortError") { offered(message); return; }
+      console.warn("Ovis: the sign-in did not finish", error instanceof SignInError ? error.code : error instanceof Error ? error.name : error);
+      offered(t("The sign-in did not finish. Try again."));
+    });
+  };
+  const cancelListingAgain = (from: AccountSession, message: string): void => {
+    againRun.current?.abort();
+    againRun.current = null;
+    setState({ kind: "error", message, again: { from, step: "offered", link: null } });
+  };
+  const cancelAgain = (): void => {
+    againRun.current?.abort();
+    againRun.current = null;
+    setAgain(null);
+  };
   if (state.kind === "hidden") return null;
+  const againShown = state.kind === "waiting" && again?.until === state.until ? again : null;
   return (
     <div className="settings-item account-add-pc">
       {state.kind === "adding" ? (
         <p className="settings-description" role="status">{t("Signed in. Adding this PC to your account…")}</p>
       ) : state.kind === "relay-off" ? (
         <>
-          <p className="settings-description">{t("Add this PC to your account, so every device of your account can use it with one approval.")}</p>
-          <p className="settings-description">{t("The Ovis relay lets your devices reach this PC from anywhere.")}</p>
-          {closesGate && <p className="settings-condition">{t("Turning on the relay closes the device gate: a new browser then needs a pairing code or the access token.")}</p>}
-          <button type="button" className="btn btn-primary" onClick={() => startRelayAndAdd(state.account)}>{t("Turn on the relay and add this PC")}</button>
+          {/* the one press turns the relay on too: the button says only what it is for, and where no sentence may stand
+              (the relay tab) that turning the relay on closes the device gate is its tooltip */}
+          {closesGate && gateNote && <p className="settings-condition">{t("Turning on the relay closes the device gate: a new browser then needs a pairing code or the access token.")}</p>}
+          <button type="button" className="btn btn-primary account-add-pc-button" data-relay="off" title={closesGate && !gateNote ? t("Turning on the relay closes the device gate: a new browser then needs a pairing code or the access token.") : undefined} onClick={() => startRelayAndAdd(state.account)}>{t("Add this PC to my account")}</button>
           {state.error !== null && <p className="settings-condition" role="alert">{state.error}</p>}
         </>
       ) : state.kind === "waiting" ? (
         <>
-          {state.signedIn === true && <p className="settings-description">{t("Signed in. Adding this PC to your account…")}</p>}
-          <p className="settings-description">{t("On a device already signed in to this account (the Ovis app or app.ovis.sh), choose Add on {name}. If it shows Join there instead, choose Join, then Type the number. This screen then shows a six-digit number: type it there, then press Approve here. Keep this page open.", { name: state.name })}</p>
-          <p className="settings-description">{t("Every device of your account can use this PC after that.")}</p>
-          <p className="settings-description" role="status">{t("Waiting. The window reopens by itself if Ovis restarts.")}</p>
-          <button type="button" className="btn" onClick={stop}>{t("Stop waiting")}</button>
+          <p className="settings-description" role="status">{t("On another device of your account, choose Add on {name}.", { name: state.name })}</p>
+          {againShown !== null && againShown.step !== "failed" ? (
+            <>
+              {againShown.step === "offered" ? <p className="settings-description">{t("Sign in again now to add it right away.")}</p>
+                : againShown.step === "signing-in" ? <p className="settings-description" role="status">{t("Finish signing in in your browser.")}</p>
+                : <p className="settings-description" role="status">{t("Signed in. Adding this PC to your account…")}</p>}
+              <div className="account-device-actions">
+                {againShown.step === "offered" && <button type="button" className="btn btn-primary" onClick={() => signInAgainNow(againShown)}>{t("Sign in again")}</button>}
+                {againShown.step === "signing-in" && <>
+                  {againShown.link !== null && <ExternalLink kind="sign-in" className="btn btn-primary" href={againShown.link}>{t("Open the sign-in page")}</ExternalLink>}
+                  <button type="button" className="btn" onClick={cancelAgain}>{t("Cancel")}</button>
+                </>}
+                <button type="button" className="btn" onClick={stop}>{t("Stop waiting")}</button>
+              </div>
+            </>
+          ) : <button type="button" className="btn" onClick={stop}>{t("Stop waiting")}</button>}
+          {againShown?.step === "failed" && <p className="settings-condition" role="alert">{againShown.message}</p>}
         </>
       ) : state.kind === "done" ? (
+        state.enrolling
+          ? <p className="settings-description" role="status">{t("Not finished yet: the device that added this PC is still setting it up. If it stopped, open this PC on that device and choose Try again.")}</p>
+          : <p className="account-add-pc-done" role="status"><Check aria-hidden="true" />{t("Added")}</p>
+      ) : state.kind === "declined" ? (
         <>
-          <p className="settings-description" role="status">{state.enrolling
-            ? t("This PC is in your account. The device that added it is still letting your other devices in.")
-            : t("This PC is in your account. Your other devices can open it now.")}</p>
-          <p className="settings-description" title={state.account}>{t("Account")} <code className="account-id">{state.account.length > 12 ? `${state.account.slice(0, 12)}…` : state.account}</code></p>
+          <p className="settings-description" role="status">{t("Another device of your account declined adding this PC.")}</p>
+          <button type="button" className="btn btn-primary account-add-pc-button" onClick={() => add()}>{t("Add this PC to my account")}</button>
         </>
       ) : state.kind === "expired" ? (
         <>
           <p className="settings-description" role="status">{t("This PC stopped waiting after 30 minutes.")}</p>
           <button type="button" className="btn btn-primary" onClick={() => add()}>{t("Keep waiting")}</button>
         </>
+      ) : state.kind === "error" && state.again !== undefined ? (
+        <>
+          <p className="settings-condition" role="alert">{state.message}</p>
+          {state.again.step === "signing-in" && <p className="settings-description" role="status">{t("Finish signing in in your browser.")}</p>}
+          <div className="account-device-actions">
+            {state.again.step === "offered" ? <button type="button" className="btn btn-primary" onClick={() => signInAgainToList(state.again!.from, state.message)}>{t("Sign in again")}</button> : <>
+              {state.again.link !== null && <ExternalLink kind="sign-in" className="btn btn-primary" href={state.again.link}>{t("Open the sign-in page")}</ExternalLink>}
+              <button type="button" className="btn" onClick={() => cancelListingAgain(state.again!.from, state.message)}>{t("Cancel")}</button>
+            </>}
+          </div>
+        </>
       ) : (
         <>
-          <p className="settings-description">{t("Add this PC to your account, so every device of your account can use it with one approval.")}</p>
-          <button type="button" className="btn btn-primary" onClick={() => add()}>{t("Add this PC to my account")}</button>
+          <button type="button" className="btn btn-primary account-add-pc-button" onClick={() => add()}>{t("Add this PC to my account")}</button>
           {state.kind === "error" && <p className="settings-condition" role="alert">{state.message}</p>}
         </>
       )}
@@ -708,23 +977,36 @@ export interface AccountState {
   reachable: boolean;
 }
 
-/** the phone and Mac apps sign in their own way, never with a code from a PC's page */
-const pcServiceHere = (): string | null => desktopAccount() === null && !inNativeApp() && !inMacApp() ? pcAccountServiceOf(document, window.isSecureContext) : null;
-
-export const accountServiceHere = (): string | null => desktopAccount()?.service ?? pcServiceHere();
-
-export function AccountSection({ onAccount, recheck = 0 }: {
+export function AccountSection({ onAccount, recheck = 0, opensAll, withdrawn, signInElsewhere = false, watching = false }: {
   onAccount?: (state: AccountState) => void;
+  /** this device only watches the PC: Manage account offers no PC removal */
+  watching?: boolean;
   recheck?: number;
+  /** this PC lists account-opens-all/1 now (App, from the local socket's features) */
+  opensAll?: () => boolean;
+  /** this PC's last feature list lacked the account release (an explicit withdrawal, S32-1): no block goes to the service */
+  withdrawn?: () => boolean;
+  /**
+   * Signing in has its own place on this page (Add a connection's relay tab): signed out, the section draws no
+   * card of its own, only why a sign-in ended. The sign-in under way it began itself is still drawn.
+   */
+  signInElsewhere?: boolean;
 } = {}) {
   const t = useT();
+  // a search finds settings rows only: while one runs, the account's rows are the group's own rows, not a sheet
+  const searching = useContext(SettingsQuery).length > 0;
+  /** the account Manage account's sheet was opened for (the ways in, the plan and Delete account); null while it is shut */
+  const [managedAccount, setManagedAccount] = useState<string | null>(null);
   const bridge = desktopAccount();
   const pcService = pcServiceHere();
+  const ownRedirect = useOwnWindowRedirect(bridge === null && pcService !== null);
   const offered = bridge !== null || pcService !== null;
   const [view, setView] = useState<View>({ kind: "loading" });
   const fallback: AccountProvider[] = bridge ? desktopProviders(bridge) : ["github"];
   const [offer, setOffer] = useState<OfferedProviders | null>(null);
   const [unreachable, setUnreachable] = useState(false);
+  /** the in_use line addMethod showed: its steps link shows only while that exact line is the error */
+  const [inUseShown, setInUseShown] = useState<string | null>(null);
   /** a change to the ways in that waits for a fresh sign-in (403 reauth_required) */
   const [reauth, setReauth] = useState<{ action: "add" | "remove"; provider: AccountProvider } | { action: "delete"; provider: AccountProvider; deletion: Deletion } | null>(null);
   /**
@@ -732,12 +1014,16 @@ export function AccountSection({ onAccount, recheck = 0 }: {
    * deletes this sign-in's account alone. A sign-out, a sign-in or another account shown drops the question.
    */
   const [deleteAsked, setDeleteAsked] = useState<AccountSession | null>(null);
+  /** bumped when the question is dropped (Manage account closed): a press whose sign-in read is still out then asks nothing */
+  const deleteAsks = useRef(0);
   /**
    * The delete confirmed here, until it ends: a sign-out or a sign-in ends it, and every step of it after a wait (the
    * sign-in again, the delete after it, what is drawn) goes on only while it is still this one.
    */
   const deletion = useRef<Deletion | null>(null);
   const [deleteOut, setDeleteOut] = useState<Deletion | null>(null);
+  /** why the last delete was refused, said beside Delete account wherever it is drawn, for the account it was asked for */
+  const [deleteFailed, setDeleteFailed] = useState<{ readonly account: string; readonly message: string } | null>(null);
   /** the sign-in-again prompt, while it is for the account shown: a delete's prompt never carries over to another account */
   const reauthShown = reauth !== null && (reauth.action !== "delete" || (view.kind === "signed-in" && reauth.deletion.session.account === view.account)) ? reauth : null;
   const deviceSignIn = useRef<AbortController | null>(null);
@@ -769,16 +1055,16 @@ export function AccountSection({ onAccount, recheck = 0 }: {
       return reachable;
     });
   }, [service, fallbackKey, recheck]);
-  /** the desktop app comes back over loopback with any provider; a PC's page only through a device flow */
-  const providers: AccountProvider[] = bridge !== null ? offer?.providers ?? fallback : offer?.device ?? ["github"];
-  const linkPage = bridge === null && pcService !== null && (offer?.page.length ?? 0) > 0;
+  /** the desktop app and the PC's own window come back over loopback with any provider; another window only through a device flow */
+  const providers: AccountProvider[] = bridge !== null || ownRedirect ? offer?.providers ?? fallback : offer?.device ?? ["github"];
+  const linkPage = bridge === null && pcService !== null && ownRedirect === null && (offer?.page.length ?? 0) > 0;
   // bumped by a sign-out and on unmount: a load still waiting for the account's PCs then shows nothing
   const loads = useRef(0);
 
   const load = useCallback(async function read(): Promise<void> {
     const generation = ++loads.current;
     const show = (next: View) => { if (loads.current === generation) setView(next); };
-    const service = new AccountService({ store: indexedAccountStore });
+    const service = indexedAccountService;
     const session = await service.session();
     if (session === undefined) { signedInHere.current = null; show({ kind: "signed-out", error: null }); return; }
     const signedIn = { kind: "signed-in", provider: session.provider, account: session.account } as const;
@@ -792,7 +1078,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
       if (loads.current !== generation) return;
       if (lists === null) { void read(); return; }
       const { pcs, methods } = lists;
-      setView((current) => ({ ...signedIn, pcs: myPcs(pcs, [], { now: Date.now() }), methods, limits: current.kind === "signed-in" && current.account === session.account ? current.limits : null, error: null }));
+      setView((current) => ({ ...signedIn, pcs: myPcs(pagePcs(session.account, pcs), [], { now: Date.now() }), methods, limits: current.kind === "signed-in" && current.account === session.account ? current.limits : null, error: null }));
     } catch (error) {
       // a sign-in that ended is none that just finished: one stored again later (another tab) adds nothing by itself
       if (error instanceof SignedOutError) {
@@ -814,6 +1100,20 @@ export function AccountSection({ onAccount, recheck = 0 }: {
     }
   });
   useEffect(() => { recheckAccount(); }, [offered, load, recheck]);
+  // the account's list moved (another device changed it, or a read brought it): the rows are read again from it
+  useEffect(() => {
+    const unfollow = pageAccountList()?.subscribe(() => { void load(); });
+    return () => unfollow?.();
+  }, [load]);
+  // a sign-out or a deleted account takes Manage account's sheet with it; a sign-in again for this account (to add or
+  // remove a way in) keeps it, so the step it asks for next shows where it was asked
+  // and another account shown here (a sign-in that ended as someone else) never gets the sheet without asking
+  const shownAccount = view.kind === "signed-in" ? view.account : null;
+  useEffect(() => {
+    if (view.kind === "signed-out" || (shownAccount !== null && managedAccount !== null && shownAccount !== managedAccount)) setManagedAccount(null);
+  }, [view.kind, shownAccount, managedAccount]);
+  /** the sheet is drawn for the account it was opened for, never while a search shows the rows on the page */
+  const managing = managedAccount !== null && shownAccount === managedAccount && !searching;
   useEffect(() => {
     const signedIn = view.kind === "signed-in" ? view : null;
     onAccount?.({ signedIn: signedIn !== null, account: signedIn?.account ?? null, pcs: signedIn?.pcs ?? null, provider: signedIn?.provider ?? null,
@@ -829,7 +1129,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
   const signedOut = view.kind === "signed-out";
   const [addsPc, setAddsPc] = useState(false);
   useEffect(() => {
-    if (!linkPage || !signedOut) return;
+    if (!(linkPage || ownRedirect) || !signedOut) return;
     let live = true;
     /** whether this PC is in no account and this browser drives it; null until both were read */
     let addable: boolean | null = null;
@@ -852,7 +1152,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
     read();
     const timer = setInterval(read, ADDED_POLL_MS);
     return () => { live = false; clearInterval(timer); };
-  }, [linkPage, signedOut, recheck]);
+  }, [linkPage, ownRedirect, signedOut, recheck]);
 
   if (!offered) return null;
 
@@ -874,7 +1174,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
       case "unsupported": return t("This account service can't sign in a browser on this PC yet.");
       case "in_use": return name === null
         ? t("This sign-in already belongs to another Ovis account. Nothing was changed.")
-        : t("This {provider} sign-in already belongs to another Ovis account. Nothing was changed.", { provider: name });
+        : t("This {provider} account is linked to another Ovis account. Take {provider} off that account first, then you can add it here.", { provider: name });
       case "no_sign_in": return t("The sign-in did not finish. Try again.");
     }
   };
@@ -886,7 +1186,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
     setView({ kind: "device-code", provider, userCode: null, verificationUri: "", verificationUriComplete: null });
     startedProvider.current = null;
     return (async () => {
-      const requester = { label: deviceLabel(navigator.userAgent, navigator.maxTouchPoints ?? 0), os: deviceOs(navigator.userAgent, navigator.maxTouchPoints ?? 0) };
+      const requester = { label: thisDeviceLabel(), os: deviceOs(navigator.userAgent, navigator.maxTouchPoints ?? 0) };
       const started = provider === "ovis"
         ? await startLinkPageSignIn({ service: pcServiceOrigin, store, requester }, offer?.device[0] ?? "github")
         : await startDeviceSignIn({ service: pcServiceOrigin, store, provider, requester });
@@ -906,6 +1206,21 @@ export function AccountSection({ onAccount, recheck = 0 }: {
   const runSignIn = (provider: AccountProvider, viaLinkPage = linkPage, store: AccountStore = indexedAccountStore): Promise<AccountSession> | null => {
     if (bridge !== null) return desktopSignIn(provider, bridge, store);
     if (pcService === null) return null;
+    if (ownRedirect) {
+      cancelDeviceSignIn();
+      const controller = new AbortController();
+      deviceSignIn.current = controller;
+      setView({ kind: "signing-in" });
+      // held back until it is known not to be cancelled: a sign-in finished after Cancel is never kept
+      return ownWindowSignIn(provider, { service: pcService, redirect: ownRedirect, store: holdingSessionStore(store), signal: controller.signal, blocked: (link) => setView({ kind: "signing-in", link }) })
+        .then(async (session) => {
+          let kept = false;
+          await store.update("session", (current) => { if (controller.signal.aborted) return current; kept = true; return session; });
+          if (!kept) throw new DOMException("The sign-in was cancelled", "AbortError");
+          return session;
+        })
+        .finally(() => { if (deviceSignIn.current === controller) deviceSignIn.current = null; });
+    }
     if (viaLinkPage) return signInWithCode(pcService, "ovis", store);
     return isDeviceProvider(provider) ? signInWithCode(pcService, provider, store) : null;
   };
@@ -943,19 +1258,20 @@ export function AccountSection({ onAccount, recheck = 0 }: {
   const addMethod = (provider: AccountProvider): void => {
     if (bridge === null) return;
     setView({ kind: "signing-in" });
-    new AccountService({ store: indexedAccountStore }).addMethod(provider, (linkToken, bearer) => desktopSignIn(provider, bridge, indexedAccountStore, { linkToken, bearer }))
+    indexedAccountService.addMethod(provider, (linkToken, bearer) => desktopSignIn(provider, bridge, indexedAccountStore, { linkToken, bearer }))
       .then(() => load(), async (error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         console.warn("Ovis: the sign-in method was not added", error instanceof SignInError || error instanceof AccountServiceError ? error.code : error instanceof Error ? error.name : error);
         await load();
         if (needsReauth(error)) { setReauth({ action: "add", provider }); return; }
         const message = failureText(error, provider);
+        setInUseShown(error instanceof SignInError && error.code === "in_use" ? message : null);
         setView((current) => current.kind === "signed-in" ? { ...current, error: message } : current);
       });
   };
 
   const removeMethod = (provider: AccountProvider): void => {
-    new AccountService({ store: indexedAccountStore }).removeIdentity(provider).then(() => load(), (error: unknown) => {
+    indexedAccountService.removeIdentity(provider).then(() => load(), (error: unknown) => {
       console.warn("Ovis: the sign-in method was not removed", error instanceof AccountServiceError ? error.code : error instanceof Error ? error.name : error);
       if (needsReauth(error)) { setReauth({ action: "remove", provider }); return; }
       const message = error instanceof AccountServiceError && error.code === "last_identity"
@@ -1007,7 +1323,10 @@ export function AccountSection({ onAccount, recheck = 0 }: {
   const askDelete = (): void => {
     if (deleteOut !== null) return;
     setReauth(null);
-    void new AccountService({ store: indexedAccountStore }).session().then((session) => {
+    setDeleteFailed(null);
+    const ask = ++deleteAsks.current;
+    void indexedAccountService.session().then((session) => {
+      if (ask !== deleteAsks.current) return;
       // another tab signed out, or in as someone else: the section reads what is stored now instead of asking
       if (session === undefined || view.kind !== "signed-in" || session.account !== view.account) { void load(); return; }
       setDeleteAsked(session);
@@ -1031,7 +1350,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
   const runDelete = (mine: Deletion, session: AccountSession): void => {
     setDeleteAsked(null);
     setDeleteOut(mine);
-    const service = new AccountService({ store: indexedAccountStore });
+    const service = indexedAccountService;
     void deleteAccount({ service, accountStore: indexedAccountStore, session }).finally(() => {
       setDeleteOut((out) => out === mine ? null : out);
     }).then(() => {
@@ -1056,22 +1375,87 @@ export function AccountSection({ onAccount, recheck = 0 }: {
       if (needsReauth(error)) { setReauth({ action: "delete", provider: session.provider, deletion: mine }); return; }
       deletion.current = null;
       if (error instanceof SignedOutError) { void load(); return; }
-      const message = error instanceof AccountServiceError && error.code === "subscription_active"
-        ? t("Cancel your subscription first, then delete the account.") : t("The account could not be deleted. Try again.");
-      setView((current) => current.kind === "signed-in" ? { ...current, error: message } : current);
+      setDeleteFailed({ account: session.account, message: error instanceof AccountServiceError && error.code === "subscription_active"
+        ? t("Cancel your subscription first, then delete the account.") : t("The account could not be deleted. Try again.") });
     });
   };
 
+  // S32-1: a block that has not reached the account is sent only by a later sign-in to it, so a sign-out asks first while
+  // any waits, or while that cannot be read (the queue itself stays either way).
+  // The question belongs to the sign-in that asked: a switch to another one voids it.
+  // A final refusal (`refused`, by record id) is said before the sign-out, and leaves the store once said.
+  const [unsentAsked, setUnsentAsked] = useState<{ readonly session: AccountSession; readonly state: "waiting" | "unknown" | "retry" | "refused"; readonly refused?: readonly string[] } | null>(null);
+  /** Says the final refusals `entries` hold, if any; whether there were. */
+  const sayRefused = (session: AccountSession, entries: readonly UnsentBlocks[]): boolean => {
+    const refused = entries.filter((entry) => entry.refused === true).flatMap((entry) => entry.records.map((record) => record.id));
+    if (refused.length > 0) setUnsentAsked({ session, state: "refused", refused });
+    return refused.length > 0;
+  };
   const signOut = (): void => {
+    void indexedAccountStore.get("session").then(async (session) => {
+      if (session === undefined) { endSignIn(); return; }
+      let entries: UnsentBlocks[];
+      try { entries = await unsentBlocks(indexedAccountStore, session); }
+      catch (error) {
+        console.warn("Ovis: the unsent blocks could not be read", error instanceof Error ? error.name : error);
+        setUnsentAsked({ session, state: "unknown" });
+        return;
+      }
+      if (entries.some((entry) => entry.refused !== true)) setUnsentAsked({ session, state: "waiting" });
+      else if (!sayRefused(session, entries)) endSignIn(session);
+    }, () => endSignIn());
+  };
+  /** The asking sign-in, while it is still the stored one; otherwise the question goes and nothing happens. */
+  const stillAsking = async (): Promise<AccountSession | null> => {
+    const asking = unsentAsked?.session;
+    const stored = await indexedAccountStore.get("session");
+    if (asking === undefined || stored === undefined || !sameSignIn(asking, stored)) { setUnsentAsked(null); return null; }
+    return asking;
+  };
+  const sendUnsentThenSignOut = async (): Promise<void> => {
+    const session = await stillAsking();
+    if (session === null) return;
+    const service = indexedAccountService.forSignIn(session);
+    // asked right before each send, after any token refresh, as Not me's Try again asks
+    const ready = () => { if (withdrawn?.() === true) throw new RangeError("This PC does not offer account block delivery"); };
+    let entries: UnsentBlocks[];
+    try {
+      for (const entry of await unsentBlocks(indexedAccountStore, session)) {
+        if (entry.refused !== true) await postKept(indexedAccountStore, session, entry.records, (record) => service.postSafetyRecord(record, ready));
+      }
+      entries = await unsentBlocks(indexedAccountStore, session);
+    } catch (error) {
+      console.warn("Ovis: the account service did not confirm the block", error instanceof Error ? error.name : error);
+      if (await stillAsking() !== null) setUnsentAsked({ session, state: "retry" });
+      return;
+    }
+    // signed out or switched while it went: its answer is said at that account's next sign-in, not here
+    if (await stillAsking() === null) return;
+    // a final refusal, this send's or an earlier one's, is said; the person decides whether to sign out anyway
+    if (!sayRefused(session, entries)) endSignIn(session);
+  };
+  const checkAgain = async (): Promise<void> => {
+    if (await stillAsking() === null) return;
+    setUnsentAsked(null);
+    signOut();
+  };
+  const signOutAnyway = async (): Promise<void> => {
+    const session = await stillAsking();
+    if (session !== null) endSignIn(session);
+  };
+  /** Ends `asked`'s sign-in (the stored one when none is named): another sign-in that took its place stays. */
+  const endSignIn = (asked?: AccountSession): void => {
+    setUnsentAsked(null);
     deletion.current = null;
     setDeleteAsked(null);
+    setDeleteFailed(null);
     setReauth(null);
     cancelDeviceSignIn();
     // a PC that waited to be added under this sign-in waits no longer under the next one
     keepAddPcWaiting(null);
     signedInHere.current = null;
     loads.current++;
-    void new AccountService({ store: indexedAccountStore }).signOut()
+    void (asked === undefined ? indexedAccountService : indexedAccountService.forSignIn(asked)).signOut()
       .catch((error: unknown) => console.warn("Ovis: the account service did not confirm the sign-out", error instanceof Error ? error.name : error))
       .finally(() => setView({ kind: "signed-out", error: null }));
   };
@@ -1081,7 +1465,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
 
   const signInParts = (
     <>
-      {view.kind === "signed-out" && (
+      {view.kind === "signed-out" && ownRedirect !== undefined && (
         <div className="settings-item" data-offer={offer === null ? "build" : "service"}>
           {linkPage
             ? (
@@ -1091,10 +1475,24 @@ export function AccountSection({ onAccount, recheck = 0 }: {
                 {view.error !== null && <p className="account-error" role="alert">{view.error}</p>}
               </div>
             )
-            : <AccountSignIn onSignIn={(provider) => signIn(provider)} error={view.error} notice={view.notice ?? null} providers={providers} />}
+            : (
+              <>
+                {ownRedirect && addsPc && <p className="settings-description">{t("Signing in adds this PC to your account.")}</p>}
+                <AccountSignIn onSignIn={(provider) => signIn(provider, Boolean(ownRedirect) && addsPc)} error={view.error} notice={view.notice ?? null} providers={providers} />
+              </>
+            )}
         </div>
       )}
-      {view.kind === "signing-in" && <SettingsRow label={t("Signing in…")} description={t("Finish signing in in your browser.")}>{null}</SettingsRow>}
+      {view.kind === "signing-in" && (
+        <SettingsRow label={t("Signing in…")} description={t("Finish signing in in your browser.")}>
+          {ownRedirect ? (
+            <>
+              {view.link !== undefined && <ExternalLink kind="sign-in" className="btn btn-primary" href={view.link}>{t("Open the sign-in page")}</ExternalLink>}
+              <button type="button" className="btn" onClick={() => { cancelDeviceSignIn(); void load(); }}>{t("Cancel")}</button>
+            </>
+          ) : null}
+        </SettingsRow>
+      )}
       {view.kind === "device-code" && (
         <div className="settings-item account-device">
           {view.userCode === null
@@ -1102,7 +1500,7 @@ export function AccountSection({ onAccount, recheck = 0 }: {
             : view.provider === "ovis"
               ? (
                 <>
-                  <p className="settings-description">{t("On any device, open {address} and enter this code, then continue with GitHub or Google. Enter it only if you started this sign-in on this page.", { address: linkAddress(view.verificationUri) })}</p>
+                  <p className="settings-description">{t("On any device, open {address} and enter this code, then continue with {providers}. Enter it only if you started this sign-in on this page.", { address: linkAddress(view.verificationUri), providers: providerChoice(currentLocale(), offer !== null && offer.page.length > 0 ? offer.page : offer?.device ?? ["github"]) })}</p>
                   {view.verificationUriComplete !== null && <QrCode value={view.verificationUriComplete} label={t("QR code of the sign-in page with this code filled in")} />}
                   <output className="account-device-code" aria-live="polite">{view.userCode}</output>
                   <p className="settings-description" role="status">{t("Waiting for the sign-in…")}</p>
@@ -1128,87 +1526,139 @@ export function AccountSection({ onAccount, recheck = 0 }: {
     </>
   );
 
+  const whereToDelete = t("To delete your account, use the Ovis phone app, the desktop app or app.ovis.sh.");
+  const deleteSays = asked !== null
+    ? <span role="status" data-testid="delete-account-says">{t("This deletes your Ovis account for good: your sign-in methods, your list of PCs and your plan. It cannot be undone. Devices stay paired with your PCs until you revoke them on each PC. A subscription that still renews has to be cancelled first.")}</span>
+    : null;
+  const deleteActions = (
+    <>
+      <button type="button" className={asked !== null ? "btn btn-danger" : searching ? "btn" : "account-delete-link"} data-action="delete-account" data-confirm={asked !== null ? "delete-account" : undefined}
+        disabled={deleteOut !== null} aria-busy={deleteOut !== null ? "true" : undefined}
+        onClick={() => { if (asked !== null) confirmDelete(asked); else askDelete(); }}>{asked !== null ? t("Delete account for good?") : t("Delete account")}</button>
+      {asked !== null && <button type="button" className="btn btn-ghost" onClick={() => setDeleteAsked(null)}>{t("Cancel")}</button>}
+    </>
+  );
+  const plan = view.kind === "signed-in" && view.limits !== null ? formatAccountLimits(t, view.limits, view.pcs?.filter((pc) => pc.listed).length ?? 0) : null;
+  const deleteRefused = view.kind === "signed-in" && deleteFailed?.account === view.account ? deleteFailed.message : null;
+  const deleteParts = view.kind === "signed-in" && (
+    <>
+      {/* A PC's own page in a browser signs in with a device code or the link page, whose sign-in the service never lets
+          delete the account (web_sign_in_required): it says where to delete instead. */}
+      {searching
+        ? bridge === null
+          ? <SettingsRow label={t("Delete account")} description={whereToDelete}>{null}</SettingsRow>
+          : <SettingsRow label={t("Delete account")} description={deleteSays ?? undefined}>{deleteActions}</SettingsRow>
+        : bridge === null
+          ? (
+            <details className="settings-item account-delete">
+              <summary className="account-delete-link">{t("Delete account")}</summary>
+              <p className="settings-description">{whereToDelete}</p>
+            </details>
+          )
+          : (
+            <div className="settings-item account-delete">
+              {deleteSays !== null && <p className="settings-description">{deleteSays}</p>}
+              <div className="account-delete-actions">{deleteActions}</div>
+            </div>
+          )}
+      {deleteRefused !== null && <p className="settings-condition" role="alert">{deleteRefused}</p>}
+      {reauthShown?.action === "delete" && (
+        <div className="settings-item account-reauth" role="alert">
+          <p className="settings-description">{t("To delete your account, sign in again with {provider} first.", { provider: PROVIDER_NAMES[view.provider] })}</p>
+          <button type="button" className="btn btn-primary" onClick={signInAgain}>{t("Sign in again")}</button>
+        </div>
+      )}
+    </>
+  );
+
+  const errorLine = view.kind === "signed-in" && view.error !== null && <p className="settings-condition" role="alert">{view.error}{view.error === inUseShown && <> <ExternalLink kind="link" className="settings-link" href={IN_USE_HELP}>{t("See how")}</ExternalLink></>}</p>;
+  const methodsPart = view.kind === "signed-in" && view.methods !== null && (
+    <div className="settings-item account-methods">
+      <div className="account-method-row" title={bridge === null ? t("Add another way to sign in from the Ovis desktop app.") : undefined}>
+        <span className="settings-label">{t("Ways to sign in")}{bridge === null && <span className="visually-hidden"> {t("Add another way to sign in from the Ovis desktop app.")}</span>}</span>
+        <ul className="account-method-list">
+          {view.methods.map((method) => (
+            <li key={method.provider} className="account-method account-chip" data-provider={method.provider} title={PROVIDER_NAMES[method.provider]}>
+              <ProviderMark provider={method.provider} />
+              <span className="visually-hidden">{t("{provider}, connected", { provider: PROVIDER_NAMES[method.provider] })}</span>
+              <Check className="account-chip-icon" aria-hidden="true" />
+              {/* the method this device signed in with stays: removing it would end this sign-in. */}
+              {view.methods !== null && view.methods.length > 1 && method.provider !== view.provider && (
+                <button type="button" className="account-chip-remove" title={t("Remove {provider}", { provider: PROVIDER_NAMES[method.provider] })} onClick={() => removeMethod(method.provider)}>
+                  <X aria-hidden="true" /><span className="visually-hidden">{t("Remove {provider}", { provider: PROVIDER_NAMES[method.provider] })}</span>
+                </button>
+              )}
+            </li>
+          ))}
+          {unlinked.map((provider) => (
+            <li key={provider}>
+              <button type="button" className="account-chip account-chip-add" data-provider={provider} title={t("Add {provider}", { provider: PROVIDER_NAMES[provider] })} onClick={() => addMethod(provider)}>
+                <Plus className="account-chip-icon" aria-hidden="true" /><ProviderMark provider={provider} />
+                <span className="visually-hidden">{t("Add {provider}", { provider: PROVIDER_NAMES[provider] })}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      {reauthShown !== null && reauthShown.action !== "delete" && (
+        <div className="account-reauth" role="alert">
+          <p className="settings-description">{bridge === null
+              // a sign-in again stays with this account's provider, at its own device page, never the link page's choice
+              ? t("To change how you sign in, sign in again with {provider} on its own sign-in page first.", { provider: PROVIDER_NAMES[view.provider] })
+              : t("To change how you sign in, sign in again with {provider} first.", { provider: PROVIDER_NAMES[view.provider] })}</p>
+          {(bridge !== null || isDeviceProvider(view.provider)) && <button type="button" className="btn btn-primary" onClick={signInAgain}>{t("Sign in again")}</button>}
+        </div>
+      )}
+    </div>
+  );
+
+  // signed out where the relay tab signs in: no card here, only why the last sign-in ended
+  if (signInElsewhere && !unreachable && (view.kind === "loading" || view.kind === "signed-out")) {
+    const said = view.kind === "signed-out" ? view.error ?? view.notice ?? null : null;
+    return said === null ? null : <p className="settings-item settings-hint" role="status">{said}</p>;
+  }
+
   return (
-    <SettingsGroup title={t("Account")} section="account" keepNote note={view.kind === "signed-out" ? t("Sign in to use this PC from your phone and your other PCs.|account group") : undefined}>
+    <SettingsGroup {...(view.kind === "signed-in" ? {} : { title: t("Account") })} section="account" keepNote note={view.kind === "signed-out" ? t("Sign in to use this PC from your phone and your other PCs.|account group") : undefined}>
       {signInParts}
       {view.kind === "signed-in" && (
         <>
-          {/* which account: the service keeps no login or email, so its id names it, whole in the tooltip (G-106) */}
-          <SettingsRow label={t("Signed in with {provider}", { provider: PROVIDER_NAMES[view.provider] })}
-            description={<span title={view.account}>{t("Account")} <code className="account-id">{view.account.length > 12 ? `${view.account.slice(0, 12)}…` : view.account}</code></span>}>
-            <button type="button" className="btn" onClick={signOut}>{t("Sign out of {provider}", { provider: PROVIDER_NAMES[view.provider] })}</button>
-          </SettingsRow>
-          {view.limits !== null && (() => {
-            const listed = view.pcs?.filter((pc) => pc.listed).length ?? 0;
-            const { label, summary } = formatAccountLimits(t, view.limits, listed);
-            return (
-              <div className="settings-row account-limits-row" data-testid="account-limits-row">
-                <span className="settings-label">{label}</span>
-                <span className="settings-fact account-limits-summary">{summary}</span>
-              </div>
-            );
-          })()}
-          {view.methods !== null && (
-            <div className="settings-item account-methods">
-              <p className="settings-label">{t("Ways to sign in")}</p>
-              <ul className="account-method-list">
-                {view.methods.map((method) => (
-                  <li key={method.provider} className="account-method" data-provider={method.provider}>
-                    <ProviderMark provider={method.provider} />
-                    <span className="account-method-text">
-                      <span>{PROVIDER_NAMES[method.provider]}</span>
-                      <span className="settings-description">{t("Added {date}", { date: new Date(method.added_at).toLocaleDateString(currentLocale()) })}</span>
-                    </span>
-                    {/* the method this device signed in with stays: removing it would end this sign-in. */}
-                    {view.methods !== null && view.methods.length > 1 && method.provider !== view.provider && (
-                      <button type="button" className="btn" onClick={() => removeMethod(method.provider)}>{t("Remove {provider}", { provider: PROVIDER_NAMES[method.provider] })}</button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-              {reauthShown !== null && reauthShown.action !== "delete" && (
-                <div className="account-reauth" role="alert">
-                  <p className="settings-description">{bridge === null
-                      // a sign-in again stays with this account's provider, at its own device page, never the link page's choice
-                      ? t("To change how you sign in, sign in again with {provider} on its own sign-in page first.", { provider: PROVIDER_NAMES[view.provider] })
-                      : t("To change how you sign in, sign in again with {provider} first.", { provider: PROVIDER_NAMES[view.provider] })}</p>
-                  {(bridge !== null || isDeviceProvider(view.provider)) && <button type="button" className="btn btn-primary" onClick={signInAgain}>{t("Sign in again")}</button>}
-                </div>
-              )}
-              {bridge === null && <p className="settings-description">{t("Add another way to sign in from the Ovis desktop app.")}</p>}
-              {unlinked.length > 0 && (
-                <div className="account-method-add">
-                  {unlinked.map((provider) => (
-                    <button key={provider} type="button" className="btn" onClick={() => addMethod(provider)}>
-                      <ProviderMark provider={provider} />{t("Add {provider}", { provider: PROVIDER_NAMES[provider] })}
-                    </button>
-                  ))}
-                </div>
-              )}
+          {/* who is signed in, on one line: the account's id is shown nowhere (G-106) */}
+          <AccountHead provider={view.provider} plan={searching ? plan : null} onSignOut={signOut} {...(searching ? {} : { onManage: () => setManagedAccount(view.account) })} />
+          {/* the question is its own sign-in's: under another account's view it is not drawn */}
+          {unsentAsked !== null && unsentAsked.session.account === view.account && (
+            <div className="settings-item" role="status">
+              <p className="settings-hint">{unsentAsked.state === "unknown" ? t("Could not check whether a block still waits to reach the account.")
+                : unsentAsked.state === "waiting" ? t("A block has not reached the account yet.")
+                : unsentAsked.state === "refused" ? t("The block was refused. Block it again from this device.") : t("The block did not go through yet.")}</p>
+              {unsentAsked.state === "unknown" && <button type="button" className="btn" onClick={() => { void checkAgain(); }}>{t("Check again")}</button>}
+              {unsentAsked.state === "waiting" && <button type="button" className="btn" onClick={() => { void sendUnsentThenSignOut(); }}>{t("Send it now")}</button>}
+              {unsentAsked.state === "retry" && <button type="button" className="btn" onClick={() => { void sendUnsentThenSignOut(); }}>{t("Try again")}</button>}
+              <button type="button" className="btn" onClick={() => { void signOutAnyway(); }}>{t("Sign out anyway")}</button>
+              {/* the refused block leaves the queue only on its owner's OK (S32-1) */}
+              {unsentAsked.state === "refused" && unsentAsked.refused !== undefined && <button type="button" className="btn" onClick={() => {
+                const asked = unsentAsked;
+                void refusalShown(indexedAccountStore, asked.session.account, asked.refused ?? [])
+                  .then(() => setUnsentAsked((now) => now === asked ? null : now))
+                  .catch((error: unknown) => console.warn("Ovis: a shown refusal could not be cleared", error instanceof Error ? error.name : error));
+              }}>{t("OK")}</button>}
             </div>
           )}
-          <AddThisPc signedInHere={takeSignedInHere} onListed={() => { void load(); }} />
+          {/* while a search runs the account's rows are the group's own; otherwise they wait in Manage account's sheet */}
+          {searching && <>{methodsPart}{deleteParts}</>}
+          {managing && (
+            <ManageAccountSheet account={view.account} onClose={() => { setManagedAccount(null); deleteAsks.current++; setDeleteAsked(null); }}>
+              {methodsPart}
+              {plan !== null && <div className="settings-row account-plan-row"><span className="settings-label">{t("Plan|account plan")}</span><span className="account-plan">{plan}</span></div>}
+              <AccountManageLists key={view.account} account={view.account} watching={watching} />
+              {deleteParts}
+              {/* a change made in the sheet says why it failed in the sheet */}
+              {view.error !== null && errorLine}
+            </ManageAccountSheet>
+          )}
+          {!signInElsewhere && <AddThisPc signedInHere={takeSignedInHere} onListed={() => { void load(); }} signInAgain={signInAgainWith(bridge, service, ownRedirect)} {...(opensAll === undefined ? {} : { opensAll })} />}
           {view.pcs !== null && onAccount === undefined && <div className="settings-item"><AccountPcList pcs={view.pcs} /></div>}
-          {/* A PC's own page in a browser signs in with a device code or the link page, whose sign-in the service never lets
-              delete the account (web_sign_in_required): it says where to delete instead. */}
-          {bridge === null
-            ? <SettingsRow label={t("Delete account")} description={t("To delete your account, use the Ovis phone app, the desktop app or app.ovis.sh.")}>{null}</SettingsRow>
-            : <SettingsRow label={t("Delete account")}
-            description={asked !== null
-              ? <span role="status" data-testid="delete-account-says">{t("This deletes your Ovis account for good: your sign-in methods, your list of PCs and your plan. It cannot be undone. Devices stay paired with your PCs until you revoke them on each PC. A subscription that still renews has to be cancelled first.")}</span>
-              : t("Delete your Ovis account and everything the account service keeps for it.")}>
-            <button type="button" className={asked !== null ? "btn btn-danger" : "btn"} data-action="delete-account" data-confirm={asked !== null ? "delete-account" : undefined}
-              disabled={deleteOut !== null} aria-busy={deleteOut !== null ? "true" : undefined}
-              onClick={() => { if (asked !== null) confirmDelete(asked); else askDelete(); }}>{asked !== null ? t("Delete account for good?") : t("Delete account")}</button>
-            {asked !== null && <button type="button" className="btn btn-ghost" onClick={() => setDeleteAsked(null)}>{t("Cancel")}</button>}
-          </SettingsRow>}
-          {reauthShown?.action === "delete" && (
-            <div className="settings-item account-reauth" role="alert">
-              <p className="settings-description">{t("To delete your account, sign in again with {provider} first.", { provider: PROVIDER_NAMES[view.provider] })}</p>
-              <button type="button" className="btn btn-primary" onClick={signInAgain}>{t("Sign in again")}</button>
-            </div>
-          )}
-          {view.error !== null && <p className="settings-condition" role="alert">{view.error}</p>}
+          {view.error !== null && !managing && errorLine}
         </>
       )}
     </SettingsGroup>

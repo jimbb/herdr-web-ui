@@ -13,6 +13,12 @@ export const OUTPUT_JOIN_MAX_MS = 15_000;
  * Draining 192 KiB from the high to the low watermark takes 6 s at the join rate above.
  */
 export const OUTPUT_PAUSE_MAX_MS = 10_000;
+/**
+ * The same bound for a client that is the pane's only viewer: holding the pty paused then slows
+ * no one but itself, and a slow phone parsing a burst of wide text (Korean, emoji) still ACKs
+ * well past 10 s. It stays a fixed bound, so a client acknowledging a byte at a time still ends.
+ */
+export const OUTPUT_PAUSE_ALONE_MAX_MS = 60_000;
 
 /**
  * What a frame carrying `text` costs on the wire: JSON escapes every control byte, so an ESC
@@ -82,9 +88,10 @@ export class OutputWindow {
    * nothing to acknowledge can make no ACK progress, so another pane's backlog must not pause
    * or stop it (that pane's own window answers for it). The deadline is OUTPUT_STALL_MS plus
    * the time the oldest unacknowledged frame needs to cross a slow link: its ACK cannot come
-   * before then.
+   * before then. `alone`: no other client shares the pty, so a pause holds back no peer.
    */
-  check(buffered: number, now = Date.now(), large = 0): OutputVerdict {
+  check(buffered: number, now = Date.now(), large = 0, alone = false): OutputVerdict {
+    const pauseMax = alone ? OUTPUT_PAUSE_ALONE_MAX_MS : OUTPUT_PAUSE_MAX_MS;
     if (buffered >= OUTPUT_HARD_BYTES) return "stop";
     if (!this.blocked && (buffered < OUTPUT_HIGH_BYTES || this.pending <= OUTPUT_LOW_BYTES)) {
       this.stalledSince = undefined;
@@ -99,11 +106,11 @@ export class OutputWindow {
     this.pausingSince ??= now;
     if (large > 0) {
       this.stalledSince = undefined;
-      return now - this.pausingSince >= OUTPUT_PAUSE_MAX_MS ? "stop" : "pause";
+      return now - this.pausingSince >= pauseMax ? "stop" : "pause";
     }
     const oldest = this.inFlight[this.head];
     const deadline = OUTPUT_STALL_MS + (oldest ? Math.min(OUTPUT_JOIN_MAX_MS - OUTPUT_STALL_MS, crossingMs(oldest.wire)) : 0);
-    return now - this.stalledSince >= deadline || now - this.pausingSince >= OUTPUT_PAUSE_MAX_MS ? "stop" : "pause";
+    return now - this.stalledSince >= deadline || now - this.pausingSince >= pauseMax ? "stop" : "pause";
   }
 }
 
@@ -126,7 +133,15 @@ const INCOMPLETE_CSI = /^\x1b(\[[\x30-\x3f]*[\x20-\x2f]*)?$/;
  * request is passed on the same way, once: without it the joiner sends Ctrl+Enter as Enter.
  */
 export class ReplayBuffer {
-  private tail = "";
+  /**
+   * The tail as UTF-8 at `bytes[start, end)`: an append encodes only its own output and a cut
+   * decodes only what falls out: re-encoding a whole string tail on every append was the server's
+   * largest CPU cost under busy agents. The output arrives from a streaming TextDecoder, so the
+   * round trip loses nothing.
+   */
+  private bytes = Buffer.alloc(0);
+  private start = 0;
+  private end = 0;
   /** order matters: 1016l after 1006h leaves xterm's mouse encoding at the default */
   private readonly modes = new Map<string, "h" | "l">();
   private modifyOtherKeys = 0;
@@ -139,32 +154,54 @@ export class ReplayBuffer {
   constructor(private readonly limit: number) {}
 
   append(data: string): void {
-    const bytes = Buffer.from(this.tail + data);
-    let start = Math.max(0, bytes.length - this.limit);
-    while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
-    // never cut a control sequence in two: its switch would be lost to both halves
-    const escape = start > 0 ? bytes.lastIndexOf(0x1b, start - 1) : -1;
-    if (escape >= 0 && INCOMPLETE_CSI.test(bytes.subarray(escape, start).toString("latin1"))) start = escape;
-    if (start === 0) {
-      this.tail += data;
-      return;
+    const size = Buffer.byteLength(data);
+    if (this.end + size > this.bytes.length) {
+      // twice what is held: the next copy comes only after about as much output again
+      this.move(2 * (this.end - this.start + size));
     }
+    this.end += this.bytes.write(data, this.end);
+    const bytes = this.bytes;
+    let start = Math.max(this.start, this.end - this.limit);
+    while (start < this.end && (bytes[start]! & 0xc0) === 0x80) start++;
+    // never cut a control sequence in two: its switch would be lost to both halves
+    const escape = start > this.start ? bytes.subarray(this.start, start).lastIndexOf(0x1b) : -1;
+    if (escape >= 0 && INCOMPLETE_CSI.test(bytes.toString("latin1", this.start + escape, start))) start = this.start + escape;
+    if (start === this.start) return;
     this.truncated = true;
-    const cut = bytes.subarray(0, start).toString("utf8");
+    const cut = bytes.toString("utf8", this.start, start);
     for (const [, params, state] of cut.matchAll(PRIVATE_MODES)) {
       for (const mode of params!.split(";").filter(Boolean)) {
+        // Never restore ?2026h across a cut (it would pair with a retained ?2026l to settle a partial screen),
+        // and never record an unmatched ?2026l (herdr-core's attach reset) on a stream that never used ?2026h.
+        if (mode === "2026") {
+          if (state === "h") {
+            this.modes.delete(mode);
+            this.modes.set(mode, "l");
+          }
+          continue;
+        }
         this.modes.delete(mode);
         this.modes.set(mode, state as "h" | "l");
       }
     }
     for (const [, resource, level, final] of cut.matchAll(MODIFY_OTHER_KEYS)) this.modifyOtherKeys = resource && final === "m" ? Number(level || 0) : 0;
-    this.tail = bytes.subarray(start).toString("utf8");
+    this.start = start;
+    // a burst far past the limit grew the buffer for itself: keep only room for what is left
+    const kept = Math.max(this.limit, this.end - this.start);
+    if (this.bytes.length > 4 * kept) this.move(2 * kept);
+  }
+
+  private move(capacity: number): void {
+    const next = Buffer.allocUnsafe(capacity);
+    this.end = this.bytes.copy(next, 0, this.start, this.end);
+    this.start = 0;
+    this.bytes = next;
   }
 
   text(): string {
-    if (!this.tail) return "";
+    if (this.start === this.end) return "";
     const keys = this.modifyOtherKeys > 0 ? `\x1b[>4;${this.modifyOtherKeys}m` : "";
-    return [...this.modes].map(([mode, state]) => `\x1b[?${mode}${state}`).join("") + keys + this.tail;
+    return [...this.modes].map(([mode, state]) => `\x1b[?${mode}${state}`).join("") + keys + this.recent;
   }
 
   get alternateScreen(): boolean {
@@ -172,6 +209,6 @@ export class ReplayBuffer {
   }
 
   get recent(): string {
-    return this.tail;
+    return this.bytes.toString("utf8", this.start, this.end);
   }
 }

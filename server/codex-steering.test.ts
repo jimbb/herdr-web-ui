@@ -167,6 +167,8 @@ describe("agy's queued messages", () => {
     expect(agySteeringPending(agyWorking.screen, "send this now")).toBe(true);
     expect(agySteeringPending(agy(["▸ Now run `sleep 40; echo five` as one tool call,...", "▸ LONGSTEER this is a... (alt+m to send immediately)"]),
       "LONGSTEER this is a deliberately long queued message")).toBe(true);
+    // a message that is an ellipsis itself, shown whole
+    expect(agySteeringPending(agy(["▸ ... (alt+m to send immediately)"]), "...")).toBe(true);
   });
 
   for (const [name, screen] of [
@@ -174,6 +176,13 @@ describe("agy's queued messages", () => {
     ["an earlier message under this one", agy(["▸ send this now", "▸ something else (alt+m to send immediately)"])],
     ["a hint quoted in the transcript", `▸ send this now (alt+m to send immediately)\nmore output\n${BAR}\n>\n${BAR}\n`],
     ["no queue", agy(["▸ Thought for 8s, 146 tokens"])],
+    // cut to nothing on a narrow pane: it could be any message, an earlier one too
+    ["a row cut to its dots alone", agy(["▸ ... (alt+m to send immediately)"])],
+    ["a row cut to its ellipsis alone", agy(["▸ … (alt+m to send immediately)"])],
+    // alt+m is agy's "send with the opposite Queued Messages setting": it would send a draft in the box at once too
+    ["a draft in the input box", agy(["▸ send this now (alt+m to send immediately)"]).replace("\n>\n", "\n> half a thought\n")],
+    ["a draft over two rows", agy(["▸ send this now (alt+m to send immediately)"]).replace("\n>\n", "\n> half\n  a thought\n")],
+    ["a picker's row in place of the input box", agy(["▸ send this now (alt+m to send immediately)"]).replace("\n>\n", "\n> Yes, I trust this folder\n")],
   ] as const) it(`ignores ${name}`, () => expect(agySteeringPending(screen, "send this now")).toBe(false));
 
   it("sends it now with alt+m, joining the turn at work rather than restarting it", async () => {
@@ -189,7 +198,16 @@ describe("agy's queued messages", () => {
 
   it("never presses alt+m for an ordinary Send or one Codex's panel would take", async () => {
     const f = fixture([agyWorking]); await interruptCodexSteering(false, "send this now", agyWorking, f.io);
-    await expect(interruptCodexSteering(true, "send this now", working, fixture([agyWorking]).io)).rejects.toThrow("not confirmed");
+    const codex = fixture([agyWorking]);
+    await expect(interruptCodexSteering(true, "send this now", working, codex.io)).rejects.toThrow("not confirmed");
+    expect(f.effects).toEqual([]);
+    expect(codex.effects).toEqual([]);
+  });
+
+  // an agent's name is whatever its pane reports (agent-identity.ts reportedAgent): one that names an Object property is no agent here
+  for (const agent of ["constructor", "toString", "__proto__"]) it(`presses nothing, and fails nothing, for an agent named ${agent}`, async () => {
+    const f = fixture([{ ...agyWorking, agent }]);
+    await interruptCodexSteering(true, "send this now", { ...agyWorking, agent }, f.io);
     expect(f.effects).toEqual([]);
   });
 });

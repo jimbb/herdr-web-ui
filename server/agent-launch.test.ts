@@ -6,8 +6,11 @@ import { dirname, join } from "node:path";
 
 import * as herdr from "./herdr/client.ts";
 import * as runtime from "./herdr-core/runtime.ts";
+import * as served from "./runtime/capabilities.ts";
 import * as shellAgent from "./shell-agent.ts";
-import { agentLaunch, dshEffortArgs } from "./agent-launch.ts";
+import { agentLaunch, dshEffortArgs, readBrowserToolSetting, useApprovalHub } from "./agent-launch.ts";
+import { ApprovalHub, type ApprovalAdapter } from "./approvals/hub.ts";
+import type { CodexServers } from "./approvals/codex.ts";
 import { launchedAgents } from "./launched-agents.ts";
 import { requestIdContext, wordHerdrFailures } from "./http.ts";
 
@@ -57,6 +60,58 @@ describe("agentLaunch", () => {
     const codex = ["--settings", ULTRACODE];
     expect((await launch("codex", codex, { platform: "win32", settingsDir: dir })).args).toBe(codex);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  it("gives a shell-started agent its hook from the approval hub as one herdr starts, at the version read", async () => {
+    const adapter = (kind: string): ApprovalAdapter => ({
+      kind, supports: (version) => version === "1.0.0", launchArgs: (args, hook) => [...args ?? [], "--hook", hook.command],
+      toCard: () => null, decision: () => null, toAnswer: () => "{}",
+    });
+    const hub = new ApprovalHub(join(dirname(settingsDir()), "h"), [adapter("omo"), adapter("hooked")], { relay: ["relay"] });
+    const asked: string[] = [];
+    useApprovalHub(hub, async (kind) => { asked.push(kind); return "1.0.0"; });
+    const shell = spyOn(shellAgent, "startShellAgent").mockImplementation(async () => null);
+    try {
+      expect(await agentLaunch(PANE, { kind: "omo", args: ["--x"] })).toEqual({ agent_started: true });
+      expect(shell.mock.calls[0]![2]).toEqual(["--x", "--hook", "relay"]);
+      expect((await launch("hooked", ["--y"], { platform: "linux", settingsDir: settingsDir() })).args).toEqual(["--y", "--hook", "relay"]);
+      expect(asked).toEqual(["omo", "hooked"]);
+    } finally {
+      shell.mockRestore();
+      useApprovalHub(null);
+      hub.stop();
+    }
+  });
+
+  it("starts a Codex through its launcher where the runtime runs one, and drops the launcher of a start that failed", async () => {
+    const launches: { paneId: string; args: readonly string[] | undefined; version: string | null }[] = [];
+    const abandoned: string[] = [];
+    const codex = {
+      launch: (paneId: string, args: readonly string[] | undefined, version: string | null) => { launches.push({ paneId, args, version }); return "/tmp/ovis-codex-x/launch"; },
+      abandon: (paneId: string, program: string) => { abandoned.push(`${paneId} ${program}`); },
+    } as unknown as CodexServers;
+    const hub = new ApprovalHub(join(dirname(settingsDir()), "h"), []);
+    useApprovalHub(hub, async () => "0.171.0", codex);
+    const runtimeHere = spyOn(served, "capabilities").mockReturnValue(served.HERDR_CORE);
+    try {
+      expect(await launch("codex", ["--model", "m"], { platform: "linux", settingsDir: settingsDir() })).toMatchObject({ kind: "codex", args: ["--model", "m"], program: "/tmp/ovis-codex-x/launch" });
+      expect(launches).toEqual([{ paneId: PANE, args: ["--model", "m"], version: "0.171.0" }]);
+      starts.length = 0;
+      expect((await launch("codex", ["--model", "m"], { platform: "win32", settingsDir: settingsDir() })).program).toBeUndefined();
+      starts.length = 0;
+      const failing = spyOn(herdr, "agentStart").mockRejectedValue(new Error("no shell"));
+      try {
+        expect(await agentLaunch(PANE, { kind: "codex", name: "codex-1", args: [] }, undefined, undefined, { platform: "linux" })).toMatchObject({ agent_started: false });
+      } finally { failing.mockRestore(); }
+      expect(abandoned).toEqual([`${PANE} /tmp/ovis-codex-x/launch`]);
+      runtimeHere.mockReturnValue(served.HERDR);
+      expect((await launch("codex", ["--model", "m"], { platform: "linux", settingsDir: settingsDir() })).program).toBeUndefined();
+      expect(launches).toHaveLength(2);
+    } finally {
+      runtimeHere.mockRestore();
+      useApprovalHub(null);
+      hub.stop();
+    }
   });
 
   it("takes a dsh-tui launch's --effort off its command line, before -- only, and keeps only a level the check takes", () => {
@@ -232,6 +287,80 @@ describe("agentLaunch", () => {
       machine.mockRestore();
       typed.mockRestore();
     }
+  });
+});
+
+describe("an agent start with a browser tool chosen", () => {
+  const roots: string[] = [];
+  let stored: unknown = undefined;
+  afterEach(() => {
+    readBrowserToolSetting(() => undefined, "");
+    stored = undefined;
+    launchedAgents.forget(PANE);
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+  const toolsDir = (): string => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ovis-browser-tool-")));
+    roots.push(root);
+    readBrowserToolSetting(() => stored, join(root, "browser-tools"));
+    return join(root, "browser-tools");
+  };
+  const started = async (kind: string, args?: string[]) => {
+    const starts: Parameters<typeof herdr.agentStart>[0][] = [];
+    const start = spyOn(herdr, "agentStart").mockImplementation(async (params) => { starts.push(params); return {}; });
+    try {
+      expect(await agentLaunch(PANE, { kind, name: `${kind}-tool-test`, ...(args === undefined ? {} : { args }) }, undefined, undefined, { platform: "linux" })).toEqual({ agent_started: true });
+    } finally {
+      start.mockRestore();
+    }
+    return starts[0]!.args;
+  };
+
+  it("gives Claude Code the config file the PC wrote, and Codex its settings before the prompt", async () => {
+    const dir = toolsDir();
+    stored = { claude: "chrome-devtools", codex: "playwright" };
+    const claude = await started("claude", ["--effort", "high"]);
+    expect(claude).toEqual(["--effort", "high", "--mcp-config", join(dir, "claude-chrome-devtools.json")]);
+    expect(JSON.parse(readFileSync(claude![3]!, "utf8")).mcpServers["ovis-browser"].args).toEqual(["-y", "chrome-devtools-mcp@1.13.0", "--isolated"]);
+    const codex = await started("codex", ["--", "hello"]);
+    expect(codex![0]).toBe("-c");
+    expect(codex!.slice(-2)).toEqual(["--", "hello"]);
+    expect(codex!.join(" ")).toContain("@playwright/mcp@0.0.86");
+  });
+
+  it("replaces a link left at the config file's name instead of writing through it", async () => {
+    const dir = toolsDir();
+    stored = { claude: "playwright" };
+    mkdirSync(dir, { recursive: true });
+    const target = join(dirname(dir), "agent-own-settings.json");
+    writeFileSync(target, "{\"own\":true}");
+    fs.symlinkSync(target, join(dir, "claude-playwright.json"));
+    await started("claude");
+    expect(readFileSync(target, "utf8")).toBe("{\"own\":true}");
+    expect(fs.lstatSync(join(dir, "claude-playwright.json")).isSymbolicLink()).toBe(false);
+  });
+
+  it("adds nothing to an agent with none chosen, nor to one that takes none", async () => {
+    const dir = toolsDir();
+    stored = { codex: "playwright", grok: "playwright" };
+    expect(await started("claude", ["--effort", "high"])).toEqual(["--effort", "high"]);
+    expect(await started("claude")).toBeUndefined();
+    expect(await started("grok")).toBeUndefined();
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("adds no file-borne tool to an agent another machine of the core starts", async () => {
+    const dir = toolsDir();
+    stored = { copilot: "playwright" };
+    const machine = spyOn(runtime, "hcMachine").mockReturnValue({ name: "lab", id: "lab-id" });
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await started("copilot")).toBeUndefined();
+    } finally {
+      machine.mockRestore();
+      warn.mockRestore();
+    }
+    expect(existsSync(dir)).toBe(false);
   });
 });
 

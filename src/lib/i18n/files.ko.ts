@@ -4,7 +4,7 @@
  * components/TextFileView.tsx, components/TextFileEditor.tsx, components/FilePathLink.tsx, components/FilePanelResizer.tsx,
  * components/HighlightedCode.tsx, components/RepoDiffViewer.tsx, components/RepoChanges.tsx,
  * components/RepoDiff.tsx, lib/repoDiff.ts, lib/diffLineNotes.ts, components/WebPanel.tsx,
- * components/PullRequestPanel.tsx, lib/pullRequest.ts, components/MarkdownOutline.tsx.
+ * components/PullRequestPanel.tsx, lib/pullRequest.ts, components/MarkdownOutline.tsx, components/BrowserSidePanel.tsx.
  * Register and fixed terms follow ../i18n.ko.ts; a key another feature also uses goes there.
  */
 export const FILES_KO: Record<string, string> = {
@@ -18,8 +18,6 @@ export const FILES_KO: Record<string, string> = {
   "Show source": "소스 보기",
   "Resize file panel": "파일 패널 너비 조절",
   "Show beside the pane": "창 옆에 표시",
-  "Reload page": "페이지 새로고침",
-  "Close page": "페이지 닫기",
   "Show as a popup": "팝업으로 표시",
   "Close files": "파일 닫기",
   "Showing the first {shown} of {total}.": "전체 {total} 중 처음 {shown}만 보입니다.",
@@ -131,12 +129,10 @@ export const FILES_KO: Record<string, string> = {
   "Diff lines: the arrow keys pick a line, Enter adds a note on it": "변경 내용 줄: 화살표 키로 줄을 고르고, Enter로 메모를 추가합니다",
   "Note added. It goes first in the next message you send from this pane's Chat (not with a slash command, a ! line or an answer to a question).": "메모를 추가했습니다. 이 패널의 채팅에서 보내는 다음 메시지 맨 앞에 들어갑니다(슬래시 명령, ! 줄, 질문에 대한 답변에는 들어가지 않습니다).",
   "Pick a line to add a note.": "메모할 줄을 선택하세요.",
-  "Add a note": "메모 추가",
   "This note would make your next message too long. Shorten the note or the message, or remove a waiting comment.": "이 메모를 넣으면 다음 메시지가 너무 길어집니다. 메모나 메시지를 줄이거나, 대기 중인 코멘트를 지우세요.",
   "This note could not be saved on this device.": "이 기기에 메모를 저장할 수 없습니다.",
   "Note on {place}": "{place}에 단 메모",
   "What should the agent know about this line?": "이 줄에 대해 에이전트가 알아야 할 점은?",
-  "Note": "메모",
   "Add to next message": "다음 메시지에 추가",
   "Notes go to the pane this diff came from, and it has none.": "메모는 이 변경 내용을 연 패널로 가는데, 그 패널이 없습니다.",
   "The pane this diff came from has closed, so a note has nowhere to go.": "이 변경 내용을 연 패널이 닫혀서 메모를 보낼 곳이 없습니다.",
@@ -228,4 +224,18 @@ export const FILES_KO: Record<string, string> = {
   "Split": "나란히",
   "The text size of a file you open, in its preview and its source. It follows the chat font size until you set one here.": "열어 본 파일의 글자 크기입니다(미리보기와 소스 모두). 여기서 정하기 전까지는 채팅 글자 크기를 따릅니다.",
   "On a wide window, Browse files opens as a panel to the right of the pane and not as a popup. With Open files on Beside the pane, a file opened from the list takes its place, and closing the file brings the list back.": "넓은 창에서 파일 찾아보기를 팝업 대신 패널 오른쪽에 엽니다. 파일 열기가 '패널 옆에'이면 목록에서 연 파일이 그 자리에 보이고, 파일을 닫으면 목록이 돌아옵니다.",
+  "Browser panel": "브라우저 패널",
+  "Results": "결과물",
+  "Files the browser downloads, screenshots and published pages show here.": "브라우저가 받은 파일, 스크린샷, 게시된 페이지가 여기에 나옵니다.",
+  "Published page": "게시된 페이지",
+  "Tabs the agents use": "에이전트가 쓰는 탭",
+  "No agent is using a tab.": "탭을 쓰는 에이전트가 없습니다.",
+  "Screenshot": "스크린샷",
+  "Downloading…": "받는 중…",
+  "Show in folder": "폴더에서 보기",
+  "Close page": "페이지 닫기",
+  "You have control": "내가 제어 중",
+  "{agent} is using it": "{agent} · 쓰는 중",
+  "An agent is using it": "에이전트가 쓰는 중",
+  "Open {name}": "{name} 열기",
 };

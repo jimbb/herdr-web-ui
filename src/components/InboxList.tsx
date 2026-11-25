@@ -3,14 +3,14 @@ import { useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, u
 import { Ellipsis, FolderOpen, ListFilter, ListOrdered, Monitor, Plus, Search, Terminal, TriangleAlert, X } from "lucide-react";
 
 import type { QueueSnapshot } from "../../shared/agent-queue.ts";
-import type { Machine } from "../../shared/machines.ts";
+import { LOCAL_MACHINE, type Machine } from "../../shared/machines.ts";
 import type { AgentStatus } from "../../shared/protocol.ts";
 import { INBOX_FILTERS, inboxEmpty, inboxFiltered, inboxHeldEntries, inboxKey, inboxNesting, inboxQueue, inboxQueueSearched, inboxRoster, inboxSearched, inboxSections, inboxSinceAt, inboxStatus, inboxWords, plainWords, type InboxFilter } from "../lib/agentInbox.ts";
 import { inboxQueueState } from "../lib/agentQueue.ts";
 import { closePane as closeMachinePane, routeMissing } from "../lib/api.ts";
 import { agentGroup, type AgentRow } from "../lib/agentRoster.ts";
 import { stateSince } from "../lib/agentStateSince.ts";
-import type { HeaderConnection } from "../lib/headerConnection.ts";
+import { connectionWord as wordFor, type HeaderConnection } from "../lib/headerConnection.ts";
 import { useT, type Translate } from "../lib/i18n.ts";
 import { inboxAsks, inboxRowLine, inboxStateWord } from "../lib/inboxRow.ts";
 import { paneCloseNeedsConfirm, usePaneClose } from "../lib/paneClose.ts";
@@ -34,6 +34,8 @@ import { shownTabLabels, subscribeTabLabels } from "../lib/tabLabels.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { agentRowTitle, blockedNote, inboxRowTopic, stateAge } from "./AgentSidebar.tsx";
 import { InboxQueueRow } from "./InboxQueueRow.tsx";
+import { MachineHeader, useMachineFold } from "./MachineHeader.tsx";
+import { machineDotState, STATE_WORD } from "./MachineSidebar.tsx";
 import { PaneCloseConfirm } from "./PaneCloseConfirm.tsx";
 import { RowMenu } from "./RowMenu.tsx";
 import { compactWorktreeName, StatusBadge } from "./Sidebar.tsx";
@@ -265,7 +267,6 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   const searchOpen = !wide || searchAsked || query !== "";
   useLayoutEffect(() => { if (wide && searchAsked) search.current?.focus(); }, [wide, searchAsked]);
 
-  const severalPcs = machines.length > 1;
   const rows = shown.map((row) => {
     const { machine, entry } = row;
     const { pane, workspace, tab } = entry;
@@ -285,7 +286,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
     const summary = summaries.get(key);
     const failed = online && group === "done" && summary?.failed === true;
     const state = !online ? t("Offline") : failed ? t("Turn failed") : inboxStateWord(group, t);
-    const line = inboxRowLine({ online, group, words: wordsOf(row), place, machine: severalPcs ? machine.name : null, failed }, t);
+    const line = inboxRowLine({ online, group, words: wordsOf(row), place, failed }, t);
     return {
       key, machine, pane, online, status, group, title, topic, line, failed, mark: paneMark(entry) ?? "", kind, state,
       asks: online && inboxAsks(group), since: online ? inboxSinceAt(group, summary, group === "blocked" ? stateSince(stamps, machine.id, pane.pane_id, pane.terminal_id, "blocked") : null) : null,
@@ -388,7 +389,7 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   );
   // The connection's word, in the document before its words (lib/useAnnouncedText.ts) and drawn by nothing while there
   // is none: a phone's line, between its two top controls.
-  const connectionWord = useAnnouncedText(connection === null ? null : t(connection === "connected" ? "Connected" : "Reconnecting…"));
+  const connectionWord = useAnnouncedText(connection === null ? null : wordFor(connection, t));
   const connectionLine = <p className={connectionWord === null ? "visually-hidden" : "inbox-connection"} role="status">{connectionWord}</p>;
   const moreButton = more && (
     <button type="button" className="icon-button inbox-round inbox-more" aria-label={more.label} title={more.label}
@@ -398,6 +399,67 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
   );
 
   const rowIndexes = new Map(rows.map((row, index) => [row.key, index]));
+  const drawEntry = (entry: (typeof displayed)[number]) => {
+    if (entry.kind === "queue") return queue && <InboxQueueRow key={entry.key} entry={entry} popup={popup} watching={watching} busy={queueBusy} onOpen={queue.onOpen} onAction={runQueueAction} list={root} />;
+    const rowIndex = rowIndexes.get(entry.key)!;
+    const row = rows[rowIndex]!;
+    const open = wide && row.key === current;
+    const closeOffered = !watching && row.online && !paneLocked(row.machine.id, row.pane.pane_id);
+    const words = <span className="inbox-words" dir="auto">{row.line}</span>;
+    const age = row.since === null ? null : stateAge(now - row.since);
+    const at = row.since === null ? null : new Date(row.since);
+    const { depth = 0, parent } = nesting.get(row.key) ?? {};
+    const queueTag = queued.running.has(row.key) ? t("Queue") : null;
+    const startedBy = parent ? t("Started by {name}", { name: agentRowTitle(parent, false).title }) : null;
+    // what a screen reader hears for the row: who it is, how it is, what it says, then for how long
+    const spoken = [row.kind ? agentName(row.kind) : null, row.title, row.topic, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
+    return (
+      <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group} data-depth={Math.min(depth, 2) || undefined}>
+        <button type="button" className="inbox-row" disabled={!row.online} aria-label={spoken} aria-current={open ? "true" : undefined}
+          ref={(node) => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
+          title={wide ? [row.title, row.topic, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
+          onPointerDown={(event) => { if (event.button === 0 && row.online) pressPane?.(row.machine.id, row.pane.pane_id); }}
+          onClick={() => { tally(() => usageCounters.paneUse("inbox_open", row.machine.id)); onOpen(row.machine.id, row.pane.pane_id); }}>
+          <InboxAvatar mark={row.mark} />
+          <span className="inbox-body">
+            <span className="inbox-line">
+              <span className="inbox-name">{row.title}</span>
+              {queueTag !== null && <span className="inbox-queue-tag">{queueTag}</span>}
+              {!wide && at !== null && <time className="inbox-time" dateTime={at.toISOString()} title={at.toLocaleString(resolvedLanguage)}>{age}</time>}
+            </span>
+            {row.topic !== null && <span className="inbox-topic" dir="auto">{row.topic}</span>}
+            {wide ? words : <span className="inbox-sub">{words}{stateMark(row.status, row.failed, row.state)}</span>}
+          </span>
+          {wide && stateMark(row.status, row.failed, row.state)}
+        </button>
+        {closeOffered && (
+          <button type="button" className="icon-button inbox-close"
+            aria-label={t("Close {agent}", { agent: row.title })}
+            title={t("Close {agent}", { agent: row.title })}
+            onClick={(event) => {
+              if (event.detail > 1) return;
+              const after = rows.slice(rowIndex + 1).filter((candidate) => candidate.online).map((candidate) => candidate.key);
+              const before = rows.slice(0, rowIndex).reverse().filter((candidate) => candidate.online).map((candidate) => candidate.key);
+              const viaKeyboard = event.detail === 0 || (typeof event.currentTarget?.matches === "function" && event.currentTarget.matches(":focus-visible"));
+              // Focus the Close button before opening ConfirmDialog so Safari hands focus back on Cancel/Escape.
+              if (paneCloseNeedsConfirm(row.pane, row.machine.snapshot?.panes) && typeof event.currentTarget?.focus === "function") {
+                event.currentTarget.focus({ preventScroll: true });
+              }
+              pendingFocus.current.set(row.key, { neighbors: [...after, ...before], viaKeyboard });
+              tally(() => usageCounters.paneUse("close_pane_by_button", row.machine.id));
+              requestClose({ machineId: row.machine.id, pane: row.pane, panes: row.machine.snapshot?.panes, label: row.title });
+            }}>
+            <X aria-hidden="true" />
+          </button>
+        )}
+      </li>
+    );
+  };
+  // several PCs (when not grouped by project): each one's rows under its own header, in the PCs' order, as the sidebar draws them (MachineHeader.tsx)
+  const groups = !byProject && machines.length > 1 ? machines.flatMap((machine) => {
+    const own = displayed.filter((entry) => (entry.kind === "agent" ? entry.row.machine.id : LOCAL_MACHINE) === machine.id);
+    return own.length === 0 ? [] : [{ machine, entries: own }];
+  }) : null;
 
   return (
     <section className={`mode-inbox${wide ? " is-wide" : ""}`} aria-label={t("Agent inbox")} tabIndex={-1} ref={root}
@@ -451,89 +513,42 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
             </button>
           </div>
         ) : empty !== null ? <p className="inbox-empty" role="status">{empty.flatMap((line, at) => [...(at > 0 ? [" "] : []), <span key={line}>{line}</span>])}</p> : (
-          <ul className="inbox-rows" onPointerDown={holdAfterPress} onTouchEnd={holdAfterPress}
+          <div className="inbox-groups" onPointerDown={holdAfterPress} onTouchEnd={holdAfterPress}
             onFocus={(event) => setFocusIn(event.target.matches?.(":focus-visible") ?? false)} onBlur={(event) => { if (!(typeof Node === "function" && event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocusIn(false); }}>
-            {sections.flatMap(({ key, name, machineId, workspaceId, entries }) => [
-              ...(name === null ? [] : [
-                <li className="inbox-project" key={`project:${key}`}>
-                  <div className="inbox-project-info">
-                    <h2 dir="auto">{name}</h2>
-                    <span>{t("Agents: {agents} · Tasks: {tasks}", { agents: entries.filter((entry) => entry.kind === "agent").length, tasks: entries.filter((entry) => entry.kind === "queue").length })}</span>
-                  </div>
-                  {!watching && onNewTab !== undefined && machineId !== null && workspaceId !== null && onlineMachines.has(machineId) && (
-                    <button
-                      type="button"
-                      className="icon-button inbox-project-add"
-                      aria-label={t("New agent in {workspace}", { workspace: name })}
-                      title={t("New agent in {workspace}", { workspace: name })}
-                      onClick={() => {
-                        tally(() => usageCounters.paneUse("new_tab_by_button", machineId));
-                        onNewTab(machineId, workspaceId);
-                      }}
-                    >
-                      <Plus aria-hidden="true" />
-                    </button>
-                  )}
-                </li>,
-              ]),
-              ...entries.map((entry) => {
-              if (entry.kind === "queue") return queue && <InboxQueueRow key={entry.key} entry={entry} popup={popup} watching={watching} busy={queueBusy} onOpen={queue.onOpen} onAction={runQueueAction} list={root} />;
-              const rowIndex = rowIndexes.get(entry.key)!;
-              const row = rows[rowIndex]!;
-              const open = wide && row.key === current;
-              const closeOffered = !watching && row.online && !paneLocked(row.machine.id, row.pane.pane_id);
-              const words = <span className="inbox-words" dir="auto">{row.line}</span>;
-              const age = row.since === null ? null : stateAge(now - row.since);
-              const at = row.since === null ? null : new Date(row.since);
-              const { depth = 0, parent } = nesting.get(row.key) ?? {};
-              const queueTag = queued.running.has(row.key) ? t("Queue") : null;
-              const startedBy = parent ? t("Started by {name}", { name: agentRowTitle(parent, false).title }) : null;
-              // what a screen reader hears for the row: who it is, how it is, what it says, then for how long
-              const spoken = [row.kind ? agentName(row.kind) : null, row.title, row.topic, startedBy, queueTag, row.state, row.line === row.state ? null : row.line, age].filter((part) => part !== null).join(", ");
-              return (
-                <li key={row.key} ref={(node) => { if (node) itemNodes.current.set(row.key, node); else itemNodes.current.delete(row.key); }} className={`inbox-item${row.online ? "" : " is-offline"}${row.asks ? " is-asking" : ""}${open ? " is-current" : ""}`} data-machine={row.machine.id} data-pane={row.pane.pane_id} data-state={row.group} data-depth={Math.min(depth, 2) || undefined}>
-                  <button type="button" className="inbox-row" disabled={!row.online} aria-label={spoken} aria-current={open ? "true" : undefined}
-                    ref={(node) => { if (node) rowNodes.current.set(row.key, node); else rowNodes.current.delete(row.key); }}
-                    title={wide ? [row.title, row.topic, row.line, at === null ? null : `${age} · ${at.toLocaleString(resolvedLanguage)}`].filter((part) => part !== null).join("\n") : undefined}
-                    onPointerDown={(event) => { if (event.button === 0 && row.online) pressPane?.(row.machine.id, row.pane.pane_id); }}
-                    onClick={() => { tally(() => usageCounters.paneUse("inbox_open", row.machine.id)); onOpen(row.machine.id, row.pane.pane_id); }}>
-                    <InboxAvatar mark={row.mark} />
-                    <span className="inbox-body">
-                      <span className="inbox-line">
-                        <span className="inbox-name">{row.title}</span>
-                        {queueTag !== null && <span className="inbox-queue-tag">{queueTag}</span>}
-                        {!wide && at !== null && <time className="inbox-time" dateTime={at.toISOString()} title={at.toLocaleString(resolvedLanguage)}>{age}</time>}
-                      </span>
-                      {row.topic !== null && <span className="inbox-topic" dir="auto">{row.topic}</span>}
-                      {wide ? words : <span className="inbox-sub">{words}{stateMark(row.status, row.failed, row.state)}</span>}
-                    </span>
-                    {wide && stateMark(row.status, row.failed, row.state)}
-                  </button>
-                  {closeOffered && (
-                    <button type="button" className="icon-button inbox-close"
-                      aria-label={t("Close {agent}", { agent: row.title })}
-                      title={t("Close {agent}", { agent: row.title })}
-                      onClick={(event) => {
-                        if (event.detail > 1) return;
-                        const after = rows.slice(rowIndex + 1).filter((candidate) => candidate.online).map((candidate) => candidate.key);
-                        const before = rows.slice(0, rowIndex).reverse().filter((candidate) => candidate.online).map((candidate) => candidate.key);
-                        const viaKeyboard = event.detail === 0 || (typeof event.currentTarget?.matches === "function" && event.currentTarget.matches(":focus-visible"));
-                        // Focus the Close button before opening ConfirmDialog so Safari hands focus back on Cancel/Escape.
-                        if (paneCloseNeedsConfirm(row.pane, row.machine.snapshot?.panes) && typeof event.currentTarget?.focus === "function") {
-                          event.currentTarget.focus({ preventScroll: true });
-                        }
-                        pendingFocus.current.set(row.key, { neighbors: [...after, ...before], viaKeyboard });
-                        tally(() => usageCounters.paneUse("close_pane_by_button", row.machine.id));
-                        requestClose({ machineId: row.machine.id, pane: row.pane, panes: row.machine.snapshot?.panes, label: row.title });
-                      }}>
-                      <X aria-hidden="true" />
-                    </button>
-                  )}
-                </li>
-              );
-              }),
-            ])}
-          </ul>
+            {groups !== null ? groups.map((group) => (
+              <InboxMachineGroup key={group.machine.id} machine={group.machine} rows={group.entries.length}>
+                {group.entries.map(drawEntry)}
+              </InboxMachineGroup>
+            )) : (
+              <ul className="inbox-rows">
+                {sections.flatMap(({ key, name, machineId, workspaceId, entries }) => [
+                  ...(name === null ? [] : [
+                    <li className="inbox-project" key={`project:${key}`}>
+                      <div className="inbox-project-info">
+                        <h2 dir="auto">{name}</h2>
+                        <span>{t("Agents: {agents} · Tasks: {tasks}", { agents: entries.filter((entry) => entry.kind === "agent").length, tasks: entries.filter((entry) => entry.kind === "queue").length })}</span>
+                      </div>
+                      {!watching && onNewTab !== undefined && machineId !== null && workspaceId !== null && onlineMachines.has(machineId) && (
+                        <button
+                          type="button"
+                          className="icon-button inbox-project-add"
+                          aria-label={t("New agent in {workspace}", { workspace: name })}
+                          title={t("New agent in {workspace}", { workspace: name })}
+                          onClick={() => {
+                            tally(() => usageCounters.paneUse("new_tab_by_button", machineId));
+                            onNewTab(machineId, workspaceId);
+                          }}
+                        >
+                          <Plus aria-hidden="true" />
+                        </button>
+                      )}
+                    </li>,
+                  ]),
+                  ...entries.map(drawEntry),
+                ])}
+              </ul>
+            )}
+          </div>
         )}
       </div>
       {!wide && <div className="inbox-foot">
@@ -548,6 +563,21 @@ export function InboxList({ ref, machines, activity, watching, wide, filter, onF
           ...(value === "queued" ? { icon: ListOrdered } : value === "all" ? {} : { glyph: <span className="inbox-filter-mark" aria-hidden="true"><StatusBadge compact status={value} label={filterWord(value)} /></span> }),
         }))} />}
       <PaneCloseConfirm closing={closing} onClose={cancelClosing} onConfirm={confirmClosing} />
+    </section>
+  );
+}
+
+function InboxMachineGroup({ machine, rows, children }: { machine: Machine; rows: number; children: ReactNode }) {
+  const t = useT();
+  const compact = useSettings().settings.sidebarRows === "one";
+  const [folded, toggle] = useMachineFold(machine.id);
+  const online = machine.state === "connected";
+  return (
+    <section className={`machine-group inbox-machine${online ? "" : " is-offline"}${folded ? " is-folded" : ""}`} aria-label={t("PC {name}", { name: machine.name })}>
+      <MachineHeader machine={machine} folded={folded} onToggle={toggle} compact={compact}
+        agents={online ? { count: rows, words: rows === 1 ? t("1 agent") : t("{n} agents", { n: rows }) } : null}
+        dot={online ? null : { state: machineDotState(machine), title: t(STATE_WORD[machine.state]) }} />
+      {!folded && <ul className="inbox-rows">{children}</ul>}
     </section>
   );
 }

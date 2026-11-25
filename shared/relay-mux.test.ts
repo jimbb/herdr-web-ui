@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import {
   decodeFrame, encodeFrame, FrameType, HTTP_END_FLAGS, LIMITS_V1,
   MAX_FRAME_BYTES, MAX_LARGE_WS_MESSAGE_BYTES, MuxProtocolError, REQUEST_HEADERS, RESPONSE_HEADERS,
-  SESSION_ERRORS, STREAM_ERRORS, validateHeaders, validateTarget, WS_DATA_FLAGS,
+  KEY_PROOF_FEATURE, SESSION_ERRORS, STREAM_ERRORS, validateHeaders, validateTarget, WS_DATA_FLAGS,
   WS_CONTINUATION_CAPACITY, WS_START_CAPACITY,
 } from "./relay-mux.ts";
 import type { HeaderList, MuxFrame, SessionError } from "./relay-mux.ts";
@@ -70,8 +70,28 @@ describe("Mux frame roundtrip", () => {
     backing.set(encoded, 3);
     expect(decodeFrame(backing.subarray(3, 3 + encoded.length))).toEqual(frame);
   });
+  it("S25: a held refusal carries its hold state, and only a held refusal does", () => {
+    const holds = [{ reason: "join_hold", until: null }, { reason: "join_hold", until: "2026-11-20T05:00:10.000Z" }, { reason: "catching_up" }, { reason: "frozen", block: "b".repeat(64) }] as const;
+    for (const hold of holds) {
+      const frame: MuxFrame = { ...session, type: FrameType.SESSION_ERROR, payload: { code: "held", message: "", hold } };
+      expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
+    }
+    for (const code of ["not_listed", "admission"] as const) {
+      const frame: MuxFrame = { ...session, type: FrameType.SESSION_ERROR, payload: { code, message: "" } };
+      expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
+    }
+    for (const payload of [{ code: "held", message: "" }, { code: "held", message: "", hold: { reason: "soon" } }, { code: "not_listed", message: "", hold: { reason: "catching_up" } }, { code: "auth_failed", message: "", hold: { reason: "catching_up" } }]) {
+      rejects(() => decodeFrame(wire(FrameType.SESSION_ERROR, JSON.stringify(payload))));
+    }
+  });
+  it("S25: an app that predates a session error code takes it as a protocol error, its generic failure", () => {
+    expect(() => decodeFrame(wire(FrameType.SESSION_ERROR, JSON.stringify({ code: "a_code_from_a_later_release", message: "" })))).toThrow(MuxProtocolError);
+    try { decodeFrame(wire(FrameType.SESSION_ERROR, JSON.stringify({ code: "a_code_from_a_later_release", message: "" }))); } catch (error) {
+      expect((error as MuxProtocolError).code).toBe("protocol_error");
+    }
+  });
   it("accepts every session and stream error vocabulary entry", () => {
-    for (const code of SESSION_ERRORS) {
+    for (const code of SESSION_ERRORS.filter((candidate) => candidate !== "held")) {
       const frame: MuxFrame = { ...session, type: FrameType.SESSION_ERROR, payload: { code, message: "" } };
       expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
     }
@@ -388,5 +408,72 @@ describe("direct carriers", () => {
       ["ws://10.0.0.1:1", "ws://10.0.0.2:1", "ws://10.0.0.3:1", "ws://10.0.0.4:1", "ws://10.0.0.5:1"]]) {
       expect(() => encodeFrame(authOk(direct))).toThrow(MuxProtocolError);
     }
+  });
+});
+
+describe("key proof (device-row-states T71, T72; S2-13 wire)", () => {
+  it("T71: a HELLO that offers key-proof-1 parses", () => {
+    const hello: MuxFrame = { ...session, type: FrameType.HELLO, payload: { protocol: "ovis-mux", versions: [1], features: [KEY_PROOF_FEATURE], required_features: [] } };
+    expect(KEY_PROOF_FEATURE).toBe("key-proof-1");
+    expect(decodeFrame(encodeFrame(hello))).toEqual(hello);
+  });
+  it("T71: the challenge, the proof and the wait round-trip", () => {
+    const frames: MuxFrame[] = [
+      { ...session, type: FrameType.KEY_CHALLENGE, payload: { challenge: "A".repeat(43) } },
+      { ...session, type: FrameType.KEY_PROVE, payload: { signature: "A".repeat(86) } },
+      { ...session, type: FrameType.KEY_PENDING, payload: {} },
+    ];
+    for (const frame of frames) expect(decodeFrame(encodeFrame(frame))).toEqual(frame);
+  });
+  it("T72: the wait carries no fingerprint, whatever the sender put in it", () => {
+    const decoded = decodeFrame(wire(FrameType.KEY_PENDING, JSON.stringify({ fingerprint: "AAAA-BBBB" }), 0, 0));
+    expect(decoded).toEqual({ ...session, type: FrameType.KEY_PENDING, payload: {} });
+  });
+  it("T71: a decoder that does not know a frame type refuses it as a protocol error the session reports", () => {
+    expect(() => decodeFrame(wire(0x43, "{}", 0, 0))).toThrow(MuxProtocolError);
+    try { decodeFrame(wire(0x43, "{}", 0, 0)); } catch (error) { expect((error as MuxProtocolError).code).toBe("protocol_error"); }
+  });
+  it("T71: the proof frames are session frames only", () => {
+    rejects(() => decodeFrame(wire(FrameType.KEY_PENDING, "{}", 0, 1)));
+  });
+  it("T71: a malformed challenge or proof is a protocol error", () => {
+    rejects(() => decodeFrame(wire(FrameType.KEY_CHALLENGE, JSON.stringify({ challenge: "short" }), 0, 0)));
+    rejects(() => decodeFrame(wire(FrameType.KEY_PROVE, JSON.stringify({ signature: "A".repeat(85) }), 0, 0)));
+  });
+});
+
+describe("a join that brings the device's card for the account's signed list", () => {
+  const card = "A".repeat(86);
+  const request = (extra: Record<string, unknown>) => ({ type: FrameType.PAIR_REQUEST, flags: 0, stream_id: 0,
+    payload: { label: "Phone", public_key: spki, commitment: "A".repeat(43), ...extra } }) as MuxFrame;
+  const authOk = (list?: unknown) => ({ type: FrameType.AUTH_OK, flags: 0, stream_id: 0,
+    payload: { session_id: "a".repeat(32), device_id: "b".repeat(16), role: "drive", ...(list === undefined ? {} : { list }) } }) as MuxFrame;
+
+  it("carries the device's encryption key and its card in PAIR_REQUEST, both or neither", () => {
+    const both = request({ list_enc: spki, list_card: card });
+    expect(decodeFrame(encodeFrame(both)).payload).toEqual(both.payload);
+    expect(decodeFrame(encodeFrame(request({}))).payload).not.toHaveProperty("list_card");
+    rejects(() => encodeFrame(request({ list_enc: spki })));
+    rejects(() => encodeFrame(request({ list_card: card })));
+    rejects(() => encodeFrame(request({ list_enc: "not a key", list_card: card })));
+    rejects(() => encodeFrame(request({ list_enc: spki, list_card: "A".repeat(85) })));
+  });
+
+  it("reads a PAIR_REQUEST whose card is out of its form as the frame it was before the extension, and says so", () => {
+    for (const extra of [{ list_enc: spki }, { list_card: card }, { list_enc: "not a key", list_card: card }, { list_enc: spki, list_card: "A".repeat(85) }, { list_enc: 7, list_card: null }]) {
+      const read = decodeFrame(wire(FrameType.PAIR_REQUEST, JSON.stringify({ label: "Phone", public_key: spki, commitment: "A".repeat(43), ...extra }), 0, 0));
+      expect(read.payload).toEqual({ label: "Phone", public_key: spki, commitment: "A".repeat(43), list_malformed: true });
+    }
+    // nobody sends the mark itself
+    rejects(() => encodeFrame(request({ list_malformed: true })));
+  });
+
+  it("names the list and the place of the entry that let the device in, in AUTH_OK", () => {
+    const list = { id: "c".repeat(64), seq: 7, hash: "d".repeat(64) };
+    expect(decodeFrame(encodeFrame(authOk(list))).payload).toEqual(authOk(list).payload);
+    expect(decodeFrame(encodeFrame(authOk())).payload).not.toHaveProperty("list");
+    rejects(() => encodeFrame(authOk({ id: "c".repeat(63), seq: 7, hash: "d".repeat(64) })));
+    rejects(() => encodeFrame(authOk({ id: "c".repeat(64), seq: -1, hash: "d".repeat(64) })));
+    rejects(() => encodeFrame(authOk({ id: "c".repeat(64), seq: 7 })));
   });
 });

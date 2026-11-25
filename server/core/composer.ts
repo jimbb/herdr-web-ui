@@ -2,16 +2,17 @@ import { withoutTrailingBreaks } from "../../shared/launch-rules.ts";
 import { stripVTControlCharacters } from "node:util";
 import type { HerdrPane } from "../../shared/protocol.ts";
 import { displayWidth, secretPrompt } from "../../shared/secret-prompt.ts";
-import { AGENT_INPUT_DRAFT_MESSAGE, CLAUDE_FOLDED_DRAFT_MESSAGE, GROK_SEND_UNCONFIRMED_MESSAGE, NO_AGENT_MESSAGE } from "../../shared/submit-outcome.ts";
+import { AGENT_INPUT_DRAFT_MESSAGE, CLAUDE_FOLDED_DRAFT_MESSAGE, GROK_SEND_UNCONFIRMED_MESSAGE, NO_AGENT_MESSAGE, submitNotTyped } from "../../shared/submit-outcome.ts";
 import { agentPrompt, HerdrError, paneGet, paneProcessInfo, paneRead, paneScrollInfo, paneSendKeys, paneSendText, type ProcessInfo, faultOf, type HerdrFailureView } from "../herdr/client.ts";
 import { mirrorInput } from "../mirror-input.ts";
 import { paneAgentOf, resolveAgent, typingRoots } from "../pane-context.ts";
 import { paneProcessRoots } from "../conversation.ts";
 import type { CommandSend } from "../outcome.ts";
+import { commandDataRoute, sendCommandAsData } from "../command-data-send.ts";
 import { processStartedAt } from "../process-start.ts";
 import { isOmpProcess, ompLoadsIntegration } from "../omp.ts";
 import { processEnviron } from "../omo.ts";
-import { bindCommandProcess, CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeInputBoxContent, claudeInputDraft, foldedPlaceholder, claudeInputEmpty, claudeRestoredDraft, claudeRewindOpen, claudeSendAnywayBox, codexQuestionsCollapsed, heldCandidate, historyEndShowsLive, lastChatSubmitted, hermesInputDraft, noteSubmitted, parseInteractivePrompt, prepareCommandSend, viewportShowsLive } from "../prompt.ts";
+import { bindCommandProcess, CLAUDE_CLEAR_INPUT_KEYS, claudeClearableDraft, claudeInputBoxContent, claudeInputDraft, foldedPlaceholder, claudeInputEmpty, claudeRestoredDraft, claudeRewindOpen, claudeSendAnywayBox, codexQuestionsCollapsed, heldCandidate, historyEndShowsLive, lastChatSubmitted, hermesInputDraft, noteCommandEvidence, noteSubmitted, parseInteractivePrompt, prepareCommandSend, viewportShowsLive } from "../prompt.ts";
 import { agentPickerWaits, registry, SCREEN_READ_AGENTS } from "../dialogs/registry.ts";
 import { codexOwnScreenOpen, CODEX_OWN_SCREEN_MESSAGE } from "../dialogs/codex.ts";
 import { CLAUDE_REWIND_OPEN_MESSAGE } from "../dialogs/claude.ts";
@@ -20,7 +21,7 @@ import { startOpenCodeWatch, openCodeSkillsToType, skillsNotAttached } from "../
 import { herdrSkillAttachIo, type SkillAttachIo, typeWithSkills } from "../opencode-skill-attach.ts";
 import { userHome } from "../user-home.ts";
 import { type GrokBeforeSend, grokEcho, grokQueue, sendGrokQueuedNow } from "./grok-queue.ts";
-import { drawsColour, inputRowState, readsTypedDraft, screenFromAnsi, typedDraft } from "../../shared/input-row.ts";
+import { drawsColour, inputRowState, POWERLINE_WORKING_RULE, readsTypedDraft, screenFromAnsi, typedDraft } from "../../shared/input-row.ts";
 
 const CLAUDE_INPUT_DRAFT_MESSAGE = "Claude Code's input box is not empty (a draft, bash mode, or a box that could not be read); send or clear it in the terminal, then send this message";
 
@@ -70,6 +71,9 @@ export const closeMention = (text: string): string => {
 const TYPED_LINE_MAX = 200;
 
 const PROMPT_REFUSED = new Set(["agent_not_found", "agent_not_ready", "agent_blocked"]);
+/** A reply from herdr refusing the first input, not a missing reply or a refusal after a paste. */
+export const refusedFirstWrite = (error: unknown): boolean => error instanceof HerdrError && error.fromReply
+  && (error.code === "agent_not_found" || submitNotTyped(error.code));
 
 export const modelSwitchText = (agent: string | null, text: string): string =>
   agent === "omp" && text.trim() === "/model" ? "/switch" : text;
@@ -258,12 +262,16 @@ const AGENT_BOX_READS = 3;
  * Whether the viewport's read shows the live screen: its rows are the live screen's last ones. herdr's live read can
  * hold a row more at its top than the viewport (measured with Gemini CLI 0.68.0), never other rows at the bottom.
  */
-function showsLive(colors: string, live: string): boolean {
-  const shown = screenText(colors).split("\n"), current = screenText(live).split("\n");
+export function showsLive(colors: string, live: string): boolean {
+  const shown = spinnerless(screenText(colors)).split("\n"), current = spinnerless(screenText(live)).split("\n");
   return shown.length <= current.length && shown.length >= current.length - 2 && current.slice(current.length - shown.length).join("\n") === shown.join("\n");
 }
 
 const screenText = (text: string): string => stripVTControlCharacters(text).split(/\r?\n/).map((line) => line.trimEnd()).join("\n").trimEnd();
+/** pi-powerline-footer's working border (shared/input-row.ts POWERLINE_WORKING_RULE) is the same screen whichever frame its
+    braille spinner shows. Every other row is compared as drawn, the box's own and plain pi's border included: no box is read under that one */
+const spinnerless = (text: string): string => text.split("\n")
+  .map((row) => POWERLINE_WORKING_RULE.test(row) ? row.replace(/^( ── )[\u2801-\u28ff]/, "$1\u2800") : row).join("\n");
 
 /**
  * herdr reports Codex at rest
@@ -403,9 +411,10 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
    */
   async function submitText(paneId: string, text: string, payload: string, arrivedAt: number, fromTerminal = false, authorize: () => void = () => {},
     clearDraft?: string, confirmation?: { draft: string | null; identity: PendingIdentity; box?: string | null }, sendAnyway = false, agentOnly = false,
-    sendNow = false): Promise<void> {
+    sendNow = false, afterWriteFailure?: () => void): Promise<void> {
     ({ text, payload } = submitFraming(text, payload, fromTerminal));
     let clearedDraft = false;
+    let writeStarted = false;
     let sentText = text;
     let command: ReturnType<typeof prepareCommandSend>;
     let beforeScreen: string | undefined;
@@ -429,9 +438,13 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
     // to watching, while the connection opens. Its refusal sends nothing, and nothing is typed instead.
     let refused: unknown;
     const mayType = (): boolean => {
-      try { authorize(); return true; } catch (error) { refused = error; return false; }
+      try { authorize(); writeStarted = true; return true; } catch (error) { refused = error; return false; }
     };
     const refusal = (error: unknown): never => { throw refused ?? error; };
+    const firstWriteFailure = (error: unknown): never => {
+      if (refusedFirstWrite(error)) writeStarted = false;
+      return refusal(error);
+    };
     /**
      * Send now's one more Enter for a Grok that queued the message (sendGrokQueuedNow), only on a fresh read of the
      * Grok terminal and session the send began in. The queue Enter already landed, so a failure here is submit_changed,
@@ -611,6 +624,29 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
           }, () => {});
         }
         inTime();
+        const route = pane && command ? commandDataRoute(command, text) : null;
+        if (pane && command && route) {
+          const sending = command;
+          const sendingTo = pane;
+          // asked as the request's bytes leave, as herdr asks at its write: a revoked sender or a spent deadline sends nothing
+          const mayWrite = (): boolean => {
+            try { inTime(); } catch (error) { refused = error; return false; }
+            if (!mayType()) return false;
+            bindCommandProcess(paneId, sending, seen, sendingTo);
+            return true;
+          };
+          const viaData = await sendCommandAsData(pane, route, mayWrite, options.openCodeStateDir);
+          if (viaData) {
+            noteSubmitted(paneId, text, recorded(command), viaData.at);
+            // evidence counts only after the send it belongs to (outcome.ts)
+            if (viaData.ran) noteCommandEvidence(paneId, command.id, { kind: "native", at: Math.max(Date.now(), viaData.at + 1) });
+            return;
+          }
+          if (refused !== undefined) throw refused;
+          // nothing reached the agent: what follows types it as before
+          writeStarted = false;
+          inTime();
+        }
         // agent.prompt pastes the whole text, and OpenCode v2 leaves a pasted @skill unattached
         let skills: string[] = [];
         if (pane) ({ sent: command, skills } = await openCodeSkillsToType(pane, command, text, beforeScreen, options.openCodeStateDir));
@@ -668,6 +704,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
           } catch (error) {
             watch?.cancel();
             if (!typed) throw refused ?? error;
+            writeStarted = true;
             if (error instanceof HerdrError && error.code === "submit_changed") throw error;
             throw new HerdrError("submit_partial", "Part of the message was typed into OpenCode's input, but sending was not confirmed. Your chat text stayed here. Check the terminal before sending again.");
           }
@@ -698,7 +735,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
         try {
           inTime();
           const sentAt = Date.now();
-          const delivery = agentPrompt(paneId, closeMention(sent), undefined, mayType);
+          const delivery = agentPrompt(paneId, closeMention(sent), undefined, mayType).catch(firstWriteFailure);
           bindCommandProcess(paneId, command, seen, pane);
           await delivery;
           // herdr's prompt already sent the Enter that queues a working Grok's follow-up. A failure
@@ -725,7 +762,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
         try {
           inTime();
           const sentAt = Date.now();
-          await agentPrompt(paneId, closeMention(sentText), undefined, mayType);
+          await agentPrompt(paneId, closeMention(sentText), undefined, mayType).catch(firstWriteFailure);
           noteSubmitted(paneId, sentText, recorded(command), sentAt);
           return;
         } catch (error) {
@@ -737,7 +774,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
       const shaped = await mirrorInput(closeMention(payload), async () => await terminalAttach() ? null : await paneAgentOf(paneId));
       if (pickerAgent !== undefined) await freeAgentPicker(paneId, pickerAgent);
       inTime();
-      await paneSendText(paneId, shaped, undefined, mayType).catch(refusal);
+      await paneSendText(paneId, shaped, undefined, mayType).catch(firstWriteFailure);
       // fixed wait: a TUI busy with the paste takes an Enter in the same chunk for a newline (SUBMIT_DELAY_MS)
       await Bun.sleep(options.submitDelayMs ?? SUBMIT_DELAY_MS);
       authorize();
@@ -746,6 +783,7 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
       if (!fromTerminal) await confirmGrokQueue(closeMention(sentText));
       noteSubmitted(paneId, sentText, recorded(command), sentAt);
     } catch (error) {
+      if (clearedDraft || writeStarted) afterWriteFailure?.();
       if (clearedDraft) {
         throw new HerdrError("submit_partial", "Claude Code's terminal draft was cleared or may have changed, but sending was not confirmed. Your chat text stayed here. Check the terminal before sending again.");
       }
