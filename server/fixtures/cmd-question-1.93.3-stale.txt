@@ -1,0 +1,13 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+● Colour | ◯ Review
+
+What color do you prefer?
+
+  1. Red ✔
+     Warm, high-energy tone often used for alerts and emphasis.
+  2. Blue
+     Cool, calm tone commonly used for trust and primary actions.
+❯ 3. Type something...
+
+late output

@@ -1,0 +1,16 @@
+────────────────────────────────────────────────────────────────────────────────
+
+✔ Colour | ● Sizes | ◯ Review
+
+Which sizes do you want?
+
+❯ 1. [ ] Small
+        Include small in the selected sizes.
+  2. [ ] Medium
+        Include medium in the selected sizes.
+  3. [ ] Large
+        Include large in the selected sizes.
+  4. [ ] Type something...
+  Submit
+
+Enter to select | Arrow keys to navigate | 1-9 quick select | n notes | c chat | Esc to cancel

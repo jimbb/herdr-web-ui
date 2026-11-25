@@ -1,0 +1,15 @@
+────────────────────────────────────────────────────────────────────────────────
+
+● Colour | ◯ Sizes | ◯ Review
+
+Which colour do you prefer?
+
+❯ 1. Red
+     Pick red as your preferred colour.
+  2. Green
+     Pick green as your preferred colour.
+  3. Blue
+     Pick blue as your preferred colour.
+  4. Type something...
+
+Enter to select | Arrow keys to navigate | 1-9 quick select | n notes | c chat | Esc to cancel

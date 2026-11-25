@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────
+
+✔ Colour | ✔ Sizes | ● Review
+
+1. Which colour do you prefer?
+   Red
+
+2. Which sizes do you want?
+   Medium
+
+❯ 1. Submit
+  2. Cancel
+
+← to go back and edit

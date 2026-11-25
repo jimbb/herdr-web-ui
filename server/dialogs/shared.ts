@@ -117,7 +117,8 @@ type Responder =
   | "fallback-menu"
   | "fallback-gjc-menu"
   | "fallback-keys"
-  | "cmd-question";
+  | "cmd-question"
+  | "cmd-submit";
 
 export type ParsedPrompt = InteractivePrompt & {
   resultText?: string;
