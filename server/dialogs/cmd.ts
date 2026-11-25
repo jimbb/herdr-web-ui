@@ -2,7 +2,29 @@ import type { InteractivePromptAnswer } from "../../shared/protocol.ts";
 import type { DialogReader } from "./registry.ts";
 import { ANSI_RE, KEY, type CardWords, type ParsedPrompt, cleanLine, findLastIndex, finishPrompt, isDivider, joinWrapped, keySteps, navigationKeys, own, type PromptDraft } from "./shared.ts";
 
-/** Command Code's permission footer, retained for the terminal-owned permission reader. */
+/**
+ * Command Code's permission prompt, as its TUI draws it (ACP `session/request_permission`):
+ *
+ *   Create File
+ *
+ *   Do you want to create hello.txt?
+ *
+ *   ❯ 1. Yes
+ *     2. Yes, allow all edits this session [shift+tab]
+ *     3. No, tell Command Code what to do differently
+ *
+ *   ↑/↓ navigate · enter select · ctrl+e explain · Run cmd --yolo to
+ *   bypass all permissions (Docs ↗)
+ *
+ * The rows are numbered and the cursor is marked with `❯`; the footer names the keys. Only the
+ * rows directly above the footer are the dialog's: a numbered list in the conversation above it
+ * (or in the agent's own output) is not an option, and a command's own text is not one either.
+ */
+/**
+ * command-code@1.88.0's PermissionFooter (dist/cli.mjs). Ink wraps its Text at word or
+ * character boundaries. Match the entire footer, not a bag of words that also accepts later output.
+ * MainView hides its normal input/status chrome while permissionPanel is present.
+ */
 export function cmdFooterStart(lines: string[]): number {
   const at = findLastIndex(lines, (line) => /^\s*↑/.test(line));
   if (at < 0) return -1;
@@ -22,7 +44,7 @@ export function cmdQuestionFooterStart(lines: string[]): number {
 export function cmdQuestionPanelActive(lines: string[]): boolean {
   if (cmdQuestionFooterStart(lines) >= 0) return true;
   const last = findLastIndex(lines, (line) => cleanLine(line) !== "");
-  return last >= 0 && /^\s*[❯›>]\s*\d+\.\s+Type something\.{3}$/i.test(lines[last]!);
+  return last >= 0 && /^\s*[❯›>]\s*\d+\.\s+(?:\[[ xX✔]\]\s*)?Type something\.{3}$/i.test(lines[last]!);
 }
 
 const CMD_TAB_RE = /^[✔●◯]\s+(.+?)(?:\s+\|\s+[✔●◯]\s+.+)+$/;
@@ -291,6 +313,9 @@ function parseCmdPermission(screen: string): ParsedPrompt | null {
 export const readers: readonly DialogReader[] = [
   {
     id: "cmd-question", agents: ["cmd"], priority: 10,
+    // the cursor is read off the screen, so it is re-read before the Enter: a cursor the user
+    // moved in the terminal since the card was drawn would otherwise be answered from a
+    // position the chat never saw
     reread: "before-commit", list: "none",
     parse: (screen) => {
       const parsed = parseCmdQuestion(screen) ?? parseCmdPermission(screen);
