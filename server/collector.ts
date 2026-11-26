@@ -59,8 +59,11 @@ const SNAPSHOT_RETRY_MS = 5_000;
 const REPLAY_SETTLE_MS = 150;
 
 export interface StatusCollectorHandlers {
-  /** `replay.askedAt`: when the snapshot the replayed status was read from was asked for (`Date.now()`) */
-  onStatus: (paneId: string, status: AgentStatus, agent: string | null, replay?: { before: AgentStatus; agent: string | null; askedAt?: number }) => void;
+  /**
+   * `replay.askedAt`: when the snapshot the replayed status was read from was asked for (`Date.now()`).
+   * `error`: the program's own error message, when its status is herdr-core's `error` (absent from snapshots and herdr).
+   */
+  onStatus: (paneId: string, status: AgentStatus, agent: string | null, replay?: { before: AgentStatus; agent: string | null; askedAt?: number }, error?: string) => void;
   /**
    * `newer`: panes with an event or an exit since the snapshot was asked for, whose reading here is older than that.
    * `askedAt`: when it was asked for (`Date.now()`).
@@ -120,11 +123,11 @@ export interface StatusCollector {
 /**
  * `displayAgent` is the line a plugin reports for the agent (`report-metadata --display-agent`), absent from the frame when none is.
  */
-export function parseStatusFrame(frame: EventFrame): { paneId: string; status: AgentStatus; agent: string | null; displayAgent: string | null } | null {
+export function parseStatusFrame(frame: EventFrame): { paneId: string; status: AgentStatus; agent: string | null; displayAgent: string | null; error?: string } | null {
   if (frame.event !== "pane.agent_status_changed") return null;
-  const data = frame.data as { pane_id?: unknown; agent_status?: unknown; agent?: unknown; display_agent?: unknown } | undefined;
+  const data = frame.data as { pane_id?: unknown; agent_status?: unknown; agent?: unknown; display_agent?: unknown; agent_error?: unknown } | undefined;
   if (typeof data?.pane_id !== "string" || typeof data.agent_status !== "string") return null;
-  return { paneId: data.pane_id, status: data.agent_status as AgentStatus, agent: typeof data.agent === "string" ? data.agent : null, displayAgent: typeof data.display_agent === "string" ? data.display_agent : null };
+  return { paneId: data.pane_id, status: data.agent_status as AgentStatus, agent: typeof data.agent === "string" ? data.agent : null, displayAgent: typeof data.display_agent === "string" ? data.display_agent : null, ...(typeof data.agent_error === "string" ? { error: data.agent_error } : {}) };
 }
 
 export type StructureEvent =
@@ -325,7 +328,7 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
           lastEventOf.set(parsed.paneId, ++statusEvents);
           heard.set(parsed.paneId, { status: parsed.status, agent: parsed.agent });
           born.delete(parsed.paneId);
-          handlers.onStatus(parsed.paneId, parsed.status, parsed.agent);
+          handlers.onStatus(parsed.paneId, parsed.status, parsed.agent, undefined, parsed.error);
           const shown = displayAgents.get(parsed.paneId);
           displayAgents.set(parsed.paneId, parsed.displayAgent);
           if (shown !== undefined && shown !== parsed.displayAgent) scheduleStructureChange();

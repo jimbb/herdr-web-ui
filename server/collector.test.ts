@@ -27,6 +27,21 @@ describe("parseStatusFrame", () => {
     expect(parseStatusFrame(frame)).toEqual({ paneId: "w2X:p1", status: "idle", agent: "claude", displayAgent: "needs a login" });
   });
 
+  it("carries the error a herdr-core agent reported, which its shown status cannot say", () => {
+    // live (hc 0.1.21): an agy turn stopped by the agent executor; the pane's shown status is `unknown`
+    const frame: EventFrame = {
+      event: "pane.agent_status_changed",
+      data: { agent: "agy", agent_error: "agent executor error: expected tool step at index 1059, got CORTEX_STEP_TYPE_ERROR_MESSAGE", agent_status: "unknown", pane_id: "t3v" },
+    };
+    expect(parseStatusFrame(frame)).toEqual({
+      paneId: "t3v", status: "unknown", agent: "agy", displayAgent: null,
+      error: "agent executor error: expected tool step at index 1059, got CORTEX_STEP_TYPE_ERROR_MESSAGE",
+    });
+    // a program that says only that it failed still says it failed
+    expect(parseStatusFrame({ event: "pane.agent_status_changed", data: { agent: "agy", agent_error: "", agent_status: "unknown", pane_id: "t3v" } }))
+      .toEqual({ paneId: "t3v", status: "unknown", agent: "agy", displayAgent: null, error: "" });
+  });
+
   it("rejects frames that are not status events", () => {
     expect(parseStatusFrame({ event: "pane_exited", data: { type: "pane_exited", pane_id: "w1:p1" } })).toBeNull();
   });

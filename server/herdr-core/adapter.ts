@@ -1289,7 +1289,11 @@ async function subscribe(hc: HcConnection, socket: Socket<ConnectionState>, requ
     if (structure) emit(event, { type, ...("terminal" in change && change.terminal ? { pane_id: change.terminal } : {}) });
   };
   const tell = (change: Extract<CoreChange, { type: "status" }>) => {
-    if (!acp?.forPane(change.terminal) && statusPanes.has(change.terminal)) emit(STATUS_EVENT, { pane_id: change.terminal, agent_status: change.shown, agent: change.agent });
+    if (acp?.forPane(change.terminal) || !statusPanes.has(change.terminal)) return;
+    // the program's own error, which `shown` cannot carry: herdr's words have no state for it, and the
+    // server alerts on it (server/core/status.ts) rather than showing it as a status
+    const error = change.status?.state === "error" ? change.status.msg ?? "" : undefined;
+    emit(STATUS_EVENT, { pane_id: change.terminal, agent_status: change.shown, agent: change.agent, ...(error === undefined ? {} : { agent_error: error }) });
   };
   const deliver = (changes: readonly CoreChange[]) => {
     for (const change of changes) {

@@ -423,6 +423,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   /** herdr calls a Codex at rest DONE, idle or `unknown` (codex/unknown at rest, server/completion.ts) */
   const atRest = (status: AgentStatus): boolean => status === "done" || status === "idle" || status === "unknown";
   const claudeFailed = new Set<string>();
+  /** panes whose program reported its turn stopped on an error (herdr-core's `error` state), until the next one starts */
+  const reportedFailed = new Set<string>();
+  /** panes this server saw work since its last rest: an error found on a first sighting is not news */
+  const errorArmed = new Set<string>();
   type ClaudeMark = { path: string; id: string; from: number; read: number } | { path: null; since: number; rested: number | null; looked: string | null };
   const claudeLooked = new Map<string, ClaudeMark>();
   /** how long before the working event that a turn began the transcript it writes may be: the prompt is written first */
@@ -751,7 +755,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
 
   const bridgeAgents = machines ? null : bridgeAgentNews(() => broadcastAll({ type: "session-changed" }));
 
-  function onStatus(paneId: string, read: AgentStatus, agent: string | null, replay?: { before: AgentStatus; agent: string | null; askedAt?: number }): void {
+  function onStatus(paneId: string, read: AgentStatus, agent: string | null, replay?: { before: AgentStatus; agent: string | null; askedAt?: number }, error?: string): void {
     if (agent !== "opencode" && (!replay || agent || read !== "unknown")) {
       options.openCodeState?.forget(paneId);
       if (!replay) releaseOpenCodePane(paneId);
@@ -801,7 +805,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       waits.forget(paneId);
       return;
     }
-    reportStatus(paneId, raw, agent, replay?.askedAt);
+    reportStatus(paneId, raw, agent, replay?.askedAt, error);
   }
 
   /**
@@ -862,10 +866,11 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   });
 
   /** `askedAt`: a status replayed from a snapshot asked for then, which the queue takes as that snapshot (`pending.baseline`) */
-  function reportStatus(paneId: string, raw: AgentStatus, agent: string | null, askedAt?: number): void {
+  function reportStatus(paneId: string, raw: AgentStatus, agent: string | null, askedAt?: number, error?: string): void {
     // back at work, the agent has had its answer, maybe from a terminal: the same prompt on
     // its screen after this is another asking, which an answer to the old card must not take.
     if (raw === "working") promptWaitEnded(paneId);
+    if (raw === "working") { reportedFailed.delete(paneId); errorArmed.add(paneId); }
     options.telemetry?.paneStatus(paneId, raw);
     if (raw === "working" || agent !== "codex") codexWorking(paneId, raw === "working" && agent === "codex");
     if (raw === "working" || agent !== "claude") claudeWorking(paneId, raw === "working" && agent === "claude");
@@ -874,7 +879,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     const claudeFailedNow = claudeEnd === "failed" && !claudeFailed.has(paneId);
     if (claudeFailedNow) claudeFailed.add(paneId);
     const claudeAnswered = claudeEnd === "answered" && claudeFailed.delete(paneId);
-    const failedRest = (codexFailed.has(paneId) || (agent === "claude" && claudeFailed.has(paneId))) && raw !== "blocked";
+    // an agent's own error is a rest, not a finish: the turn it stopped is failed, whatever the pane reports next
+    const reportedFailedNow = error !== undefined && !reportedFailed.has(paneId);
+    if (reportedFailedNow) reportedFailed.add(paneId);
+    const failedRest = (codexFailed.has(paneId) || (agent === "claude" && claudeFailed.has(paneId)) || reportedFailed.has(paneId)) && raw !== "blocked";
     const status = completions.observe(paneId, failedRest || claudeAnswered ? "idle" : raw, omo.runs(paneId) ? "omo" : gjc.runs(paneId) ? "gjc" : agent, failedRest ? "failed" : claudeAnswered ? "answered" : undefined);
     if (askedAt === undefined) pending.status(paneId, queueStatus(paneId, status)); else pending.baseline(paneId, queueStatus(paneId, status), askedAt);
     drainPending(paneId);
@@ -898,6 +906,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
         .then(() => { clearTimeout(timer); if (completions.current(paneId) === status) tell(); });
     } else tell();
     if (claudeFailedNow && status === "idle") claudeFailedAlert(paneId);
+    else if (reportedFailedNow && errorArmed.has(paneId) && status === "idle") push.onFailed(paneId).catch(logPushError);
     if (claudeEnd === "answered") claudeLooked.delete(paneId);
     if (tracker === opencodeAgents && opencodeAgents.sessionOf(paneId)?.live !== true) {
       const begun = opencodeAgents.beginRead();
@@ -1074,6 +1083,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     }
     taskAgents.forget(paneId);
     completions.forget(paneId);
+    reportedFailed.delete(paneId);
+    errorArmed.delete(paneId);
     heard.delete(paneId);
     restedOnTranscript.delete(paneId);
     stoppedOnHook.delete(paneId);
@@ -1100,7 +1111,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     },
     onBaseline: (panes, newer = new Set(), askedAt = Date.now(), created = new Map()) => {
       const projected = panes.map((pane) => ({ ...pane, agent_status: restingClaude(pane.pane_id, pane.agent, pane.agent_status) }));
-      for (const pane of projected) if (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent)) waits.seed(pane.pane_id, pane.agent_status);
+      for (const pane of projected) {
+        if (pane.agent_status === "working") errorArmed.add(pane.pane_id);
+        if (pane.agent === "claude" || pane.agent === "opencode" || isTaskAgent(pane.agent)) waits.seed(pane.pane_id, pane.agent_status);
+      }
       syncParents(projected);
       const alerted = projected.map((pane) => ({ ...pane, agent_status: cards.status(pane.pane_id, alertStatus(pane.agent_status, holds(pane.pane_id))) }));
       // web push alone hears a new pane's first reading as a change from its creation; everything else takes the
@@ -1178,6 +1192,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (codexFailed.delete(from)) codexFailed.add(to);
       if (claudeLooked.has(from)) { claudeLooked.set(to, claudeLooked.get(from)!); claudeLooked.delete(from); }
       if (claudeFailed.delete(from)) claudeFailed.add(to);
+      if (reportedFailed.delete(from)) reportedFailed.add(to);
+      if (errorArmed.delete(from)) errorArmed.add(to);
       if (stoppedOnHook.has(from)) { stoppedOnHook.set(to, stoppedOnHook.get(from)!); stoppedOnHook.delete(from); }
       if (hookPrompts.has(from)) { hookPrompts.set(to, hookPrompts.get(from)!); hookPrompts.delete(from); }
       if (droppedPrompts.has(from)) { droppedPrompts.set(to, droppedPrompts.get(from)!); droppedPrompts.delete(from); }
